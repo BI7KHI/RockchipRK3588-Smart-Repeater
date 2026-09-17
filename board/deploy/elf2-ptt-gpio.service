@@ -1,0 +1,13 @@
+[Unit]
+Description=ELF2 PTT GPIO3_A1 preparation
+Before=relay-web.service
+
+[Service]
+Type=oneshot
+Environment=RELAY_PTT_GPIO=97
+ExecStart=/usr/local/sbin/elf2-ptt-gpio.sh
+ExecStartPost=/bin/sh -c 'udevadm settle; for f in direction value active_low edge; do chown elf:elf /sys/class/gpio/gpio97/$f 2>/dev/null || true; chmod ug+rw /sys/class/gpio/gpio97/$f 2>/dev/null || true; done'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

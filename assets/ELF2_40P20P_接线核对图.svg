@@ -1,0 +1,434 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1900" height="1650" viewBox="0 0 1900 1650">
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="#444"/>
+  </marker>
+</defs>
+<style>
+  .bg{fill:#ffffff}
+  .title{font-family:"Microsoft YaHei","Arial",sans-serif;font-size:28px;font-weight:bold;fill:#111;text-anchor:middle}
+  .sub{font-family:"Microsoft YaHei","Arial",sans-serif;font-size:15px;fill:#333;text-anchor:middle}
+  .th{font-family:"Microsoft YaHei","Arial",sans-serif;font-size:14px;font-weight:bold;fill:#111}
+  .td{font-family:"Microsoft YaHei","Arial",sans-serif;font-size:13px;fill:#111}
+  .small{font-family:"Microsoft YaHei","Arial",sans-serif;font-size:11px;fill:#444}
+  .box{fill:#ffffff;stroke:#333;stroke-width:1.6}
+  .panel{fill:#fafafa;stroke:#666;stroke-width:1.4}
+  .line{stroke:#444;stroke-width:1.5;fill:none;marker-end:url(#arrow)}
+  .thin{stroke:#777;stroke-width:1;fill:none}
+</style>
+<rect x="0" y="0" width="1900" height="1650" class="bg"/>
+<text x="950" y="42" class="title">ELF2 RK3588 40P / 20P 全引脚核对与中继硬件接线图</text>
+<text x="950" y="72" class="sub">40Pin 电平 3.3V；20Pin SARADC 满量程 1.8V；P26 网络名取 3588（中间）网络；绿色=本项目使用，黄色=电源，灰色=GND，蓝色=预留复用</text>
+<rect x="40" y="110" width="430" height="636" class="panel"/>
+<rect x="40" y="110" width="430" height="36" fill="#333"/>
+<text x="52" y="134" class="th" fill="#fff">P26 40Pin  1-20</text>
+<text x="52" y="168" class="th">脚</text>
+<text x="90" y="168" class="th">丝印</text>
+<text x="175" y="168" class="th">RK3588 网络</text>
+<text x="305" y="168" class="th">本项目分配</text>
+<rect x="40" y="146" width="430" height="30" fill="#d5e8d4" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="166" class="td">1</text>
+<text x="90" y="166" class="td">3.3V</text>
+<text x="175" y="166" class="td" font-weight="bold">VCC_3V3</text>
+<text x="305" y="166" class="small">RS485 模块 3.3V</text>
+<rect x="40" y="176" width="430" height="30" fill="#fff2cc" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="196" class="td">2</text>
+<text x="90" y="196" class="td">5V</text>
+<text x="175" y="196" class="td" font-weight="bold">VCC_5V</text>
+<text x="305" y="196" class="small">预留</text>
+<rect x="40" y="206" width="430" height="30" fill="#e6f0ff" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="226" class="td">3</text>
+<text x="90" y="226" class="td">SDA.1</text>
+<text x="175" y="226" class="td" font-weight="bold">I2C4_SDA_3V3</text>
+<text x="305" y="226" class="small">预留</text>
+<rect x="40" y="236" width="430" height="30" fill="#fff2cc" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="256" class="td">4</text>
+<text x="90" y="256" class="td">5V</text>
+<text x="175" y="256" class="td" font-weight="bold">VCC_5V</text>
+<text x="305" y="256" class="small">预留</text>
+<rect x="40" y="266" width="430" height="30" fill="#e6f0ff" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="286" class="td">5</text>
+<text x="90" y="286" class="td">SCL.1</text>
+<text x="175" y="286" class="td" font-weight="bold">I2C4_SCL_3V3</text>
+<text x="305" y="286" class="small">预留</text>
+<rect x="40" y="296" width="430" height="30" fill="#d5e8d4" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="316" class="td">6</text>
+<text x="90" y="316" class="td">GND</text>
+<text x="175" y="316" class="td" font-weight="bold">GND</text>
+<text x="305" y="316" class="small">RS485 地</text>
+<rect x="40" y="326" width="430" height="30" fill="#ffffff" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="346" class="td">7</text>
+<text x="90" y="346" class="td">GPIO.7</text>
+<text x="175" y="346" class="td" font-weight="bold">GPIO3_B3</text>
+<text x="305" y="346" class="small">预留</text>
+<rect x="40" y="356" width="430" height="30" fill="#d5e8d4" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="376" class="td">8</text>
+<text x="90" y="376" class="td">TXD</text>
+<text x="175" y="376" class="td" font-weight="bold">UART9_TX</text>
+<text x="305" y="376" class="small">RS485 DI</text>
+<rect x="40" y="386" width="430" height="30" fill="#d5e8d4" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="406" class="td">9</text>
+<text x="90" y="406" class="td">GND</text>
+<text x="175" y="406" class="td" font-weight="bold">GND</text>
+<text x="305" y="406" class="small">RS485 地</text>
+<rect x="40" y="416" width="430" height="30" fill="#d5e8d4" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="436" class="td">10</text>
+<text x="90" y="436" class="td">RXD</text>
+<text x="175" y="436" class="td" font-weight="bold">UART9_RX</text>
+<text x="305" y="436" class="small">RS485 RO</text>
+<rect x="40" y="446" width="430" height="30" fill="#ffffff" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="466" class="td">11</text>
+<text x="90" y="466" class="td">GPIO.0</text>
+<text x="175" y="466" class="td" font-weight="bold">GPIO3_B5</text>
+<text x="305" y="466" class="small">预留</text>
+<rect x="40" y="476" width="430" height="30" fill="#ffffff" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="496" class="td">12</text>
+<text x="90" y="496" class="td">GPIO.1</text>
+<text x="175" y="496" class="td" font-weight="bold">GPIO3_B0</text>
+<text x="305" y="496" class="small">预留</text>
+<rect x="40" y="506" width="430" height="30" fill="#ffffff" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="526" class="td">13</text>
+<text x="90" y="526" class="td">GPIO.2</text>
+<text x="175" y="526" class="td" font-weight="bold">GPIO3_B4</text>
+<text x="305" y="526" class="small">预留</text>
+<rect x="40" y="536" width="430" height="30" fill="#f2f2f2" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="556" class="td">14</text>
+<text x="90" y="556" class="td">GND</text>
+<text x="175" y="556" class="td" font-weight="bold">GND</text>
+<text x="305" y="556" class="small">预留</text>
+<rect x="40" y="566" width="430" height="30" fill="#ffffff" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="586" class="td">15</text>
+<text x="90" y="586" class="td">GPIO.3</text>
+<text x="175" y="586" class="td" font-weight="bold">GPIO3_A2</text>
+<text x="305" y="586" class="small">预留</text>
+<rect x="40" y="596" width="430" height="30" fill="#ffffff" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="616" class="td">16</text>
+<text x="90" y="616" class="td">GPIO.4</text>
+<text x="175" y="616" class="td" font-weight="bold">GPIO3_C3</text>
+<text x="305" y="616" class="small">预留</text>
+<rect x="40" y="626" width="430" height="30" fill="#fff2cc" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="646" class="td">17</text>
+<text x="90" y="646" class="td">3.3V</text>
+<text x="175" y="646" class="td" font-weight="bold">VCC_3V3</text>
+<text x="305" y="646" class="small">预留</text>
+<rect x="40" y="656" width="430" height="30" fill="#ffffff" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="676" class="td">18</text>
+<text x="90" y="676" class="td">GPIO.5</text>
+<text x="175" y="676" class="td" font-weight="bold">GPIO3_D3</text>
+<text x="305" y="676" class="small">预留</text>
+<rect x="40" y="686" width="430" height="30" fill="#e6f0ff" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="706" class="td">19</text>
+<text x="90" y="706" class="td">MOSI</text>
+<text x="175" y="706" class="td" font-weight="bold">SPI4_MOSI_3V3</text>
+<text x="305" y="706" class="small">预留</text>
+<rect x="40" y="716" width="430" height="30" fill="#f2f2f2" stroke="#bbb" stroke-width="0.7"/>
+<text x="52" y="736" class="td">20</text>
+<text x="90" y="736" class="td">GND</text>
+<text x="175" y="736" class="td" font-weight="bold">GND</text>
+<text x="305" y="736" class="small">预留</text>
+<rect x="480" y="110" width="430" height="636" class="panel"/>
+<rect x="480" y="110" width="430" height="36" fill="#333"/>
+<text x="492" y="134" class="th" fill="#fff">P26 40Pin  21-40</text>
+<text x="492" y="168" class="th">脚</text>
+<text x="530" y="168" class="th">丝印</text>
+<text x="615" y="168" class="th">RK3588 网络</text>
+<text x="745" y="168" class="th">本项目分配</text>
+<rect x="480" y="146" width="430" height="30" fill="#e6f0ff" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="166" class="td">21</text>
+<text x="530" y="166" class="td">MISO</text>
+<text x="615" y="166" class="td" font-weight="bold">SPI4_MISO_3V3</text>
+<text x="745" y="166" class="small">预留</text>
+<rect x="480" y="176" width="430" height="30" fill="#ffffff" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="196" class="td">22</text>
+<text x="530" y="196" class="td">GPIO.6</text>
+<text x="615" y="196" class="td" font-weight="bold">GPIO3_C2</text>
+<text x="745" y="196" class="small">预留</text>
+<rect x="480" y="206" width="430" height="30" fill="#e6f0ff" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="226" class="td">23</text>
+<text x="530" y="226" class="td">SCLK</text>
+<text x="615" y="226" class="td" font-weight="bold">SPI4_CLK_3V3</text>
+<text x="745" y="226" class="small">预留</text>
+<rect x="480" y="236" width="430" height="30" fill="#e6f0ff" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="256" class="td">24</text>
+<text x="530" y="256" class="td">CE0</text>
+<text x="615" y="256" class="td" font-weight="bold">SPI4_CS_3V3</text>
+<text x="745" y="256" class="small">预留</text>
+<rect x="480" y="266" width="430" height="30" fill="#f2f2f2" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="286" class="td">25</text>
+<text x="530" y="286" class="td">GND</text>
+<text x="615" y="286" class="td" font-weight="bold">GND</text>
+<text x="745" y="286" class="small">预留</text>
+<rect x="480" y="296" width="430" height="30" fill="#d5e8d4" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="316" class="td">26</text>
+<text x="530" y="316" class="td">CE1</text>
+<text x="615" y="316" class="td" font-weight="bold">GPIO3_D2</text>
+<text x="745" y="316" class="small">可选 RS485_DE</text>
+<rect x="480" y="326" width="430" height="30" fill="#e6f0ff" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="346" class="td">27</text>
+<text x="530" y="346" class="td">SDA.0</text>
+<text x="615" y="346" class="td" font-weight="bold">I2C7_SDA_3V3</text>
+<text x="745" y="346" class="small">预留</text>
+<rect x="480" y="356" width="430" height="30" fill="#e6f0ff" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="376" class="td">28</text>
+<text x="530" y="376" class="td">SCL.0</text>
+<text x="615" y="376" class="td" font-weight="bold">I2C7_SCL_3V3</text>
+<text x="745" y="376" class="small">预留</text>
+<rect x="480" y="386" width="430" height="30" fill="#d5e8d4" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="406" class="td">29</text>
+<text x="530" y="406" class="td">GPIO.21</text>
+<text x="615" y="406" class="td" font-weight="bold">GPIO3_B6</text>
+<text x="745" y="406" class="small">PC0 频率选择</text>
+<rect x="480" y="416" width="430" height="30" fill="#f2f2f2" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="436" class="td">30</text>
+<text x="530" y="436" class="td">GND</text>
+<text x="615" y="436" class="td" font-weight="bold">GND</text>
+<text x="745" y="436" class="small">PC0 参考地</text>
+<rect x="480" y="446" width="430" height="30" fill="#d5e8d4" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="466" class="td">31</text>
+<text x="530" y="466" class="td">GPIO.22</text>
+<text x="615" y="466" class="td" font-weight="bold">GPIO3_A6</text>
+<text x="745" y="466" class="small">PC1 频率选择</text>
+<rect x="480" y="476" width="430" height="30" fill="#d5e8d4" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="496" class="td">32</text>
+<text x="530" y="496" class="td">GPIO.26</text>
+<text x="615" y="496" class="td" font-weight="bold">GPIO3_A1</text>
+<text x="745" y="496" class="small">PTT 发射使能</text>
+<rect x="480" y="506" width="430" height="30" fill="#d5e8d4" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="526" class="td">33</text>
+<text x="530" y="526" class="td">GPIO.23</text>
+<text x="615" y="526" class="td" font-weight="bold">GPIO3_A4</text>
+<text x="745" y="526" class="small">PC2 频率选择</text>
+<rect x="480" y="536" width="430" height="30" fill="#d5e8d4" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="556" class="td">34</text>
+<text x="530" y="556" class="td">GND</text>
+<text x="615" y="556" class="td" font-weight="bold">GND</text>
+<text x="745" y="556" class="small">PTT 参考地</text>
+<rect x="480" y="566" width="430" height="30" fill="#d5e8d4" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="586" class="td">35</text>
+<text x="530" y="586" class="td">GPIO.24</text>
+<text x="615" y="586" class="td" font-weight="bold">GPIO3_A0</text>
+<text x="745" y="586" class="small">PC3 频率选择</text>
+<rect x="480" y="596" width="430" height="30" fill="#d5e8d4" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="616" class="td">36</text>
+<text x="530" y="616" class="td">GPIO.27</text>
+<text x="615" y="616" class="td" font-weight="bold">GPIO3_A5</text>
+<text x="745" y="616" class="small">BUSY 接收状态</text>
+<rect x="480" y="626" width="430" height="30" fill="#ffffff" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="646" class="td">37</text>
+<text x="530" y="646" class="td">GPIO.25</text>
+<text x="615" y="646" class="td" font-weight="bold">GPIO3_A3</text>
+<text x="745" y="646" class="small">预留</text>
+<rect x="480" y="656" width="430" height="30" fill="#ffffff" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="676" class="td">38</text>
+<text x="530" y="676" class="td">GPIO.28</text>
+<text x="615" y="676" class="td" font-weight="bold">GPIO3_B1</text>
+<text x="745" y="676" class="small">预留</text>
+<rect x="480" y="686" width="430" height="30" fill="#d5e8d4" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="706" class="td">39</text>
+<text x="530" y="706" class="td">GND</text>
+<text x="615" y="706" class="td" font-weight="bold">GND</text>
+<text x="745" y="706" class="small">BUSY 参考地</text>
+<rect x="480" y="716" width="430" height="30" fill="#ffffff" stroke="#bbb" stroke-width="0.7"/>
+<text x="492" y="736" class="td">40</text>
+<text x="530" y="736" class="td">GPIO.29</text>
+<text x="615" y="736" class="td" font-weight="bold">GPIO3_A7</text>
+<text x="745" y="736" class="small">预留</text>
+<rect x="940" y="110" width="430" height="336" class="panel"/>
+<rect x="940" y="110" width="430" height="36" fill="#333"/>
+<text x="952" y="134" class="th" fill="#fff">P28 20Pin  1-10</text>
+<text x="952" y="168" class="th">脚</text>
+<text x="998" y="168" class="th">RK3588 网络</text>
+<text x="1150" y="168" class="th">类型</text>
+<text x="1220" y="168" class="th">本项目分配</text>
+<rect x="940" y="146" width="430" height="30" fill="#fff2cc" stroke="#bbb" stroke-width="0.7"/>
+<text x="952" y="166" class="td">1</text>
+<text x="998" y="166" class="td" font-weight="bold">VCC_3V3</text>
+<text x="1150" y="166" class="td">电源</text>
+<text x="1220" y="166" class="small">预留</text>
+<rect x="940" y="176" width="430" height="30" fill="#fff2cc" stroke="#bbb" stroke-width="0.7"/>
+<text x="952" y="196" class="td">2</text>
+<text x="998" y="196" class="td" font-weight="bold">VCC_5V</text>
+<text x="1150" y="196" class="td">电源</text>
+<text x="1220" y="196" class="small">预留</text>
+<rect x="940" y="206" width="430" height="30" fill="#f2f2f2" stroke="#bbb" stroke-width="0.7"/>
+<text x="952" y="226" class="td">3</text>
+<text x="998" y="226" class="td" font-weight="bold">GND</text>
+<text x="1150" y="226" class="td">地</text>
+<text x="1220" y="226" class="small">ADC 模拟地</text>
+<rect x="940" y="236" width="430" height="30" fill="#f2f2f2" stroke="#bbb" stroke-width="0.7"/>
+<text x="952" y="256" class="td">4</text>
+<text x="998" y="256" class="td" font-weight="bold">GND</text>
+<text x="1150" y="256" class="td">地</text>
+<text x="1220" y="256" class="small">ADC 模拟地</text>
+<rect x="940" y="266" width="430" height="30" fill="#d5e8d4" stroke="#bbb" stroke-width="0.7"/>
+<text x="952" y="286" class="td">5</text>
+<text x="998" y="286" class="td" font-weight="bold">SARADC_VIN6</text>
+<text x="1150" y="286" class="td">ADC</text>
+<text x="1220" y="286" class="small">光伏电压采集</text>
+<rect x="940" y="296" width="430" height="30" fill="#d5e8d4" stroke="#bbb" stroke-width="0.7"/>
+<text x="952" y="316" class="td">6</text>
+<text x="998" y="316" class="td" font-weight="bold">SARADC_VIN4</text>
+<text x="1150" y="316" class="td">ADC</text>
+<text x="1220" y="316" class="small">电池电压采集</text>
+<rect x="940" y="326" width="430" height="30" fill="#e6f0ff" stroke="#bbb" stroke-width="0.7"/>
+<text x="952" y="346" class="td">7</text>
+<text x="998" y="346" class="td" font-weight="bold">SARADC_VIN7</text>
+<text x="1150" y="346" class="td">ADC</text>
+<text x="1220" y="346" class="small">预留</text>
+<rect x="940" y="356" width="430" height="30" fill="#e6f0ff" stroke="#bbb" stroke-width="0.7"/>
+<text x="952" y="376" class="td">8</text>
+<text x="998" y="376" class="td" font-weight="bold">SARADC_VIN5</text>
+<text x="1150" y="376" class="td">ADC</text>
+<text x="1220" y="376" class="small">预留</text>
+<rect x="940" y="386" width="430" height="30" fill="#f2f2f2" stroke="#bbb" stroke-width="0.7"/>
+<text x="952" y="406" class="td">9</text>
+<text x="998" y="406" class="td" font-weight="bold">GND</text>
+<text x="1150" y="406" class="td">地</text>
+<text x="1220" y="406" class="small">预留</text>
+<rect x="940" y="416" width="430" height="30" fill="#f2f2f2" stroke="#bbb" stroke-width="0.7"/>
+<text x="952" y="436" class="td">10</text>
+<text x="998" y="436" class="td" font-weight="bold">GND</text>
+<text x="1150" y="436" class="td">地</text>
+<text x="1220" y="436" class="small">预留</text>
+<rect x="1380" y="110" width="430" height="336" class="panel"/>
+<rect x="1380" y="110" width="430" height="36" fill="#333"/>
+<text x="1392" y="134" class="th" fill="#fff">P28 20Pin  11-20</text>
+<text x="1392" y="168" class="th">脚</text>
+<text x="1438" y="168" class="th">RK3588 网络</text>
+<text x="1590" y="168" class="th">类型</text>
+<text x="1660" y="168" class="th">本项目分配</text>
+<rect x="1380" y="146" width="430" height="30" fill="#ffffff" stroke="#bbb" stroke-width="0.7"/>
+<text x="1392" y="166" class="td">11</text>
+<text x="1438" y="166" class="td" font-weight="bold">GPIO4_B3</text>
+<text x="1590" y="166" class="td">GPIO</text>
+<text x="1660" y="166" class="small">预留</text>
+<rect x="1380" y="176" width="430" height="30" fill="#ffffff" stroke="#bbb" stroke-width="0.7"/>
+<text x="1392" y="196" class="td">12</text>
+<text x="1438" y="196" class="td" font-weight="bold">GPIO4_B2</text>
+<text x="1590" y="196" class="td">GPIO</text>
+<text x="1660" y="196" class="small">预留</text>
+<rect x="1380" y="206" width="430" height="30" fill="#f2f2f2" stroke="#bbb" stroke-width="0.7"/>
+<text x="1392" y="226" class="td">13</text>
+<text x="1438" y="226" class="td" font-weight="bold">GND</text>
+<text x="1590" y="226" class="td">地</text>
+<text x="1660" y="226" class="small">预留</text>
+<rect x="1380" y="236" width="430" height="30" fill="#f2f2f2" stroke="#bbb" stroke-width="0.7"/>
+<text x="1392" y="256" class="td">14</text>
+<text x="1438" y="256" class="td" font-weight="bold">GND</text>
+<text x="1590" y="256" class="td">地</text>
+<text x="1660" y="256" class="small">预留</text>
+<rect x="1380" y="266" width="430" height="30" fill="#ffffff" stroke="#bbb" stroke-width="0.7"/>
+<text x="1392" y="286" class="td">15</text>
+<text x="1438" y="286" class="td" font-weight="bold">GPIO3_C4</text>
+<text x="1590" y="286" class="td">GPIO</text>
+<text x="1660" y="286" class="small">预留</text>
+<rect x="1380" y="296" width="430" height="30" fill="#ffffff" stroke="#bbb" stroke-width="0.7"/>
+<text x="1392" y="316" class="td">16</text>
+<text x="1438" y="316" class="td" font-weight="bold">GPIO3_C5</text>
+<text x="1590" y="316" class="td">GPIO</text>
+<text x="1660" y="316" class="small">预留</text>
+<rect x="1380" y="326" width="430" height="30" fill="#f2f2f2" stroke="#bbb" stroke-width="0.7"/>
+<text x="1392" y="346" class="td">17</text>
+<text x="1438" y="346" class="td" font-weight="bold">GND</text>
+<text x="1590" y="346" class="td">地</text>
+<text x="1660" y="346" class="small">预留</text>
+<rect x="1380" y="356" width="430" height="30" fill="#f2f2f2" stroke="#bbb" stroke-width="0.7"/>
+<text x="1392" y="376" class="td">18</text>
+<text x="1438" y="376" class="td" font-weight="bold">GND</text>
+<text x="1590" y="376" class="td">地</text>
+<text x="1660" y="376" class="small">预留</text>
+<rect x="1380" y="386" width="430" height="30" fill="#ffffff" stroke="#bbb" stroke-width="0.7"/>
+<text x="1392" y="406" class="td">19</text>
+<text x="1438" y="406" class="td" font-weight="bold">PWM4</text>
+<text x="1590" y="406" class="td">PWM</text>
+<text x="1660" y="406" class="small">预留</text>
+<rect x="1380" y="416" width="430" height="30" fill="#ffffff" stroke="#bbb" stroke-width="0.7"/>
+<text x="1392" y="436" class="td">20</text>
+<text x="1438" y="436" class="td" font-weight="bold">PWM2</text>
+<text x="1590" y="436" class="td">PWM</text>
+<text x="1660" y="436" class="small">预留</text>
+<text x="950" y="792" class="th" font-size="18" text-anchor="middle">外部接线总览（只画本项目实际使用引脚；完整未使用脚见上方全表）</text>
+<rect x="40" y="810" width="340" height="430" rx="8" class="box" fill="#eef7ea"/>
+<text x="210.0" y="834" class="th" text-anchor="middle">ELF2 P26 选用引脚</text>
+<text x="52" y="858" class="small">8  UART9_TX  → RS485 DI</text>
+<text x="52" y="878" class="small">10 UART9_RX  ← RS485 RO</text>
+<text x="52" y="898" class="small">26 GPIO3_D2  → RS485 DE/RE(可选)</text>
+<text x="52" y="918" class="small">1  VCC_3V3   → RS485 VCC</text>
+<text x="52" y="938" class="small">6  GND       → RS485 GND</text>
+<text x="52" y="958" class="small">29 GPIO3_B6  → PC0</text>
+<text x="52" y="978" class="small">31 GPIO3_A6  → PC1</text>
+<text x="52" y="998" class="small">33 GPIO3_A4  → PC2</text>
+<text x="52" y="1018" class="small">35 GPIO3_A0  → PC3</text>
+<text x="52" y="1038" class="small">32 GPIO3_A1  → PTT</text>
+<text x="52" y="1058" class="small">36 GPIO3_A5  ← BUSY</text>
+<text x="52" y="1078" class="small">30/34/39 GND → 控制板 GND</text>
+<rect x="410" y="810" width="260" height="430" rx="8" class="box" fill="#fff7e6"/>
+<text x="540.0" y="834" class="th" text-anchor="middle">隔离 / 电平转换板</text>
+<text x="422" y="858" class="small">4×PC817 或 74LVC245：PC0-PC3</text>
+<text x="422" y="878" class="small">1×光耦/NPN：PTT 驱动</text>
+<text x="422" y="898" class="small">1×光耦：BUSY 输入隔离</text>
+<text x="422" y="918" class="small">GPIO 侧 3.3V，控制板侧按实际</text>
+<text x="422" y="938" class="small">BUSY 输出 10k 上拉 + 100nF</text>
+<text x="422" y="958" class="small">PTT 默认释放，PC 默认全低</text>
+<rect x="700" y="810" width="320" height="430" rx="8" class="box" fill="#e6f0ff"/>
+<text x="860.0" y="834" class="th" text-anchor="middle">第三方中继控制板</text>
+<text x="712" y="858" class="small">PC0-PC3：频率/信道编码</text>
+<text x="712" y="878" class="small">PTT：发射机使能</text>
+<text x="712" y="898" class="small">BUSY：接收机状态</text>
+<text x="712" y="918" class="small">MIC：来自 ELF2 音频输出</text>
+<text x="712" y="938" class="small">SPK/DF：送往 ELF2 音频输入</text>
+<text x="712" y="958" class="small">GND：与控制板共地</text>
+<rect x="1060" y="810" width="240" height="150" rx="8" class="box" fill="#eef7ea"/>
+<text x="1180.0" y="834" class="th" text-anchor="middle">TTL-RS485 模块</text>
+<text x="1072" y="858" class="small">VCC：3.3V（P26-1）</text>
+<text x="1072" y="878" class="small">GND：P26-6</text>
+<text x="1072" y="898" class="small">DI：P26-8 UART9_TX</text>
+<text x="1072" y="918" class="small">RO：P26-10 UART9_RX</text>
+<text x="1072" y="938" class="small">DE/RE：P26-26（可选）</text>
+<rect x="1330" y="810" width="240" height="150" rx="8" class="box" fill="#f7f7f7"/>
+<text x="1450.0" y="834" class="th" text-anchor="middle">气象站</text>
+<text x="1342" y="858" class="small">Modbus RTU 从站</text>
+<text x="1342" y="878" class="small">A/B 双绞线</text>
+<text x="1342" y="898" class="small">9600 8N1</text>
+<text x="1342" y="918" class="small">120Ω 终端（长线）</text>
+<rect x="1060" y="990" width="240" height="200" rx="8" class="box" fill="#e6f0ff"/>
+<text x="1180.0" y="1014" class="th" text-anchor="middle">ADC 分压网络</text>
+<text x="1072" y="1038" class="small">SARADC_VIN6：P28-5 光伏</text>
+<text x="1072" y="1058" class="small">SARADC_VIN4：P28-6 电池</text>
+<text x="1072" y="1078" class="small">100k/12k → 电池</text>
+<text x="1072" y="1098" class="small">100k/5.6k → 光伏</text>
+<text x="1072" y="1118" class="small">100nF + 1k + 1.8V 钳位</text>
+<text x="1072" y="1138" class="small">必须共地，禁止超 1.8V</text>
+<rect x="1330" y="990" width="240" height="200" rx="8" class="box" fill="#f7f7f7"/>
+<text x="1450.0" y="1014" class="th" text-anchor="middle">电池 / 光伏</text>
+<text x="1342" y="1038" class="small">12V 电池：最高约 14.6V</text>
+<text x="1342" y="1058" class="small">12V 光伏：Voc 约 22V</text>
+<text x="1342" y="1078" class="small">分压后送 P28 ADC</text>
+<text x="1342" y="1098" class="small">高压侧注意绝缘/爬电</text>
+<text x="1342" y="1118" class="small">建议运放缓冲后进 ADC</text>
+<rect x="1060" y="1220" width="240" height="210" rx="8" class="box" fill="#fff7e6"/>
+<text x="1180.0" y="1244" class="th" text-anchor="middle">音频隔离/衰减板</text>
+<text x="1072" y="1268" class="small">SPK/DF → 衰减 → 隔离 → MIC</text>
+<text x="1072" y="1288" class="small">HP → 隔直 → 衰减 → MIC</text>
+<text x="1072" y="1308" class="small">600:600Ω 音频变压器</text>
+<text x="1072" y="1328" class="small">10uF 无极性耦合电容</text>
+<text x="1072" y="1348" class="small">屏蔽线单端接地</text>
+<text x="1072" y="1368" class="small">PTT 时建议静音/防自激</text>
+<rect x="1330" y="1220" width="240" height="210" rx="8" class="box" fill="#f7f7f7"/>
+<text x="1450.0" y="1244" class="th" text-anchor="middle">3.5mm AUX / USB</text>
+<text x="1342" y="1268" class="small">ELF2 3.5mm CTIA 音频座</text>
+<text x="1342" y="1288" class="small">Tip/Ring1：耳机输出</text>
+<text x="1342" y="1308" class="small">Ring2：GND</text>
+<text x="1342" y="1328" class="small">Sleeve：MIC 输入</text>
+<text x="1342" y="1348" class="small">USB-A → USB UVC 摄像头</text>
+<text x="1342" y="1368" class="small">远离天线/RF 功放</text>
+<path d="M380 910 L410 910" class="line"/>
+<path d="M670 910 L700 910" class="line"/>
+<path d="M1020 910 L1060 910" class="line"/>
+<path d="M1300 885 L1330 885" class="line"/>
+<path d="M1060 1110 L1000 1110 L1000 1240 L1020 1240" class="line"/>
+<path d="M1300 1090 L1330 1090" class="line"/>
+<path d="M1020 1325 L1060 1325" class="line"/>
+<text x="380" y="906" class="small" text-anchor="end">3.3V 信号</text>
+<text x="675" y="906" class="small">隔离后</text>
+</svg>

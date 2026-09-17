@@ -1,0 +1,1 @@
+SUBSYSTEM=="gpio", KERNEL=="gpio97", RUN+="/bin/sh -c 'for f in direction value active_low edge; do chown elf:elf /sys/class/gpio/gpio97/$f 2>/dev/null; chmod ug+rw /sys/class/gpio/gpio97/$f 2>/dev/null; done'"

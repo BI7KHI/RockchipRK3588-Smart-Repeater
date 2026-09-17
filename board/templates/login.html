@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 - ELF2 智能中继控制中心</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css', v='20260912c') }}">
+</head>
+<body class="login-body">
+  <div class="login-card">
+    <div class="login-logo">◉</div>
+    <h1>ELF2 智能中继控制中心</h1>
+    <p class="muted">端侧 AI · 无线电中继 · 遥测监控</p>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="flash {{ category }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+    <form method="post" id="login-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>用户名</label>
+      <input name="username" autocomplete="username" required autofocus placeholder="请输入用户名">
+      <label>密码</label>
+      <input name="password" type="password" autocomplete="current-password" required placeholder="请输入密码">
+      <button class="btn primary block" type="submit">登录</button>
+    </form>
+  </div>
+</body>
+</html>

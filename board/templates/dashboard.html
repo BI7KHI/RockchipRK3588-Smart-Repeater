@@ -1,0 +1,887 @@
+{% extends "base.html" %}
+{% block title %}{{ site_title or 'ELF2 智能中继控制中心' }}{% endblock %}
+{% block head_extra %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/camera-modern.css', v='20260915g') }}">
+<style>
+  .msg.tool { font-size: 12px; color: var(--muted); border-left: 3px solid #4a6cf7;
+              padding: 4px 0 4px 8px; margin: 4px 0; white-space: pre-wrap; word-break: break-all; }
+  .msg.tool.result { border-left-color: #2ecc71; }
+  .msg.tool.error { border-left-color: #e74c3c; }
+  #llm-rate, #llm-tools-live { font-variant-numeric: tabular-nums; }
+  #agent-tool-list label { margin: 2px 0; }
+</style>
+{% endblock %}
+{% block content %}
+
+<!-- 总览 -->
+<section id="tab-overview" class="tab-panel active">
+  <div class="panel-head">
+    <h2>中继运行总览</h2>
+    <span class="muted" id="last-update">--</span>
+  </div>
+  <div class="grid grid-3">
+    <div class="card">
+      <div class="card-title">电池电压</div>
+      <div class="metric" id="battery-voltage">-- V</div>
+      <div class="sub" id="battery-raw">ADC 原始值 --</div>
+      <div class="bar"><span id="battery-bar" style="width:0%"></span></div>
+    </div>
+    <div class="card">
+      <div class="card-title">光伏电压</div>
+      <div class="metric" id="pv-voltage">-- V</div>
+      <div class="sub" id="pv-raw">ADC 原始值 --</div>
+      <div class="bar"><span id="pv-bar" style="width:0%"></span></div>
+    </div>
+    <div class="card">
+      <div class="card-title">开发板 CPU 负载</div>
+      <div class="metric" id="cpu-percent">-- %</div>
+      <div class="sub" id="loadavg">Load --</div>
+      <div class="bar"><span id="cpu-bar" style="width:0%"></span></div>
+    </div>
+  </div>
+  <div class="grid grid-3">
+    <div class="card">
+      <div class="card-title">内存</div>
+      <div class="metric" id="mem-percent">-- %</div>
+      <div class="sub" id="mem-detail">-- / --</div>
+      <div class="bar"><span id="mem-bar" style="width:0%"></span></div>
+    </div>
+    <div class="card">
+      <div class="card-title">温度</div>
+      <div id="temperatures" class="kv-list"><span class="muted">读取中…</span></div>
+    </div>
+    <div class="card">
+      <div class="card-title">中继状态</div>
+      <div class="kv-list">
+        <div><span>频段/信道</span><b>预留</b></div>
+        <div><span>PTT</span><b class="muted">预留</b></div>
+        <div><span>BUSY</span><b class="muted">预留</b></div>
+        <div><span>运行时间</span><b id="uptime">--</b></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 网页对讲 -->
+<section id="tab-intercom" class="tab-panel">
+  <div class="panel-head">
+    <h2>网页对讲 / 录音分段</h2>
+    <span class="muted">录音完成后自动发送到开发板 3.5mm AUX 输出</span>
+  </div>
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="card-title">实时对讲（网页麦克风 → 电台，按住说话）</div>
+      <div class="intercom-status">
+        <span class="dot" id="push-dot"></span>
+        <span id="push-status">未启动</span>
+      </div>
+      <div class="row gap">
+        <button class="btn primary" id="btn-push-talk">按住说话</button>
+        <button class="btn ghost" id="btn-push-stop">停止</button>
+        <label class="checkline" title="本机扬声器回放麦克风声音，容易啸叫/回授，默认关闭"><input type="checkbox" id="push-monitor"> 本机监听（易啸叫，默认关闭）</label>
+      </div>
+      <div class="meter"><span id="push-meter" style="width:0%"></span></div>
+      <div class="muted small" id="push-info">每 ~250ms 上传一段 16kHz 单声道 PCM，板端直接送 3.5mm AUX 并自动拉 PTT；松开或 5 秒无数据自动释放 PTT。</div>
+      <p class="muted small">首次使用需要浏览器麦克风权限：Chrome/Firefox 只在<b>安全上下文</b>下提供麦克风接口，因此请用 <b>https://&lt;板卡IP&gt;/</b> 访问（自签证书需点“继续前往”），或改用下面“录音后上传”与“上传 WAV 测试”。</p>
+    </div>
+    <div class="card">
+      <div class="card-title">对讲控制（录音后上传）</div>
+      <div class="intercom-status">
+        <span class="dot" id="record-dot"></span>
+        <span id="record-status">未录音</span>
+      </div>
+      <div class="row gap">
+        <button class="btn primary" id="btn-record">开始录音</button>
+        <button class="btn ghost" id="btn-test-tone">播放测试音</button>
+      </div>
+      <div class="row gap mt">
+        <input type="file" id="wav-file" accept="audio/wav,.wav" style="flex:1">
+        <button class="btn ghost" id="btn-upload-wav">上传 WAV 测试</button>
+      </div>
+      <p class="muted small">录音完成后自动发送到开发板 3.5mm AUX 输出。通过局域网 HTTP 访问时可用“上传 WAV 测试”验证 AUX 输出。</p>
+      <div class="meter"><span id="record-meter" style="width:0%"></span></div>
+    </div>
+    <div class="card">
+      <div class="card-title">录音记录</div>
+      <div class="table-wrap">
+        <table class="data-table" id="recordings-table">
+          <thead><tr><th>时间</th><th>用户</th><th>时长</th><th>大小</th><th>操作</th></tr></thead>
+          <tbody><tr><td colspan="5" class="muted">暂无录音</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="card mt">
+    <div class="card-title">开发板 3.5mm 耳机输入监听测试</div>
+    <p class="muted small">将带麦克风的耳机插入 ELF2 3.5mm 座。点击“开始采集”后，服务端从 NAU88C22 采集耳机麦克风输入，网页实时显示电平，并可把采集到的音频实时播放到当前浏览器，用于验证板载音频输入链路。</p>
+    <div class="row gap">
+      <select id="mic-source" title="输入源">
+        <option value="main">板载 MIC / Main Mic</option>
+        <option value="headset">3.5mm 耳机 MIC / Headset Mic</option>
+      </select>
+      <select id="mic-channel" title="监听声道">
+        <option value="left">左声道（3.5mm 耳机麦）</option>
+        <option value="right">右声道（板载麦）</option>
+        <option value="mix">左右混合</option>
+      </select>
+      <label class="checkline"><input type="checkbox" id="mic-pga-boost"> +20dB PGA Boost</label>
+      <button class="btn ghost" id="btn-mic-settings-apply">应用麦克风设置</button>
+    </div>
+    <div class="cal-row">
+      <div>
+        <label>PGA 前级增益 <span id="mic-pga-val">--%</span></label>
+        <input type="range" id="mic-pga" min="0" max="100" step="1">
+      </div>
+      <div>
+        <label>ADC 数字增益 <span id="mic-adc-val">--%</span></label>
+        <input type="range" id="mic-adc" min="0" max="100" step="1">
+      </div>
+    </div>
+    <div class="cal-row">
+      <div>
+        <label>L2/R2 增强 <span id="mic-l2r2-val">--%</span></label>
+        <input type="range" id="mic-l2r2" min="0" max="100" step="1">
+      </div>
+      <div>
+        <label>Aux Boost <span id="mic-aux-val">--%</span></label>
+        <input type="range" id="mic-aux" min="0" max="100" step="1">
+      </div>
+    </div>
+    <div class="row gap">
+      <button class="btn primary" id="btn-mic-start">开始采集</button>
+      <button class="btn ghost" id="btn-mic-stop">停止采集</button>
+      <button class="btn ghost" id="btn-mic-listen">开启网页监听</button>
+      <button class="btn ghost" id="btn-mic-listen-stop">停止网页监听</button>
+    </div>
+    <div class="meter"><span id="mic-level-bar" style="width:0%"></span></div>
+    <div class="row gap small muted">
+      <span>Level: <b id="mic-level">--%</b></span>
+      <span>RMS: <b id="mic-rms">--</b></span>
+      <span>Peak: <b id="mic-peak">--</b></span>
+      <span>dBFS: <b id="mic-dbfs">--</b></span>
+      <span>L-RMS: <b id="mic-left-rms">--</b></span>
+      <span>R-RMS: <b id="mic-right-rms">--</b></span>
+      <span>设备: <b id="mic-device">--</b></span>
+    </div>
+  </div>
+</section>
+
+<!-- LLM 对话 -->
+<section id="tab-llm" class="tab-panel">
+  <div class="panel-head">
+    <h2>LLM 对话</h2>
+    <div class="row gap">
+      <select id="llm-provider">
+        <option value="local">本地模型（RKNPU / llama.cpp）</option>
+        <option value="external">外部 API</option>
+      </select>
+      <input id="llm-model" placeholder="模型名称">
+      <button class="btn ghost" id="btn-llm-refresh">刷新配置</button>
+    </div>
+  </div>
+  <div class="chat-layout">
+    <div class="card chat-card">
+      <div class="chat-history" id="chat-history"></div>
+      <div class="chat-input">
+        <textarea id="chat-text" rows="3" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+        <button class="btn primary" id="btn-chat-send">发送</button>
+      </div>
+      <div class="row gap small muted">
+        <label><input type="checkbox" id="chat-stream" checked> 流式输出</label>
+        <label class="checkline" title="开启后：端侧 LLM 会先调用技能/工具读取实时数据（电压/温度/气象/发射状态）再回答">
+          <input type="checkbox" id="chat-agent" checked> Agent 技能调用</label>
+        <span id="llm-rate" class="muted small">生成速率：--</span>
+        <span id="llm-tools-live" class="muted small"></span>
+        <span id="llm-config-hint">--</span>
+      </div>
+      <div class="row gap tts-bar">
+        <span class="badge">本地 Piper（离线）</span>
+        <select id="tts-voice" title="中文/默认音色"></select>
+        <select id="tts-en-voice" title="英文片段音色（中英混读时使用）"></select>
+        <label class="checkline" title="呼号与单字母按 ICAO 字母解释法朗读：BG7XYZ -> Bravo Golf Seven X-ray Yankee Zulu"><input type="checkbox" id="tts-icao" checked> ICAO</label>
+        <input id="tts-test-text" placeholder="TTS 测试文本" value="呼号 BG7XYZ，这里是 ELF2 中继站，Radio check five nine，how copy？">
+        <button class="btn ghost" id="btn-tts-test">测试朗读（板端 AUX）</button>
+        <button class="btn primary" id="btn-tts-test-web">朗读到网页</button>
+        <button class="btn ghost" id="btn-tts-stop">停止朗读</button>
+        <label class="checkline"><input type="checkbox" id="tts-auto-speak"> 自动朗读 LLM 回复</label>
+        <span id="tts-stream-status" class="muted small">流式朗读：未启动</span>
+      </div>
+      <div class="row gap mt">
+        <audio id="tts-audio" controls preload="none" style="width:100%;max-width:520px"></audio>
+        <span class="muted small" id="tts-web-status">网页播放器：空闲</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 摄像头 -->
+<section id="tab-camera" class="tab-panel cam-modern">
+  <div class="panel-head">
+    <div class="row gap">
+      <h2>摄像头 · 录像回放</h2>
+      <span class="badge" id="camera-status-badge">未启动</span>
+    </div>
+    <div class="muted small cam-head-meta">设备 <b id="camera-device-info">--</b> · video 节点 <b id="camera-devices">--</b></div>
+  </div>
+
+  <div class="cam-top-grid">
+    <div class="card cam-preview-card">
+      <div class="camera-view">
+        <img id="camera-preview" alt="摄像头预览" src="">
+        <div id="camera-osd" class="camera-osd"></div>
+      </div>
+      <div class="cam-actions">
+        <button class="btn primary" id="btn-camera-start">开始预览</button>
+        <button class="btn ghost" id="btn-camera-stop">停止预览</button>
+        <button class="btn ghost" id="btn-camera-snapshot">抓拍</button>
+      </div>
+    </div>
+
+    <div class="cam-top-side">
+      <div class="card">
+        <div class="card-title">录像</div>
+        <div class="cam-btn-row">
+          <span class="cam-tag">循环</span>
+          <button class="btn primary" id="btn-camera-loop-start" title="开始循环录像">开始</button>
+          <button class="btn ghost" id="btn-camera-loop-stop" title="停止循环录像">停止</button>
+        </div>
+        <div class="cam-btn-row">
+          <span class="cam-tag">单次</span>
+          <button class="btn primary" id="btn-camera-manual-start" title="开始单独录像">开始</button>
+          <button class="btn ghost" id="btn-camera-manual-stop" title="停止单独录像并保存">停止并保存</button>
+        </div>
+        <p class="muted small">循环录像按分段时长滚动，超过容量上限自动覆盖最早分片；参数在下方「高级设置」中调整。</p>
+      </div>
+      <div class="card">
+        <div class="card-title">运行状态</div>
+        <div class="kv-list" id="camera-service-status"><span class="muted">--</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="cam-console" id="cam-console">
+    <div class="cam-console-head">
+      <div>
+        <h3>录像回放 / 分片管理</h3>
+        <p class="muted small">现代化 Hikvision 风格时间轴：拖动定位、分片续播、倍速回放、批量管理。</p>
+      </div>
+      <div class="row gap">
+        <span class="cam-chip" id="cam-console-date-badge">--</span>
+        <span class="cam-chip" id="cam-console-count-badge">0 分片</span>
+        <button class="btn ghost" id="btn-cam-refresh">刷新数据</button>
+      </div>
+    </div>
+
+    <div class="cam-console-grid">
+      <div class="cam-player-panel">
+        <div class="cam-player-wrap" id="cam-player-wrap">
+          <video id="cam-modern-video" playsinline preload="metadata"></video>
+          <div class="cam-player-empty" id="cam-player-empty">选择时间轴上的录像分片开始回放</div>
+          <div class="cam-player-loading" id="cam-player-loading"><span></span><span></span><span></span></div>
+          <div class="cam-player-osd" id="cam-player-osd">
+            <div id="cam-player-title">--</div>
+            <div id="cam-player-state">已停止</div>
+          </div>
+        </div>
+        <div class="cam-controlbar">
+          <button class="cam-ctl" id="cam-btn-prev" title="上一分片">⏮</button>
+          <button class="cam-ctl primary" id="cam-btn-play" title="播放 / 暂停">▶</button>
+          <button class="cam-ctl" id="cam-btn-stop" title="停止">■</button>
+          <button class="cam-ctl" id="cam-btn-next" title="下一分片">⏭</button>
+          <span class="cam-time" id="cam-time-current">00:00:00</span>
+          <div class="cam-progress" id="cam-progress" title="拖动调整当前分片进度">
+            <span class="cam-progress-buffer" id="cam-progress-buffer"></span>
+            <span class="cam-progress-played" id="cam-progress-played"></span>
+            <i class="cam-progress-thumb" id="cam-progress-thumb"></i>
+          </div>
+          <span class="cam-time" id="cam-time-duration">00:00:00</span>
+          <select class="cam-mini-select" id="cam-play-speed" title="倍速">
+            <option value="0.5">0.5x</option>
+            <option value="1" selected>1x</option>
+            <option value="2">2x</option>
+            <option value="4">4x</option>
+          </select>
+          <button class="cam-ctl" id="cam-btn-snapshot" title="截取当前画面">📷</button>
+          <button class="cam-ctl" id="cam-btn-download" title="下载当前分片">⬇</button>
+          <button class="cam-ctl" id="cam-btn-fullscreen" title="全屏">⛶</button>
+          <label class="checkline cam-check"><input type="checkbox" id="cam-auto-next" checked> 自动续播</label>
+        </div>
+      </div>
+
+      <div class="cam-storage-panel">
+        <div class="cam-storage-head">
+          <span>存储占用 / 容量上限</span>
+          <span class="cam-chip" id="cam-storage-mode">--</span>
+        </div>
+        <div class="cam-storage-gauges">
+          <div class="cam-gauge">
+            <svg viewBox="0 0 120 120" aria-hidden="true">
+              <circle class="cam-gauge-track" cx="60" cy="60" r="48"></circle>
+              <circle class="cam-gauge-value disk" id="cam-gauge-disk" cx="60" cy="60" r="48"></circle>
+            </svg>
+            <div class="cam-gauge-label"><b id="cam-gauge-disk-pct">--%</b><span>磁盘使用率</span></div>
+          </div>
+          <div class="cam-gauge">
+            <svg viewBox="0 0 120 120" aria-hidden="true">
+              <circle class="cam-gauge-track" cx="60" cy="60" r="48"></circle>
+              <circle class="cam-gauge-value loop" id="cam-gauge-loop" cx="60" cy="60" r="48"></circle>
+            </svg>
+            <div class="cam-gauge-label"><b id="cam-gauge-loop-pct">--%</b><span>循环容量</span></div>
+          </div>
+          <div class="cam-gauge">
+            <svg viewBox="0 0 120 120" aria-hidden="true">
+              <circle class="cam-gauge-track" cx="60" cy="60" r="48"></circle>
+              <circle class="cam-gauge-value storage" id="cam-gauge-storage" cx="60" cy="60" r="48"></circle>
+            </svg>
+            <div class="cam-gauge-label"><b id="cam-gauge-storage-pct">--%</b><span>存储上限</span></div>
+          </div>
+        </div>
+        <div class="cam-storage-bars">
+          <div class="cam-storage-bar">
+            <div class="cam-storage-bar-head"><span>循环录像占用</span><b id="cam-loop-size">--</b></div>
+            <div class="cam-bar-track"><span class="loop" id="cam-loop-bar"></span></div>
+            <div class="cam-storage-bar-foot"><span id="cam-loop-cap">上限 --</span><span id="cam-loop-count">--</span></div>
+          </div>
+          <div class="cam-storage-bar">
+            <div class="cam-storage-bar-head"><span>录像总占用</span><b id="cam-storage-size">--</b></div>
+            <div class="cam-bar-track"><span class="storage" id="cam-storage-bar"></span></div>
+            <div class="cam-storage-bar-foot"><span id="cam-storage-cap">存储上限 --</span><span id="cam-storage-free">剩余 --</span></div>
+          </div>
+          <div class="cam-storage-bar">
+            <div class="cam-storage-bar-head"><span>磁盘空间</span><b id="cam-disk-size">--</b></div>
+            <div class="cam-bar-track"><span class="disk" id="cam-disk-bar"></span></div>
+            <div class="cam-storage-bar-foot"><span id="cam-disk-detail">-- / --</span><span id="cam-disk-free">可用 --</span></div>
+          </div>
+        </div>
+        <div class="cam-storage-meta">
+          <div><span>录像总数</span><b id="cam-storage-count">--</b></div>
+          <div><span>循环分片</span><b id="cam-storage-loop-count">--</b></div>
+          <div><span>手动录像</span><b id="cam-storage-manual-count">--</b></div>
+          <div><span>累计时长</span><b id="cam-storage-duration">--</b></div>
+        </div>
+        <div class="cam-storage-policy">
+          <div class="cam-storage-policy-head">
+            <span>容量策略</span>
+            <span id="cam-policy-mode">--</span>
+          </div>
+          <div class="cam-storage-policy-grid">
+            <div><span>循环上限</span><b id="cam-policy-loop">--</b></div>
+            <div><span>存储上限</span><b id="cam-policy-storage">--</b></div>
+            <div><span>循环文件数</span><b id="cam-policy-files">--</b></div>
+          </div>
+          <div class="row gap mt">
+            <button class="btn ghost" id="btn-camera-cleanup">按策略立即清理</button>
+          </div>
+          <p class="muted small mt">清理顺序：最旧 <code>loop_*.mp4</code> → 最旧 <code>snapshot_*.jpg</code>；<code>manual_*.mp4</code> 不会被自动删除。</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="cam-timeline-panel">
+      <div class="cam-timeline-toolbar">
+        <div class="row gap">
+          <button class="cam-ctl" id="cam-date-prev" title="前一天">◀</button>
+          <input type="date" id="cam-date-picker" class="cam-date-input">
+          <button class="cam-ctl" id="cam-date-next" title="后一天">▶</button>
+          <button class="btn ghost" id="cam-date-today">今天</button>
+        </div>
+        <div class="row gap">
+          <select id="cam-filter-type" class="cam-mini-select" title="分片类型">
+            <option value="all">全部分片</option>
+            <option value="loop">仅循环分片</option>
+            <option value="manual">仅手动录像</option>
+          </select>
+          <select id="cam-timeline-zoom" class="cam-mini-select" title="时间轴缩放">
+            <option value="1">24 小时</option>
+            <option value="2">12 小时</option>
+            <option value="4">6 小时</option>
+            <option value="8">3 小时</option>
+          </select>
+          <label class="checkline cam-check"><input type="checkbox" id="cam-follow-play" checked> 播放跟随</label>
+        </div>
+      </div>
+      <div class="cam-timeline-scroll" id="cam-timeline-scroll">
+        <div class="cam-timeline-inner" id="cam-timeline-inner">
+          <div class="cam-timeline-ruler" id="cam-timeline-ruler"></div>
+          <div class="cam-timeline-lanes">
+            <div class="cam-timeline-lane">
+              <span class="cam-lane-label">循环</span>
+              <div class="cam-lane-track" id="cam-lane-loop"></div>
+            </div>
+            <div class="cam-timeline-lane">
+              <span class="cam-lane-label">手动</span>
+              <div class="cam-lane-track" id="cam-lane-manual"></div>
+            </div>
+          </div>
+          <div class="cam-timeline-playhead" id="cam-timeline-playhead"><span></span></div>
+          <div class="cam-timeline-tooltip" id="cam-timeline-tooltip"></div>
+        </div>
+      </div>
+      <div class="cam-timeline-footer">
+        <div class="cam-legend">
+          <span><i class="dot-loop"></i>循环录像</span>
+          <span><i class="dot-manual"></i>手动录像</span>
+          <span><i class="dot-selected"></i>当前播放</span>
+        </div>
+        <div class="cam-selected-info" id="cam-selected-info">未选择分片</div>
+      </div>
+    </div>
+
+    <div class="cam-segment-panel">
+      <div class="cam-segment-toolbar">
+        <div class="row gap">
+          <input id="cam-segment-search" class="cam-search" placeholder="搜索文件名 / 时间...">
+          <select id="cam-segment-sort" class="cam-mini-select">
+            <option value="desc">时间倒序</option>
+            <option value="asc">时间正序</option>
+          </select>
+          <select id="cam-segment-page-size" class="cam-mini-select">
+            <option value="25">25 条/页</option>
+            <option value="50">50 条/页</option>
+            <option value="100">100 条/页</option>
+          </select>
+        </div>
+        <div class="row gap">
+          <span class="muted small" id="cam-selected-count">已选 0 项</span>
+          <button class="btn ghost" id="btn-cam-batch-download">批量下载</button>
+          <button class="btn ghost" id="btn-cam-export-csv">导出清单</button>
+          <button class="btn ghost danger" id="btn-cam-batch-delete">批量删除</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table cam-segment-table">
+          <thead>
+            <tr>
+              <th class="cam-check-col"><input type="checkbox" id="cam-select-all"></th>
+              <th>分片文件</th>
+              <th>类型</th>
+              <th>开始时间</th>
+              <th>时长</th>
+              <th>大小</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="cam-segments-body"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="cam-pagination">
+        <button class="cam-ctl" id="cam-page-prev">上一页</button>
+        <span class="muted small" id="cam-page-info">第 1 / 1 页</span>
+        <button class="cam-ctl" id="cam-page-next">下一页</button>
+      </div>
+    </div>
+  </div>
+  <details class="cam-advanced" id="cam-advanced">
+    <summary>高级设置 · 设备 / 录像策略 / OSD / RTMP</summary>
+    <div class="cam-advanced-body">
+          <div class="cal-row">
+      <div><label>设备</label><input id="camera-device"></div>
+      <div><label>分辨率</label><input id="camera-resolution" placeholder="640x480"></div>
+    </div>
+    <div class="cal-row">
+      <div><label>帧率</label><input id="camera-fps" type="number"></div>
+      <div><label>录像目录</label><input id="camera-record-dir"></div>
+    </div>
+    <div class="cal-row">
+      <div><label>循环容量上限 (MB)</label><input id="camera-loop-max-mb" type="number"></div>
+      <div><label>循环最大文件数</label><input id="camera-loop-max-files" type="number"></div>
+    </div>
+    <div class="cal-row">
+      <div><label>存储容量上限 (MB)</label><input id="camera-storage-max-mb" type="number" min="0" placeholder="0=按磁盘容量"></div>
+      <div><label>循环分段（秒）</label><input id="camera-loop-seconds" type="number" min="5"></div>
+    </div>
+    <div class="row gap mt">
+      <label class="checkline"><input type="checkbox" id="camera-osd-enabled"> OSD 烧录到录像/推流</label>
+      <label class="checkline"><input type="checkbox" id="camera-osd-show-time"> OSD 显示时间</label>
+    </div>
+    <div class="cal-row">
+      <div><label>OSD 自定义文字（英文）</label><input id="camera-osd-text"></div>
+      <div><label>OSD 字号</label><input id="camera-osd-fontsize" type="number"></div>
+    </div>
+    <div class="cal-row">
+      <div><label>OSD 位置</label>
+        <select id="camera-osd-position">
+          <option value="top-left">左上</option>
+          <option value="top-right">右上</option>
+          <option value="bottom-left">左下</option>
+          <option value="bottom-right">右下</option>
+        </select>
+      </div>
+    </div>
+    <hr class="sep">
+    <div class="card-title">RTMP 推流</div>
+    <label>RTMP 推流地址</label>
+    <input id="camera-rtmp-url" placeholder="rtmp://server/live/stream">
+    <div class="row gap">
+      <button class="btn primary" id="btn-camera-rtmp-start">开始 RTMP 推流</button>
+      <button class="btn ghost" id="btn-camera-rtmp-stop">停止推流</button>
+    </div>
+    <button class="btn primary mt" id="btn-camera-settings-save">保存摄像头设置</button>
+    </div>
+  </details>
+</section>
+
+
+<!-- 气象 -->
+<section id="tab-weather" class="tab-panel">
+  <div class="panel-head">
+    <h2>气象数据监测</h2>
+    <div class="row gap">
+      <label class="inline-label">日期</label>
+      <input type="date" id="weather-date">
+      <label class="inline-label">时间轴采样</label>
+      <select id="weather-sample-interval">
+        <option value="1">1 分钟</option>
+        <option value="5" selected>5 分钟</option>
+        <option value="10">10 分钟</option>
+        <option value="30">30 分钟</option>
+        <option value="60">60 分钟</option>
+      </select>
+    </div>
+  </div>
+  <div class="grid grid-3">
+    <div class="card">
+      <div class="card-title">实时风力（自动刷新）</div>
+      <div class="metric" id="weather-speed">-- <span style="font-size:16px">m/s</span></div>
+      <div class="sub" id="weather-raw">raw -- · 更新时间 --</div>
+      <div class="sub" id="weather-status">等待数据</div>
+    </div>
+    <div class="card">
+      <div class="card-title">当日统计</div>
+      <div class="kv-list">
+        <div><span>最大风力</span><b id="weather-max">-- m/s</b></div>
+        <div><span>最大时间</span><b id="weather-max-time">--</b></div>
+        <div><span>平均风力</span><b id="weather-avg">-- m/s</b></div>
+        <div><span>最小风力</span><b id="weather-min">-- m/s</b></div>
+        <div><span>数据点数</span><b id="weather-count">--</b></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">数据保存</div>
+      <div class="kv-list">
+        <div><span>CSV 目录</span><b>/www/weather_csv/</b></div>
+        <div><span>保存方式</span><b>按日自动追加</b></div>
+        <div><span>采集参数</span><b id="weather-modbus-info">--</b></div>
+        <div><span>轮询间隔</span><b id="weather-interval-info">--</b></div>
+      </div>
+      <p class="muted small">采集成功后自动写入当日 CSV，并同步写入 SQLite 历史库。</p>
+    </div>
+  </div>
+  <div class="grid grid-3 mt">
+    <div class="card">
+      <div class="card-title">实时降水量（自动刷新）</div>
+      <div class="metric" id="rain-total">-- <span style="font-size:16px">mm</span></div>
+      <div class="sub" id="rain-raw">raw -- · 更新时间 --</div>
+      <div class="sub" id="rain-status">等待数据</div>
+    </div>
+    <div class="card">
+      <div class="card-title">今日降水统计</div>
+      <div class="kv-list">
+        <div><span>今日累计</span><b id="rain-today-total">-- mm</b></div>
+        <div><span>最近 1 小时</span><b id="rain-recent-hour">-- mm</b></div>
+        <div><span>最大小时</span><b id="rain-max-hour">--</b></div>
+        <div><span>采集点数</span><b id="rain-count">--</b></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">降水量采集</div>
+      <div class="kv-list">
+        <div><span>从站 / 寄存器</span><b id="rain-modbus-info">--</b></div>
+        <div><span>倍率</span><b id="rain-scale-info">--</b></div>
+        <div><span>CSV 目录</span><b>/www/weather_csv/</b></div>
+      </div>
+      <p class="muted small">翻斗式雨量计与风力变送器共用 RS485 总线；采集成功后按日写入 rain_YYYY-MM-DD.csv，并同步 SQLite。</p>
+    </div>
+  </div>
+  <div class="card mt">
+    <div class="card-title">每小时降水量统计 <span class="muted small" id="rain-hourly-date-label"></span></div>
+    <div class="row gap">
+      <label class="inline-label">日期</label>
+      <input type="date" id="rain-date">
+      <button class="btn primary" id="btn-rain-query">查询小时雨量</button>
+      <button class="btn ghost" id="btn-rain-export">导出小时 CSV</button>
+      <span class="muted small" id="rain-hourly-hint"></span>
+    </div>
+    <canvas id="rain-hourly-chart" height="220" style="width:100%;height:220px;margin-top:10px"></canvas>
+    <div style="max-height:260px;overflow:auto;margin-top:10px">
+      <table class="data-table" id="rain-hourly-table">
+        <thead><tr><th>时间</th><th>降水量 (mm)</th><th>样本数</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="card mt">
+    <div class="card-title">当日风力时间轴 <span class="muted small" id="weather-chart-date"></span></div>
+    <canvas id="weather-chart" height="220" style="width:100%;height:220px"></canvas>
+  </div>
+  <div class="card mt">
+    <div class="card-title">历史数据查询与导出</div>
+    <div class="row gap">
+      <label class="inline-label">时间长度</label>
+      <select id="weather-export-days">
+        <option value="1">最近 1 天</option>
+        <option value="3">最近 3 天</option>
+        <option value="7" selected>最近 7 天</option>
+        <option value="30">最近 30 天</option>
+        <option value="90">最近 90 天</option>
+      </select>
+      <label class="inline-label">采样频率</label>
+      <select id="weather-export-interval">
+        <option value="1">1 分钟</option>
+        <option value="5">5 分钟</option>
+        <option value="10" selected>10 分钟</option>
+        <option value="30">30 分钟</option>
+        <option value="60">60 分钟</option>
+      </select>
+      <button class="btn primary" id="btn-weather-query">查询历史</button>
+      <button class="btn ghost" id="btn-weather-export">导出 CSV</button>
+      <span class="muted small" id="weather-history-hint"></span>
+    </div>
+    <canvas id="weather-history-chart" height="220" style="width:100%;height:220px;margin-top:10px"></canvas>
+  </div>
+</section>
+
+<!-- 用户管理 -->
+<section id="tab-users" class="tab-panel admin-only">
+  <div class="panel-head"><h2>用户管理</h2><span class="muted">仅管理员可见</span></div>
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="card-title">添加用户</div>
+      <label>用户名</label>
+      <input id="new-user-name" placeholder="例如 operator">
+      <label>密码</label>
+      <input id="new-user-pass" type="password" placeholder="至少 8 位">
+      <label>角色</label>
+      <select id="new-user-role"><option value="user">普通用户</option><option value="admin">管理员</option></select>
+      <button class="btn primary" id="btn-add-user">添加用户</button>
+    </div>
+    <div class="card">
+      <div class="card-title">用户列表</div>
+      <div class="table-wrap">
+        <table class="data-table" id="users-table">
+          <thead><tr><th>ID</th><th>用户名</th><th>角色</th><th>最近登录</th><th>操作</th></tr></thead>
+          <tbody><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 设置 / 校准 -->
+<section id="tab-settings" class="tab-panel admin-only">
+  <div class="panel-head"><h2>设置与电压校准</h2><span class="muted">仅管理员可修改</span></div>
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="card-title">电压校准（RK3588 SARADC 12bit · 0~1.8V）</div>
+      <div class="cal-row">
+        <div>
+          <label>电池 SARADC 通道（0~7）</label>
+          <input id="battery-ch" type="number" min="0" max="7" step="1">
+        </div>
+        <div>
+          <label>电池电压零点（ADC 原始值）</label>
+          <input id="battery-zero" type="number" step="0.1">
+        </div>
+        <div>
+          <label>电池电压倍率（V/引脚电压）</label>
+          <input id="battery-mult" type="number" step="0.01" min="0.01" max="200">
+        </div>
+      </div>
+      <div class="cal-row">
+        <div>
+          <label>光伏 SARADC 通道（0~7）</label>
+          <input id="pv-ch" type="number" min="0" max="7" step="1">
+        </div>
+        <div>
+          <label>光伏电压零点（ADC 原始值）</label>
+          <input id="pv-zero" type="number" step="0.1">
+        </div>
+        <div>
+          <label>光伏电压倍率（V/引脚电压）</label>
+          <input id="pv-mult" type="number" step="0.01" min="0.01" max="200">
+        </div>
+      </div>
+      <div class="kv-list mt" id="cal-live"><span class="muted">--</span></div>
+      <div class="row gap mt">
+        <button class="btn primary" id="btn-save-cal">保存校准</button>
+        <button class="btn ghost" id="btn-cal-design">填入设计值（电池 10.11 / 光伏 17.01）</button>
+      </div>
+      <p class="muted small">换算链路：<b>引脚电压</b> = (raw − 零点) × 0.43945 mV（1.8V/4096）；<b>实际电压</b> = 引脚电压 × 倍率。<br>
+        倍率单位统一为 <b>V/引脚电压</b>，等于分压比倒数 = (R上 + R下) / R下：<br>
+        电池 R14 100Ω + R15 91kΩ / R16 10kΩ → 10k/101.1k = 0.098912 → 倍率 <b>10.11</b>，满量程 <b>18.198 V</b>，分辨率 4.443 mV/LSB；<br>
+        光伏 100Ω + 160kΩ / 10kΩ → 10k/170.1k = 0.058789 → 倍率 <b>17.01</b>，满量程 <b>30.618 V</b>，分辨率 7.475 mV/LSB。</p>
+    </div>
+    <div class="card" id="ptt-diag-card">
+      <div class="card-title">PTT 发射自检（硬件排查 · 不接音频）</div>
+      <div class="row gap" style="align-items:center">
+        <button class="btn primary" id="btn-ptt-hold" style="min-width:190px">按住发射（PTT 高）</button>
+        <button class="btn ghost" id="btn-ptt-release">强制松开</button>
+        <span class="muted small" id="ptt-diag-state">--</span>
+      </div>
+      <div class="kv-list mt" id="ptt-diag-live"><span class="muted">--</span></div>
+      <div class="mt" id="ptt-diag-events"><span class="muted small">暂无 PTT 事件</span></div>
+      <p class="muted small">
+        按住期间 GPIO3_A1（<b>gpiochip3 line1 → Linux 全局 GPIO 97</b>）输出高电平，
+        经隔离/驱动送控制板 PTT，用于<b>不带音频</b>地验证整条发射链路；
+        松开、3 秒无心跳或超过 30 秒会自动松开（防止一直压着信道）。<br>
+        排查顺序：① 本页「引脚实测」是否变 1 → ② 万用表量 RK3588 侧 P26 pin1 对 GND（0V ↔ 3.3V）
+        → ③ 量隔离板输入/输出侧 → ④ 量控制板 PTT 端子（<b>注意有效极性：低有效需反相</b>）
+        → ⑤ 用导线短接控制板 PTT 端子模拟发射，判断断点在控制板还是隔离板一侧。
+      </p>
+    </div>
+    <div class="card">
+      <div class="card-title">系统全局音量</div>
+      <div class="row gap">
+        <input type="range" id="volume-slider" min="0" max="100" step="1" value="80" style="flex:1">
+        <span id="volume-value" class="metric" style="font-size:20px">--%</span>
+      </div>
+      <label class="checkline"><input type="checkbox" id="volume-mute"> 全局静音</label>
+      <div class="row gap">
+        <button class="btn primary" id="btn-volume-apply">应用音量</button>
+        <button class="btn ghost" id="btn-volume-test">测试提示音</button>
+        <button class="btn ghost" id="btn-volume-refresh">刷新状态</button>
+      </div>
+      <div class="kv-list mt" id="audio-mixer-status"><span class="muted">读取中…</span></div>
+      <p class="muted small">控制 NAU88C22 Headphone 与 Speaker 输出，作用于开发板 3.5mm AUX 全局播放。</p>
+    </div>
+    <div class="card">
+      <div class="card-title">LLM / 页面设置</div>
+      <label>默认提供商</label>
+      <select id="set-llm-provider"><option value="local">本地模型</option><option value="external">外部 API</option></select>
+      <label>本地 API Base URL</label>
+      <input id="set-local-base" placeholder="http://127.0.0.1:8001/v1">
+      <label>本地模型名</label>
+      <input id="set-local-model" placeholder="qwen2.5-1.5b">
+      <label>本地 API Key（可空）</label>
+      <input id="set-local-key" type="password" placeholder="sk-...">
+      <label>外部 API Base URL</label>
+      <input id="set-ext-base" placeholder="https://api.deepseek.com/v1">
+      <label>外部模型名</label>
+      <input id="set-ext-model" placeholder="deepseek-chat">
+      <label>外部 API Key</label>
+      <input id="set-ext-key" type="password" placeholder="sk-...">
+      <label class="checkline"><input type="checkbox" id="set-auto-play" checked> 对讲录音上传后自动播放到 AUX</label>
+      <button class="btn primary" id="btn-save-settings">保存设置</button>
+    </div>
+    <div class="card" id="llm-agent-card">
+      <div class="card-title">LLM 提示词注入 / Agent 技能 / 生成速率</div>
+      <label class="checkline"><input type="checkbox" id="set-llm-prompt-on"> 启用系统提示词注入</label>
+      <textarea id="set-llm-prompt" rows="4" placeholder="例：你是 BG7XYZ 中继台值班助手，回答简短口语化。当前电池 {battery} V、光伏 {pv} V、CPU {cpu_temp}℃。"></textarea>
+      <label class="checkline"><input type="checkbox" id="set-llm-prompt-vars"> 展开实时变量（{battery} {pv} {cpu_temp} {wind} {rain_today} {date} {time} {site}）</label>
+      <div class="muted small" id="llm-prompt-vars-live">--</div>
+      <div class="row gap mt">
+        <button class="btn primary" id="btn-save-prompt">保存提示词</button>
+        <button class="btn ghost" id="btn-insert-prompt">填入推荐提示词</button>
+      </div>
+      <p class="muted small">说明：板端 RKLLM 会忽略 <code>system</code> 角色，后台已自动把提示词并入用户消息下发（实测唯一生效方式）。</p>
+      <div class="muted small">──────</div>
+      <label class="checkline"><input type="checkbox" id="set-agent-enabled"> 启用 Agent 技能/工具调用</label>
+      <label class="checkline">最大技能轮次 <input type="number" id="set-agent-max-iters" min="1" max="5" step="1" style="width:80px;margin-left:6px"></label>
+      <div id="agent-tool-list" class="kv-list mt"><span class="muted small">--</span></div>
+      <div class="row gap mt">
+        <button class="btn primary" id="btn-save-agent">保存 Agent 设置</button>
+        <button class="btn ghost" id="btn-refresh-tools">刷新技能列表</button>
+      </div>
+      <div class="muted small">──────</div>
+      <div class="card-title" style="font-size:13px">最近生成速率（板端 LLM）</div>
+      <div class="muted small" id="llm-stats-today">--</div>
+      <div class="table-wrap mt"><table class="data-table" id="llm-stats-table">
+        <thead><tr><th>时间</th><th>模式</th><th>首字</th><th>tok/s</th><th>tokens</th><th>技能</th></tr></thead>
+        <tbody><tr><td colspan="6" class="muted">暂无记录</td></tr></tbody></table></div>
+      <div class="row gap mt">
+        <button class="btn ghost" id="btn-refresh-stats">刷新统计</button>
+        <button class="btn ghost" id="btn-clear-stats">清空统计</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">TTS 语音朗读设置（仅本地 Piper）</div>
+      <label>本地 Piper 音色（中文/默认）</label>
+      <select id="set-tts-voice"></select>
+      <label>英文片段音色（中英混读时英文部分使用）</label>
+      <select id="set-tts-en-voice"></select>
+      <label>ICAO 字母串专用音色（咬字清晰优先）</label>
+      <select id="set-tts-icao-voice"></select>
+      <label class="checkline"><input type="checkbox" id="set-tts-icao"> 呼号/单字母按 ICAO 字母解释法朗读（BG7XYZ → Bravo Golf Seven X-ray Yankee Zulu）</label>
+      <label class="checkline"><input type="checkbox" id="set-tts-auto-speak"> LLM 回复后自动朗读到 3.5mm AUX</label>
+      <p class="muted small">外部 OpenAI 兼容 TTS 已下线，板端只使用 /opt/ai/voices 下的本地 Piper ONNX 模型（完全离线）。<br>
+        音色包上传后可在此切换；试听请在「语音对话」页用“测试朗读（板端 AUX）”或“朗读到网页”。</p>
+      <hr class="sep">
+      <div class="card-title">音色包管理</div>
+      <div class="table-wrap">
+        <table class="data-table" id="voice-table">
+          <thead><tr><th>音色 ID</th><th>名称</th><th>语言</th><th>大小</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="muted small" id="voice-manage-info">加载中…</div>
+      <hr class="sep">
+      <div class="card-title">音色训练 / 上传</div>
+      <label>音色包 zip（包含 model.onnx 与 model.onnx.json）</label>
+      <input type="file" id="tts-voice-zip" accept=".zip,application/zip">
+      <label>音色 ID</label>
+      <input id="tts-voice-id" placeholder="例如 zh_CN-myvoice">
+      <button class="btn ghost" id="btn-tts-voice-upload">上传音色包</button>
+      <div class="meter mt"><span id="voice-upload-bar" style="width:0%"></span></div>
+      <div class="muted small" id="voice-upload-info">未上传（音色包约 56MB，上传中请勿关闭页面）</div>
+      <label>训练数据 zip（上传到 /opt/ai/voice_training）</label>
+      <input type="file" id="tts-train-zip" accept=".zip,application/zip">
+      <label>数据集 ID</label>
+      <input id="tts-train-id" placeholder="例如 voice_dataset_01">
+      <button class="btn ghost" id="btn-tts-train-upload">上传训练数据</button>
+      <div class="meter mt"><span id="train-upload-bar" style="width:0%"></span></div>
+      <div class="muted small" id="train-upload-info">未上传</div>
+      <p class="muted small">RK3588 板端不直接训练大模型；训练在 PC/服务器完成后，将导出的 Piper ONNX 音色包上传即可部署。GPT-SoVITS 等方案建议在 PC 侧完成，板端只部署推理权重。</p>
+    </div>
+    <div class="card">
+      <div class="card-title">气象 Modbus / 串口设置</div>
+      <div class="cal-row">
+        <div><label>串口</label><input id="weather-port" value="/dev/ttyS9"></div>
+        <div><label>波特率</label><input id="weather-baud" type="number" value="9600"></div>
+      </div>
+      <div class="cal-row">
+        <div><label>从站地址</label><input id="weather-slave" type="number" value="1"></div>
+        <div><label>功能码</label><select id="weather-function"><option value="3">03 保持寄存器</option><option value="4">04 输入寄存器</option></select></div>
+      </div>
+      <div class="cal-row">
+        <div><label>寄存器地址</label><input id="weather-register" type="number" value="0"></div>
+        <div><label>读取数量</label><input id="weather-quantity" type="number" value="1"></div>
+      </div>
+      <div class="cal-row">
+        <div><label>倍率</label><input id="weather-scale" type="number" step="0.0001" value="0.1"></div>
+        <div><label>轮询间隔 (秒)</label><input id="weather-interval" type="number" step="0.5" value="2"></div>
+      </div>
+      <button class="btn primary" id="btn-weather-settings-save">保存气象设置</button>
+      <p class="muted small">RS485 / Modbus RTU，默认 9600 8N1，功能号 03，寄存器 0x0000，倍率 0.1。保存后轮询自动生效。</p>
+    </div>
+  </div>
+  <div class="card mt">
+    <div class="card-title">降水量传感器设置（翻斗式）</div>
+    <div class="cal-row">
+      <div><label>启用</label><select id="rain-enabled"><option value="1">启用</option><option value="0">停用</option></select></div>
+      <div><label>从站地址</label><input id="rain-slave" type="number" value="23"></div>
+    </div>
+    <div class="cal-row">
+      <div><label>功能码</label><select id="rain-function"><option value="3">03 保持寄存器</option><option value="4">04 输入寄存器</option></select></div>
+      <div><label>寄存器地址</label><input id="rain-register" type="number" value="0"></div>
+    </div>
+    <div class="cal-row">
+      <div><label>读取数量</label><input id="rain-quantity" type="number" value="1"></div>
+      <div><label>倍率 (mm/raw)</label><input id="rain-scale" type="number" step="0.0001" value="0.1"></div>
+    </div>
+    <p class="muted small">翻斗式雨量计默认寄存器 0x0000 为累计降水量；小时雨量由累计值差分计算。默认站号 23、倍率 0.1（raw×0.1 mm）。保存后随轮询自动生效。</p>
+  </div>
+  <div class="card mt">
+    <div class="card-title">修改当前用户密码</div>
+    <div class="row gap">
+      <input id="my-old-pass" type="password" placeholder="原密码">
+      <input id="my-new-pass" type="password" placeholder="新密码（至少8位）">
+      <button class="btn" id="btn-change-pass">修改密码</button>
+    </div>
+  </div>
+</section>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/camera-modern.js', v='20260915h') }}"></script>
+{% endblock %}

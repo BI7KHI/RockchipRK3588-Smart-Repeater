@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 运行期数据 / runtime data (不入库)
+instance/
+*.db
+*.db-wal
+*.db-shm
+recordings/
+www/
+*.wav
+*.mp4
+*.log
+
+# 大体积设计源文件 / large design sources
+*.eprj2
+InteractiveBOM_*.html
+*_backup/
+
+# 编辑器与系统 / editors & OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

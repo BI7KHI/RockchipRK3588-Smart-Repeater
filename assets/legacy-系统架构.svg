@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1450" height="920" viewBox="0 0 1450 920">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/>
+    </marker>
+  </defs>
+  <style>
+    .box { fill-opacity: 0.95; stroke-width: 2; }
+    .label { font-family: 'Microsoft YaHei', Arial, sans-serif; fill: #1a1a1a; }
+    .title { font-size: 26px; font-weight: bold; text-anchor: middle; fill: #202020; }
+    .h1 { font-size: 15px; font-weight: bold; text-anchor: middle; }
+    .txt { font-size: 12px; text-anchor: middle; }
+    .line { stroke: #555; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    .dash { stroke-dasharray: 6 4; }
+  </style>
+
+  <text x="725" y="45" class="title">多模态端侧智能无线电中继系统架构（双 GM3188 · 双天线 · 无双工器）</text>
+
+  <!-- RF side -->
+  <rect x="60" y="100" width="230" height="55" rx="10" class="box" fill="#f8cecc" stroke="#b85450"/>
+  <text x="175" y="125" class="h1">RX 天线</text>
+  <text x="175" y="145" class="txt">下行/接收频率</text>
+
+  <rect x="410" y="100" width="220" height="55" rx="10" class="box" fill="#f8cecc" stroke="#b85450"/>
+  <text x="520" y="125" class="h1">TX 天线</text>
+  <text x="520" y="145" class="txt">上行/发射频率</text>
+
+  <rect x="50" y="185" width="280" height="120" rx="12" class="box" fill="#ffe6cc" stroke="#d79b00"/>
+  <text x="190" y="220" class="h1">GM3188 #1 接收机（RX）</text>
+  <text x="190" y="245" class="txt">DF / SPK / BUSY-COS</text>
+  <text x="190" y="265" class="txt">RX 频率/信道选择</text>
+
+  <rect x="400" y="185" width="270" height="120" rx="12" class="box" fill="#ffe6cc" stroke="#d79b00"/>
+  <text x="535" y="220" class="h1">GM3188 #2 发射机（TX）</text>
+  <text x="535" y="245" class="txt">PTT / MIC</text>
+  <text x="535" y="265" class="txt">TX 频率/信道选择</text>
+
+  <rect x="720" y="185" width="320" height="140" rx="12" class="box" fill="#fff2cc" stroke="#d6b656"/>
+  <text x="880" y="220" class="h1">第三方中继控制板</text>
+  <text x="880" y="245" class="txt">RX 音频 → TX MIC</text>
+  <text x="880" y="265" class="txt">BUSY → PTT、双机互锁</text>
+  <text x="880" y="285" class="txt">音频缓冲/隔离/电平转换</text>
+  <text x="880" y="305" class="txt">RX/TX PC0-3 频率编码</text>
+
+  <!-- ELF2 main host -->
+  <rect x="430" y="470" width="860" height="430" rx="18" class="box" fill="#dae8fc" stroke="#6c8ebf" fill-opacity="0.35"/>
+  <text x="860" y="510" class="h1" font-size="20">ELF2 / RK3588 智能中继主控</text>
+
+  <rect x="450" y="540" width="180" height="90" rx="10" class="box" fill="#e1d5e7" stroke="#9673a6"/>
+  <text x="540" y="570" class="h1">3.5mm 音频</text>
+  <text x="540" y="592" class="txt">RX 音频采集</text>
+  <text x="540" y="610" class="txt">TTS/播报输出</text>
+
+  <rect x="660" y="540" width="220" height="90" rx="10" class="box" fill="#e1d5e7" stroke="#9673a6"/>
+  <text x="770" y="570" class="h1">GPIO / ADC / UART</text>
+  <text x="770" y="592" class="txt">RX BUSY、TX PTT</text>
+  <text x="770" y="610" class="txt">RX/TX PC0-3、ADC、UART9</text>
+
+  <rect x="450" y="660" width="230" height="100" rx="10" class="box" fill="#d5e8d4" stroke="#82b366"/>
+  <text x="565" y="690" class="h1">Radio Core / Daemon</text>
+  <text x="565" y="713" class="txt">RX:BUSY→录音/识别</text>
+  <text x="565" y="732" class="txt">TX:PTT→TTS/转发</text>
+  <text x="565" y="751" class="txt">RX/TX 频率联动/点名/日志</text>
+
+  <rect x="720" y="660" width="270" height="100" rx="10" class="box" fill="#d5e8d4" stroke="#82b366"/>
+  <text x="855" y="690" class="h1">端侧 AI 编排</text>
+  <text x="855" y="713" class="txt">ASR (sherpa-onnx) → LLM (Qwen/RKLLM)</text>
+  <text x="855" y="732" class="txt">TTS (Piper) + Skill/Tool 控制</text>
+
+  <rect x="450" y="800" width="270" height="90" rx="10" class="box" fill="#dae8fc" stroke="#6c8ebf"/>
+  <text x="585" y="832" class="h1">Web / API 服务</text>
+  <text x="585" y="855" class="txt">FastAPI + WebSocket + MQTT</text>
+  <text x="585" y="873" class="txt">SQLite 日志 / REST / 前端控制台</text>
+
+  <rect x="770" y="800" width="230" height="90" rx="10" class="box" fill="#f8cecc" stroke="#b85450"/>
+  <text x="885" y="832" class="h1">FRP / VOIP / 组网</text>
+  <text x="885" y="855" class="txt">frpc 公网穿透</text>
+  <text x="885" y="873" class="txt">AllStar/SIP/WebRTC 音频桥</text>
+
+  <!-- Cloud / remote / web -->
+  <rect x="1140" y="150" width="260" height="90" rx="12" class="box" fill="#f5f5f5" stroke="#666"/>
+  <text x="1270" y="185" class="h1">云服务器 / 总控</text>
+  <text x="1270" y="208" class="txt">frps、Nginx/Caddy TLS</text>
+  <text x="1270" y="226" class="txt">中心调度 / 日志 / 认证</text>
+
+  <rect x="1140" y="490" width="260" height="110" rx="12" class="box" fill="#f5f5f5" stroke="#666"/>
+  <text x="1270" y="525" class="h1">网页/手机客户端</text>
+  <text x="1270" y="548" class="txt">电压 / 气象 / CPU 负载</text>
+  <text x="1270" y="568" class="txt">RX/TX 频率切换 / 点名</text>
+  <text x="1270" y="586" class="txt">实时日志</text>
+
+  <rect x="1140" y="680" width="260" height="80" rx="12" class="box" fill="#f5f5f5" stroke="#666"/>
+  <text x="1270" y="717" class="h1">其他中继节点</text>
+  <text x="1270" y="738" class="txt">VOIP / IP 互联</text>
+
+  <!-- Lines -->
+  <path d="M175 155 L175 175" class="line"/>
+  <path d="M520 155 L520 175" class="line"/>
+  <path d="M330 245 L390 245" class="line"/>
+  <path d="M670 245 L710 245" class="line"/>
+  <text x="350" y="235" class="txt" font-size="10" fill="#666">RX音频/频率</text>
+  <text x="675" y="235" class="txt" font-size="10" fill="#666">TX音频/PTT/频率</text>
+  <path d="M880 325 L880 460" class="line dash"/>
+  <text x="885" y="400" class="txt" font-size="10" fill="#666">DF/SPK/MIC/BUSY/PTT/PC0-3/VCC/GND</text>
+
+  <path d="M540 630 L540 650" class="line"/>
+  <path d="M770 630 L770 650" class="line"/>
+  <path d="M565 760 L565 790" class="line"/>
+  <path d="M855 760 L855 790" class="line dash"/>
+  <text x="855" y="780" class="txt" font-size="10" fill="#666">意图/状态</text>
+  <path d="M585 890 L585 920 L885 920 L885 890" class="line" fill="none"/>
+  <path d="M885 890 L885 920 L1020 920 L1020 890" class="line" fill="none"/>
+
+  <!-- Connection to cloud -->
+  <path d="M1000 850 L1140 200" class="line" fill="none"/>
+  <text x="1000" y="360" class="txt" font-size="10" fill="#666">HTTPS / FRP</text>
+  <path d="M1270 270 L1270 480" class="line"/>
+  <text x="1273" y="390" class="txt" font-size="10" fill="#666">HTTPS/WSS</text>
+  <path d="M1270 600 L1270 670" class="line"/>
+  <text x="1273" y="640" class="txt" font-size="10" fill="#666">VOIP/网络</text>
+  <path d="M1140 720 C1070 720 1070 850 1010 850" class="line dash"/>
+</svg>

@@ -1,0 +1,345 @@
+<div align="center">
+
+# RK3588 智能无线电中继系统
+### Rockchip RK3588 Smart Radio Repeater
+
+**端侧 AI · 全隔离 IO · 收发分离双天线中继**
+**On-device AI · Fully Isolated IO · Separated TX/RX Dual-antenna Repeater**
+
+![系统架构 / System Architecture](assets/architecture.svg)
+
+`RK3588 / ELF2` · `Ubuntu 22.04` · `Flask + nginx` · `RKNPU LLM` · `Piper TTS` · `Modbus RTU` · `GPIO PTT`
+
+</div>
+
+---
+
+## 1. 项目简介 / Overview
+
+本项目中继台由 **瑞芯微 RK3588（ELF2 开发板）** 作为端侧主控，配合两块自研小板
+（**IO 隔离/驱动板**、**ADC 分压采集板**）、一块**第三方中继控制板**与
+**两台 Motorola GM3188 电台（收发分离、双天线、无需双工器）** 组成。
+RK3588 负责全部"智能"部分：网页控制台、端侧大模型（LLM）与 Agent 技能、
+端侧语音合成（TTS）、音频采集与转发、PTT 时序控制、电压/气象遥测、摄像头与录像。
+
+> **EN** — An RK3588 (ELF2) edge controller drives a custom **IO isolation/driver board**,
+> an **ADC divider board**, a third-party **repeater control board**, and **two Motorola GM3188
+> radios (separate TX/RX with two antennas, no duplexer)**. The RK3588 hosts the whole
+> intelligence stack: web console, on-device LLM + agent skills, on-device TTS, audio
+> capture/forwarding, PTT timing, telemetry (battery/PV voltage, wind, rain) and camera.
+
+设计目标 / Goals：
+
+| 目标 Goal | 说明 Description |
+|---|---|
+| 端侧自治 Offline-first | LLM/TTS 全本地推理，无外网依赖（LLM 走 RKNPU，TTS 走 Piper） |
+| 电气安全 Isolation | 数字量/PTT/音频/电源/RS485 全隔离，避免电台侧干扰与地环流 |
+| 语音可懂 Readable voice | 中英混读 + ICAO 字母解释法（呼号/航班号广播） |
+| 可运维 Operable | 网页控制台 + 审计日志 + GPIO 自检 + 运行状态遥测 |
+
+---
+
+## 2. 系统架构 / System Architecture
+
+<img src="assets/architecture.svg" alt="architecture" width="100%">
+
+### 分层说明 / Layers
+
+| 层 Layer | 组成 Components | 职责 Responsibility |
+|---|---|---|
+| ① 接入层 Clients | 手机/PC 浏览器 | HTTPS 控制台、实时对讲、LLM 对话 |
+| ② 端侧主控 Edge | RK3588（ELF2）+ Flask/nginx | 业务逻辑、AI 推理、IO 与遥测 |
+| ③ 隔离驱动 Isolation | 自研 IO 隔离/驱动板 | 光耦隔离 PC0–PC3、PTT 隔离驱动、音频隔离衰减、隔离 12V/RS485 |
+| ④ 中继控制 Controller | 第三方控制板 | PTT 输入、收发互斥切换、音频路由 |
+| ⑤ 电台天线 Radios | 2× GM3188 + 双天线 | 接收（→RK3588 MIC）/ 发射（RK3588 AUX→） |
+
+### 关键数据流 / Data flow
+
+- **接收链 RX**：天线 → RX 电台 → 控制板音频 → 隔离衰减 → RK3588 MIC → 网页实时播放 / 转写
+- **发射链 TX**：LLM 回复或网页语音 → 端侧 TTS → 3.5mm AUX → 隔离 → 控制板 → TX 电台（**PTT 同步拉高**）
+- **控制链 Control**：RK3588 `GPIO3_A1`（全局 GPIO 97）→ 隔离驱动 → 控制板 PTT（GM3188 为**低有效**）
+- **遥测链 Telemetry**：电池/光伏分压 → SARADC；风速/雨量 → RS485 Modbus RTU
+- **链路 Link**：eth0 强制 100 Mbps/Full（禁用自协商以规避链路抖动）
+
+---
+
+## 3. 功能特性 / Features
+
+| 模块 Module | 能力 Capability | 状态 |
+|---|---|---|
+| **端侧 LLM** | RKNPU Qwen2.5-1.5B（W8A8），OpenAI 兼容 `/v1/chat/completions`，SSE 流式 | ✅ |
+| **Agent 技能** | 8 个技能/工具调用（气象、雨量、电压、系统、电台、摄像头、时间、语音播报） | ✅ |
+| **速率监测** | 实时 TTFT / tok·s⁻¹ / tokens；历史统计入库与图表 | ✅ |
+| **提示词注入** | 系统提示词 + 实时变量 `{battery} {pv} {cpu_temp} {wind} …` | ✅ |
+| **端侧 TTS** | Piper 中/英/ICAO 混读、音色包上传/删除、流式分句朗读 | ✅ |
+| **网页对讲** | 麦克风 → 板端 AUX（按住说话，自动 PTT，看门狗释放） | ✅ |
+| **PTT 控制** | 引用计数、0.8 s 桥接、最短压发防抖、手动发射自检、事件追踪 | ✅ |
+| **电压遥测** | SARADC 12 bit 双路分压（电池/光伏）+ 零点/倍率校准 | ✅ |
+| **气象雨量** | RS485 Modbus：风速变送器 + 翻斗式雨量计（小时/日统计） | ✅ |
+| **摄像头** | V4L2 MJPEG 预览、循环/单次录像、回放、容量清理、OSD/RTMP | ✅ |
+| **Web 控制台** | 账号/角色、CSRF、审计日志、HTTPS 反向代理、系统监控 | ✅ |
+| **硬件板卡** | IO 隔离/驱动板、ADC 分压采集板 | 🔶 原理图完成，PCB 联调中 |
+
+---
+
+## 4. 项目结构 / Repository Layout
+
+```text
+RockchipRK3588-Smart-Repeator/
+├── README.md                     本文件（中英双语） / this bilingual README
+├── LICENSE                       GPL-3.0
+├── assets/
+│   ├── architecture.svg          系统架构图 / system architecture (SVG)
+│   ├── make_architecture_svg.py  架构图生成脚本 / diagram generator
+│   ├── check_layout.py           SVG 版式自检 / layout self-check
+│   ├── ELF2_40P20P_接线核对图.svg  接口接线核对图 / pinout check
+│   └── legacy-系统架构.svg        早期架构草图 / early draft
+├── board/                        ★ 板端软件（部署到 /www） / on-device software
+│   ├── app.py                    Flask 主程序（路由/鉴权/PTT/遥测/API）
+│   ├── agent_service.py          端侧 Agent：技能注册、提示词、工具解析、速率统计
+│   ├── tts_service.py            Piper 合成 + 中英/ICAO 分段 + 音色包管理
+│   ├── weather_service.py        RS485 Modbus 采集（风速/雨量）+ SQLite 存储
+│   ├── camera_service.py         V4L2 采集 + ffmpeg 录像/推流
+│   ├── postfilter.py             TTS 音频后处理（响度/滤波）
+│   ├── templates/ static/        Web 前端（原生 JS + SSE + 轮询）
+│   ├── deploy/                   systemd / nginx / udev / GPIO 部署脚本
+│   ├── tests/                    PTT 与流式朗读自动验证脚本
+│   ├── requirements.txt          Flask 2.2.2 / Werkzeug 2.2.2 / requests
+│   └── README.md                 板端软件详细说明（API、踩坑、调参）
+├── hardware/                     硬件设计 / hardware design
+│   ├── README.md                 隔离板 + 分压板设计说明与验算
+│   ├── eda_scripts/              嘉立创 EDA 自动化脚本（CDP 驱动建板/布线）
+│   ├── BOM_Board1_Schematic1_*.xlsx   BOM
+│   └── ELF2_P26_P28_schematic.png    P26/P28 排针原理图
+├── tools/                        外围调试脚本 / bring-up tools
+│   ├── scan_modbus.py raw_modbus.py probe_modbus_registers.py
+│   ├── debug_rs485.py test_modbus.py scan_modbus2.py
+│   └── make_elf2_wiring_svg.py
+└── docs/                         设计与部署文档 / design & deployment notes
+    ├── 多模态端侧智能无线电中继系统架构.md
+    ├── 部署记录-2026-09-09-端侧LLM.md … 部署记录-2026-09-13-PTT-GPIO.md
+    ├── 端侧TTS选型与音色训练方案.md / 板端TTS后处理接入说明.md
+    ├── ELF240P20P管脚功能分配和硬件连线.md
+    └── 3.5mm耳机接口音频输入原理图结论.md
+```
+
+---
+
+## 5. 实现方式 / Implementation
+
+### 5.1 端侧 LLM 与 Agent 技能 / On-device LLM & Agent
+
+- **推理服务**：`rkllm-server` 暴露 OpenAI 兼容接口（`127.0.0.1:8001/v1`），
+  模型 Qwen2.5-1.5B（RKNPU W8A8）；实测 **首字 0.9 s、13~24 tok/s**。
+- **流式**：Flask 侧 `requests(stream=True)` 转发 SSE，同时逐帧统计 tokens 与 TTFT。
+- **Agent 循环**：把技能清单写进提示词，模型输出一行纯文本协议
+
+  ```
+  READ get_power {}
+  ```
+
+  后台解析 → 执行技能 → 结果回灌 → 模型用自然语言总结（最多 5 轮）。
+- **技能集**：`get_weather` `get_rain` `get_power` `get_system` `get_radio` `get_camera` `get_time` `speak`。
+- **工程细节**（板端模型的三个坑，详见第 10 节）：指令并入用户消息、避开 `<tool_call>`
+  特殊 token、提示词压到 ~350 字、工具名别名归一。
+
+> **EN** — The RKLLM server exposes an OpenAI-compatible API. The agent uses a plain-text
+> `READ <tool> {}` protocol (Qwen's `<tool_call>` token is dropped by the server), maps
+> model-invented tool names via an alias/keyword resolver, and loops up to 5 rounds while
+> streaming tool/usage events to the browser.
+
+### 5.2 端侧 TTS 与流式朗读 / On-device TTS
+
+- Piper（板端为 2023 版 C++ 构建，`/opt/ai/piper`，音色 `/opt/ai/voices/<id>/model.onnx`）。
+- **中英混读**：按语言分段 → 中文用 `Rosmontis_v2`、英文用 `Rosmontis_en`、
+  **ICAO 呼号/字母解释法**用 `en_US-lessac-medium`（可读性最佳）→ 拼接为一段音频。
+- **流式朗读**：LLM 增量按句切分 → 逐段合成 → 逐段播放（RTF≈0.11~0.13），
+  整条回复期间 **PTT 保持使能**（会话级引用计数）。
+
+### 5.3 PTT 控制状态机 / PTT state machine
+
+```
+_ptt_retain()  ──► HOLD_COUNT+1 ──(0→1)──► GPIO=1
+_ptt_release() ──► HOLD_COUNT-1 ──(→0)───► 0.8s 定时 ──► 最短压发校验 ──► GPIO=0
+```
+
+- 引用计数支持"音频 + 网页对讲 + 手动自检"并发；0.8 s 释放延时桥接流式 TTS 分片间隙。
+- **最短压发**（`RELAY_PTT_MIN_HOLD`，默认 1 s）抑制继电器亚秒级反复 key。
+- **看门狗**：流式会话空闲 / 对讲 8 s 无数据 / 手动发射 8 s 无心跳 → 强制释放。
+- **事件追踪**：每次拉高/拉低记录「动作 + 原因 + 调用者 + 引用计数」，页面直接可见。
+- **AT 侧极性**：GM3188 PTT 为**低有效**；隔离板必须匹配该极性（必要时反相）。
+
+### 5.4 遥测：SARADC 与 Modbus / Telemetry
+
+- **SARADC**：12 bit、0–1.8 V（`0.43945 mV/LSB`），通过 sysfs IIO 读取
+  `in_voltage{4,6}_raw`；分压网络 → 倍率校准（电池 **10.11 V/V**、光伏 **17.01 V/V**）。
+- **Modbus RTU**：`/dev/ttyS9` 9600 8N1，站号 1（风速）、23（雨量），
+  自实现 CRC16 与帧解析，数据入 SQLite 供图表与统计。
+
+### 5.5 音视频 / Audio & Video
+
+- **音频**：ALSA `plughw:CARD=rockchipnau8822,DEV=0`（NAU8822 codec）；
+  TTS/对讲走 `aplay`，采集走 `arecord`；全局音量与静音由 `amixer` 控制。
+- **视频**：V4L2 MJPEG 采集 → ffmpeg 转封装为分段 MP4 / RTMP 推流；
+  循环录像按容量/文件数/总配额自动清理。
+
+### 5.6 Web 控制台与安全 / Web console & security
+
+- nginx（443，自签证书）→ Flask（`127.0.0.1:8080`，dev server，threaded）；
+- 账号（admin/user）+ 会话 + CSRF（含 multipart/octet-stream 兼容）+ 审计日志；
+- 前端：原生 JS，SSE 流式（LLM/Agent）+ 定时轮询（状态/电平），无外部 CDN 依赖。
+
+---
+
+## 6. 快速开始 / Quick Start
+
+### 6.1 硬件 / Hardware checklist
+
+| 部件 | 型号/说明 |
+|---|---|
+| 主控 | ELF2（RK3588）开发板，Ubuntu 22.04 |
+| 中继控制板 | 第三方，PTT 输入 + 收发切换 + 音频路由 |
+| 电台 | 2× Motorola GM3188（TX / RX 各一）+ 双天线 |
+| 自研板卡 | IO 隔离/驱动板、ADC 分压采集板 |
+| 传感器 | 风速变送器（RS485）、翻斗式雨量计（RS485）、摄像头（USB/CSI） |
+| 电源 | 14 V 锂电 / 25 V 光伏 → 隔离 12 V |
+
+### 6.2 板端部署 / Deploy on the board
+
+```bash
+# 1) 依赖
+sudo apt update && sudo apt install -y python3-pip nginx ffmpeg alsa-utils
+pip3 install -r board/requirements.txt
+
+# 2) 部署 Web 控制中心到 /www
+sudo cp -r board/*.py board/static board/templates /www/
+
+# 3) 服务与 PTT GPIO（systemd / udev / nginx）
+sudo cp board/deploy/relay-web.service /etc/systemd/system/
+sudo cp board/deploy/relay-nginx.conf /etc/nginx/sites-available/relay
+sudo ln -sf /etc/nginx/sites-available/relay /etc/nginx/sites-enabled/relay
+sudo bash board/deploy/deploy_ptt_gpio.sh          # 导出 GPIO3_A1 + udev 权限
+sudo systemctl daemon-reload && sudo systemctl restart relay-web nginx
+
+# 4) 端侧 AI 运行时（需自行准备）
+#    - rkllm-server：RKNPU LLM，监听 127.0.0.1:8001/v1
+#    - piper：/opt/ai/piper/piper + 音色 /opt/ai/voices/<voice>/model.onnx(.json)
+```
+
+浏览器访问 `https://<板卡IP>/`（自签证书需"继续前往"）→ 默认账号 `Admin`（首次部署密码可经
+`RELAY_INIT_ADMIN_PASSWORD` 指定，**请立即修改**）。
+
+> **EN** — Install dependencies, copy `board/*` to `/www`, install the systemd/nginx/udev
+> units from `board/deploy/`, then start `relay-web` + `nginx`. Two external runtimes are
+> required: `rkllm-server` (OpenAI-compatible, `127.0.0.1:8001/v1`) and `piper`
+> (`/opt/ai/piper` + voices in `/opt/ai/voices`).
+
+---
+
+## 7. 主要 API / API Overview
+
+| 接口 | 方法 | 说明 |
+|---|---|---|
+| `/api/status` | GET | 运行状态：CPU/内存/温度/磁盘/负载/电压 |
+| `/api/voltage/calibrate` | POST | 电压零点与倍率校准 |
+| `/api/chat` | POST | LLM 对话（支持 `stream`，含提示词注入与速率统计） |
+| `/api/agent/chat` | POST | **Agent 对话**（SSE：`iter/delta/tool_start/tool_result/usage`） |
+| `/api/agent/tools` | GET | 技能清单、启用状态、提示词实时变量 |
+| `/api/llm/stats` | GET/DELETE | 生成速率统计（最近 N 次 + 今日汇总） |
+| `/api/tts/speak` `/api/tts/stream/*` | POST | 普通朗读 / 流式朗读会话 |
+| `/api/tts/voices` `/api/tts/voice/<id>` | GET/DELETE | 音色包管理 |
+| `/api/ptt/status` `/api/ptt/diag` `/api/ptt/manual` | GET/POST | PTT 状态、全链路自检信息、手动发射 |
+| `/api/intercom/push` `/api/intercom/push/stop` | POST | 网页实时对讲推流（自动 PTT） |
+| `/api/camera/*` | GET/POST | 预览、录像、分段、回放、存储统计 |
+| `/api/weather/*` `/api/rain/*` | GET | 风速/雨量实时与历史 |
+
+完整参数与示例见 [`board/README.md`](board/README.md)。
+
+---
+
+## 8. 硬件设计 / Hardware Design
+
+### 8.1 IO 隔离 / 驱动板
+
+- **数字量隔离**：PC0–PC3（5 V）经光耦隔离到 3.3 V 侧（注意 VDD1 电平与限流电阻匹配）。
+- **PTT 隔离驱动**：3.3 V GPIO → 限流 → 光耦/三极管 → 控制板 PTT（**低有效**）；
+  注意 RK3588 单脚典型驱动能力 2–4 mA，建议光耦限流电阻 ≈1 kΩ（Vf≈1.2 V ⇒ If≈2 mA）。
+- **音频隔离**：隔离变压器 + 分压/衰减网络，避免地环流与共模干扰。
+- **电源/RS485**：隔离 12 V（DC-DC）、数字隔离器（如 ADuM1200 系列）。
+
+### 8.2 ADC 分压采集板（电池 / 光伏）
+
+| 通道 | 上臂 | 下臂 | 分压比 | 倍率 | 满量程 | 分辨率 |
+|---|---|---|---|---|---|---|
+| 电池 VBAT | R14 100 Ω + R15 91 kΩ | R16 10 kΩ | 0.098912 | **10.11 V/V** | 18.198 V | 4.443 mV/LSB |
+| 光伏 PV | 100 Ω + 160 kΩ | 10 kΩ | 0.058789 | **17.01 V/V** | 30.618 V | 7.475 mV/LSB |
+
+换算链路：`引脚电压 = (raw − 零点) × 0.43945 mV`，`实际电压 = 引脚电压 × 倍率`。
+
+### 8.3 PTT 接口
+
+`RK3588 GPIO3_A1（Linux 全局 GPIO 97，gpiochip3 line1）→ 隔离/驱动 → 中继控制板 PTT`；
+控制板到 GM3188 的 PTT 为**低有效**（拉低发射）。详见
+[`hardware/README.md`](hardware/README.md) 与 `assets/ELF2_40P20P_接线核对图.svg`。
+
+---
+
+## 9. 任务进度 / Progress
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| 1 | 端侧 LLM 部署（RKNPU W8A8 + OpenAI 兼容服务） | ✅ 完成 |
+| 2 | 端侧 TTS（中英混读 / ICAO / 音色包 / 流式朗读） | ✅ 完成 |
+| 3 | Web 控制中心（账号/审计/HTTPS/系统监控） | ✅ 完成 |
+| 4 | PTT 控制（引用计数/防抖/自检/事件追踪） | ✅ 完成 |
+| 5 | 网页实时对讲（按住说话 + 自动 PTT） | ✅ 完成 |
+| 6 | 摄像头预览 / 录像 / 回放 / 清理 | ✅ 完成 |
+| 7 | 遥测：SARADC 电压 + RS485 风速/雨量 | ✅ 完成 |
+| 8 | **Agent 技能/工具调用 + 提示词注入 + 速率监测** | ✅ 完成 |
+| 9 | IO 隔离/驱动板：原理图 → PCB 布线 → 打样 | 🔶 进行中（原理图完成） |
+| 10 | ADC 分压采集板：接入实机并校准 | 🔶 进行中（设计/验算完成） |
+| 11 | 音频链路：RPT MIC 与 ELF2 MIC 共节点方案 | 🔶 进行中（需隔直/限幅/增益重设） |
+| 12 | 端侧模型工具选择稳定性（关键词→技能强制映射） | 🔶 进行中 |
+| 13 | 整机联调、现场覆盖测试、OTA 远程升级 | ⏳ 待开始 |
+
+---
+
+## 10. 已知问题与踩坑 / Known Issues & Pitfalls
+
+| 现象 Symptom | 根因 Root cause | 处理 Workaround |
+|---|---|---|
+| 工具调用指令完全无效 | 板端 RKLLM **忽略 `system` 角色** | 指令并入**用户消息**（`【系统设定】…【用户问题】…`） |
+| 一旦出现 `<tool_call>` 就返回**空串** | `<tool_call>` 是 Qwen **特殊 token**，被服务端丢弃 | 改用纯文本 `READ <tool> {}` 协议 |
+| 提示词 > 约 400 字直接空输出 | 板端长提示词异常 | 指令压到 ~350 字，工具结果紧凑化，第二轮用短提示 |
+| 模型自造工具名（`get_battery_voltage`） | 1.5B 稳定性 | 别名表 + 关键词归一 |
+| 流式朗读无声、PTT 不动 | 后台线程读设置走了 Flask `g`，抛 `RuntimeError` 被吞 | 后台统一用直连数据库读取设置 |
+| 播放错误 + PTT 亚秒级反复 key | 流式与手动播放各起一路 `aplay` 抢声卡 | 统一到同一播放函数（同一把锁 + `CURRENT_PLAY_PROC` 抢占） |
+| 按住说话中途自己停 | `pointerleave` 在鼠标抖动时误触发 | `setPointerCapture` + 去掉 `pointerleave`，被取消时自动恢复 |
+| 音色包上传后 piper 直接崩溃 | 板端 piper 要求 `phoneme_id_map` 键为**单码点** | 打包时剥离 `aɪ aʊ ɔɪ eɪ oʊ` 等多码点键 |
+| 官方英文音色报 "Model file doesn't exist" | 文件名必须为 `model.onnx` / `model.onnx.json` | 上传/登记时统一改名 |
+| 网页长连接偶发中断 | eth0 自协商抖动（1G↔100M） | 强制 `100M/Full` 且关闭自协商；前端分片投递加退避重试 |
+
+---
+
+## 11. 文档索引 / Documentation
+
+| 文档 | 内容 |
+|---|---|
+| [`board/README.md`](board/README.md) | **板端软件详解**：API、参数、部署、排障（推荐先读） |
+| [`hardware/README.md`](hardware/README.md) | 隔离板/分压板设计说明与验算 |
+| [`tools/README.md`](tools/README.md) | Modbus/RS485 调试脚本用法 |
+| [`docs/多模态端侧智能无线电中继系统架构.md`](docs/) | 系统架构设计长文 |
+| [`docs/部署记录-*.md`](docs/) | 各子系统部署实录（LLM / NPU / TTS / 摄像头 / 气象 / PTT） |
+| [`docs/端侧TTS选型与音色训练方案.md`](docs/) | TTS 选型与音色训练（含 ICAO 适配） |
+
+---
+
+## 12. 许可 / License
+
+[GPL-3.0](LICENSE)
+
+> 本项目涉及无线电发射与高压电源，**务必遵守当地无线电管理法规**；
+> 发射（PTT）会占用信道，请在授权频段与合法呼号下测试。
+>
+> **EN** — This project involves RF transmission and high-voltage power. Comply with local
+> radio regulations and only transmit on authorized frequencies with a valid callsign.

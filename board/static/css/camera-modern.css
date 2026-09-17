@@ -1,0 +1,1052 @@
+/* ELF2 现代化摄像头录像管理 / Hikvision 风格回放控制台 */
+
+:root {
+  --cam-bg: #080d16;
+  --cam-panel: #0d1523;
+  --cam-panel2: #111c2e;
+  --cam-panel3: #162238;
+  --cam-border: #22304a;
+  --cam-border-soft: rgba(255, 255, 255, .06);
+  --cam-cyan: #22d3ee;
+  --cam-blue: #3b82f6;
+  --cam-orange: #f59e0b;
+  --cam-green: #22c55e;
+  --cam-red: #ef4444;
+  --cam-text: #e8eefc;
+  --cam-muted: #8fa2c4;
+}
+
+.camera-policy-card code,
+.cam-storage-policy code {
+  color: #93c5fd;
+  background: rgba(59, 130, 246, .12);
+  padding: 1px 5px;
+  border-radius: 5px;
+}
+
+.camera-record-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(13, 21, 38, .72);
+}
+
+.camera-record-label {
+  color: var(--muted);
+  font-size: 12px;
+  margin-right: 2px;
+  white-space: nowrap;
+}
+
+.camera-entry-card {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+  border-color: rgba(59, 130, 246, .5);
+  background:
+    radial-gradient(420px 220px at 100% 0%, rgba(34, 211, 238, .16), transparent 68%),
+    linear-gradient(180deg, #16233a, #101a2b);
+  display: flex;
+  flex-direction: column;
+}
+
+.camera-entry-glow {
+  position: absolute;
+  right: -50px;
+  top: -50px;
+  width: 150px;
+  height: 150px;
+  border-radius: 50%;
+  background: rgba(59, 130, 246, .28);
+  filter: blur(34px);
+  pointer-events: none;
+}
+
+.camera-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  position: relative;
+  z-index: 1;
+}
+
+.camera-entry-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(180deg, #3b82f6, #2563eb);
+  color: #fff;
+  font-size: 18px;
+  box-shadow: 0 8px 20px rgba(37, 99, 235, .35);
+  flex: 0 0 38px;
+}
+
+.camera-entry-head b {
+  display: block;
+  margin-top: 2px;
+  font-size: 14px;
+}
+
+.cam-entry-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 14px 0;
+  position: relative;
+  z-index: 1;
+}
+
+.cam-entry-metrics > div {
+  background: rgba(3, 8, 18, .55);
+  border: 1px solid rgba(148, 163, 184, .12);
+  border-radius: 10px;
+  padding: 9px 10px;
+}
+
+.cam-entry-metrics span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.cam-entry-metrics b {
+  display: block;
+  margin-top: 4px;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+.camera-entry-card .btn.block {
+  position: relative;
+  z-index: 1;
+  margin-top: auto;
+}
+
+.cam-storage-policy {
+  border-top: 1px dashed var(--cam-border);
+  padding-top: 10px;
+  margin-top: 2px;
+}
+
+.cam-storage-policy-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #cbd5e1;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.cam-storage-policy-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.cam-storage-policy-grid > div {
+  background: rgba(15, 23, 42, .62);
+  border: 1px solid var(--cam-border-soft);
+  border-radius: 8px;
+  padding: 7px 8px;
+}
+
+.cam-storage-policy-grid span {
+  display: block;
+  color: var(--cam-muted);
+  font-size: 10px;
+}
+
+.cam-storage-policy-grid b {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cam-console.flash {
+  animation: cam-console-flash 1.6s ease;
+}
+
+@keyframes cam-console-flash {
+  0%, 100% { box-shadow: 0 20px 60px rgba(0, 0, 0, .28); }
+  30% { box-shadow: 0 0 0 2px rgba(59, 130, 246, .85), 0 0 34px rgba(59, 130, 246, .5); }
+}
+
+.cam-policy-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.cam-policy-grid > div {
+  background: rgba(13, 21, 38, .8);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 10px 12px;
+}
+
+.cam-policy-grid span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cam-policy-grid b {
+  display: block;
+  margin-top: 4px;
+  font-size: 15px;
+}
+
+.cam-console {
+  background:
+    radial-gradient(1000px 340px at 8% -10%, rgba(37, 99, 235, .16), transparent 62%),
+    linear-gradient(180deg, #0e1727, var(--cam-bg));
+  border: 1px solid var(--cam-border);
+  border-radius: 16px;
+  padding: 16px;
+  margin-top: 14px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, .28);
+  color: var(--cam-text);
+}
+
+.cam-console h3 {
+  margin: 0;
+  font-size: 17px;
+  letter-spacing: .3px;
+}
+
+.cam-console-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.cam-console-head p {
+  margin: 4px 0 0;
+}
+
+.cam-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(59, 130, 246, .12);
+  border: 1px solid rgba(59, 130, 246, .3);
+  color: #bfdbfe;
+  border-radius: 99px;
+  padding: 4px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.cam-console-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.72fr) minmax(320px, .82fr);
+  gap: 14px;
+  align-items: stretch;
+}
+
+.cam-player-panel,
+.cam-storage-panel,
+.cam-timeline-panel,
+.cam-segment-panel {
+  background: linear-gradient(180deg, rgba(18, 28, 46, .96), rgba(10, 16, 28, .96));
+  border: 1px solid var(--cam-border);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.cam-player-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.cam-player-wrap {
+  position: relative;
+  min-height: 330px;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.cam-player-wrap video {
+  width: 100%;
+  height: 100%;
+  min-height: 330px;
+  max-height: 520px;
+  object-fit: contain;
+  background: #000;
+  display: block;
+}
+
+.cam-player-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+  font-size: 14px;
+  background: radial-gradient(circle at center, rgba(30, 41, 59, .8), rgba(0, 0, 0, .92));
+  pointer-events: none;
+  text-align: center;
+  padding: 20px;
+}
+
+.cam-player-empty.hidden { display: none; }
+
+.cam-player-loading {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: none;
+  gap: 6px;
+  z-index: 5;
+}
+
+.cam-player-loading.show { display: flex; }
+
+.cam-player-loading span {
+  width: 8px;
+  height: 26px;
+  border-radius: 6px;
+  background: var(--cam-cyan);
+  animation: cam-bounce 1s ease-in-out infinite;
+}
+
+.cam-player-loading span:nth-child(2) { animation-delay: .15s; }
+.cam-player-loading span:nth-child(3) { animation-delay: .3s; }
+
+@keyframes cam-bounce {
+  0%, 100% { transform: scaleY(.45); opacity: .55; }
+  50% { transform: scaleY(1); opacity: 1; }
+}
+
+.cam-player-osd {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  min-width: 150px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: rgba(2, 6, 23, .68);
+  border: 1px solid rgba(148, 163, 184, .22);
+  backdrop-filter: blur(5px);
+  pointer-events: none;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.cam-player-osd #cam-player-title {
+  color: #fff;
+  font-weight: 600;
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cam-player-osd #cam-player-state { color: #93c5fd; }
+
+.cam-controlbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border-top: 1px solid var(--cam-border);
+  background: rgba(3, 8, 18, .76);
+}
+
+.cam-ctl {
+  min-width: 34px;
+  height: 32px;
+  padding: 0 9px;
+  border-radius: 8px;
+  border: 1px solid var(--cam-border);
+  background: #111d30;
+  color: var(--cam-text);
+  line-height: 1;
+}
+
+.cam-ctl:hover {
+  border-color: var(--cam-blue);
+  color: #fff;
+}
+
+.cam-ctl.primary {
+  background: linear-gradient(180deg, #3b82f6, #2563eb);
+  border-color: #3b82f6;
+  color: #fff;
+  min-width: 42px;
+}
+
+.cam-ctl:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+.cam-time {
+  color: #cbd5e1;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.cam-progress {
+  position: relative;
+  flex: 1 1 150px;
+  min-width: 110px;
+  height: 20px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+
+.cam-progress::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 5px;
+  border-radius: 99px;
+  background: #26334d;
+}
+
+.cam-progress-buffer,
+.cam-progress-played {
+  position: absolute;
+  left: 0;
+  height: 5px;
+  border-radius: 99px;
+  pointer-events: none;
+}
+
+.cam-progress-buffer {
+  background: #334155;
+  width: 0;
+}
+
+.cam-progress-played {
+  background: linear-gradient(90deg, var(--cam-cyan), var(--cam-blue));
+  width: 0;
+}
+
+.cam-progress-thumb {
+  position: absolute;
+  left: 0;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #fff;
+  border: 3px solid var(--cam-cyan);
+  transform: translateX(-50%);
+  pointer-events: none;
+  box-shadow: 0 0 12px rgba(34, 211, 238, .75);
+}
+
+.cam-mini-select {
+  width: auto;
+  min-width: 84px;
+  margin: 0;
+  padding: 7px 9px;
+  background: #0b1322;
+  border-color: var(--cam-border);
+}
+
+.cam-check {
+  color: #cbd5e1;
+  font-size: 12px;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.cam-check input { margin: 0; }
+
+/* 存储面板 */
+.cam-storage-panel {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.cam-storage-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: #dbeafe;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.cam-storage-gauges {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.cam-gauge {
+  position: relative;
+  aspect-ratio: 1;
+  max-width: 130px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.cam-gauge svg {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+  overflow: visible;
+}
+
+.cam-gauge-track,
+.cam-gauge-value {
+  fill: none;
+  stroke-width: 9;
+  stroke-linecap: round;
+}
+
+.cam-gauge-track { stroke: rgba(148, 163, 184, .14); }
+
+.cam-gauge-value {
+  stroke-dasharray: 301.59;
+  stroke-dashoffset: 301.59;
+  transition: stroke-dashoffset .5s ease, stroke .3s ease;
+}
+
+.cam-gauge-value.disk { stroke: var(--cam-blue); filter: drop-shadow(0 0 6px rgba(59, 130, 246, .5)); }
+.cam-gauge-value.loop { stroke: var(--cam-cyan); filter: drop-shadow(0 0 6px rgba(34, 211, 238, .45)); }
+.cam-gauge-value.storage { stroke: var(--cam-green); filter: drop-shadow(0 0 6px rgba(34, 197, 94, .45)); }
+
+.cam-gauge-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  pointer-events: none;
+}
+
+.cam-gauge-label b {
+  font-size: 17px;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+
+.cam-gauge-label span {
+  color: var(--cam-muted);
+  font-size: 10px;
+  margin-top: 2px;
+}
+
+.cam-storage-bars {
+  display: grid;
+  gap: 12px;
+}
+
+.cam-storage-bar-head,
+.cam-storage-bar-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.cam-storage-bar-head { color: #cbd5e1; margin-bottom: 6px; }
+.cam-storage-bar-head b { color: #fff; font-variant-numeric: tabular-nums; }
+
+.cam-bar-track {
+  height: 8px;
+  border-radius: 99px;
+  background: #0a1220;
+  overflow: hidden;
+}
+
+.cam-bar-track > span {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 99px;
+  transition: width .5s ease;
+}
+
+.cam-bar-track .loop { background: linear-gradient(90deg, #06b6d4, #22d3ee); }
+.cam-bar-track .storage { background: linear-gradient(90deg, #22c55e, #86efac); }
+.cam-bar-track .disk { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+
+.cam-storage-bar-foot {
+  color: var(--cam-muted);
+  font-size: 11px;
+  margin-top: 5px;
+}
+
+.cam-storage-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: auto;
+}
+
+.cam-storage-meta > div {
+  background: rgba(15, 23, 42, .62);
+  border: 1px solid var(--cam-border-soft);
+  border-radius: 9px;
+  padding: 8px 10px;
+}
+
+.cam-storage-meta span {
+  display: block;
+  color: var(--cam-muted);
+  font-size: 11px;
+}
+
+.cam-storage-meta b {
+  display: block;
+  margin-top: 3px;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 时间轴 */
+.cam-timeline-panel {
+  margin-top: 14px;
+}
+
+.cam-timeline-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--cam-border);
+  background: rgba(4, 10, 20, .55);
+}
+
+.cam-date-input {
+  width: 150px;
+  margin: 0;
+  padding: 7px 9px;
+  background: #0b1322;
+  border-color: var(--cam-border);
+  color-scheme: dark;
+}
+
+.cam-timeline-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, .035) 1px, transparent 1px) 0 0 / 32px 100%,
+    #070d18;
+  scrollbar-color: #2b3b58 transparent;
+}
+
+.cam-timeline-inner {
+  position: relative;
+  width: 100%;
+  min-width: 100%;
+  padding: 0 0 10px;
+  user-select: none;
+  cursor: crosshair;
+}
+
+.cam-timeline-ruler {
+  position: relative;
+  height: 28px;
+  border-bottom: 1px solid rgba(148, 163, 184, .14);
+}
+
+.cam-timeline-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid rgba(148, 163, 184, .16);
+}
+
+.cam-timeline-tick.major {
+  border-left-color: rgba(148, 163, 184, .36);
+}
+
+.cam-timeline-tick span {
+  position: absolute;
+  left: 4px;
+  top: 5px;
+  color: #94a3b8;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.cam-timeline-lanes {
+  position: relative;
+  padding: 8px 0 4px;
+}
+
+.cam-timeline-lane {
+  position: relative;
+  height: 42px;
+}
+
+.cam-lane-label {
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  z-index: 2;
+  transform: translateY(-50%);
+  color: var(--cam-muted);
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: rgba(8, 13, 22, .72);
+  pointer-events: none;
+}
+
+.cam-lane-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 7px;
+  height: 28px;
+  border-radius: 7px;
+  background: rgba(15, 23, 42, .64);
+  border: 1px solid rgba(148, 163, 184, .1);
+  overflow: hidden;
+}
+
+.cam-segment-bar {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  min-width: 1px;
+  border-radius: 4px;
+  opacity: .88;
+  cursor: pointer;
+  transition: opacity .15s ease, transform .15s ease, box-shadow .15s ease;
+}
+
+.cam-segment-bar.loop { background: linear-gradient(180deg, #22d3ee, #0891b2); }
+.cam-segment-bar.manual { background: linear-gradient(180deg, #fbbf24, #d97706); }
+.cam-segment-bar.selected {
+  opacity: 1;
+  box-shadow: 0 0 0 1px #fff, 0 0 14px rgba(255, 255, 255, .8);
+  transform: scaleY(1.08);
+  z-index: 3;
+}
+.cam-segment-bar:hover { opacity: 1; }
+
+.cam-timeline-playhead {
+  position: absolute;
+  top: 24px;
+  bottom: 8px;
+  width: 2px;
+  background: #f43f5e;
+  box-shadow: 0 0 10px rgba(244, 63, 94, .8);
+  pointer-events: none;
+  z-index: 6;
+  display: none;
+}
+
+.cam-timeline-playhead.show { display: block; }
+
+.cam-timeline-playhead span {
+  position: absolute;
+  top: -6px;
+  left: 50%;
+  width: 11px;
+  height: 11px;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: #f43f5e;
+  border: 2px solid #fff;
+}
+
+.cam-timeline-tooltip {
+  position: absolute;
+  z-index: 8;
+  display: none;
+  background: rgba(2, 6, 23, .96);
+  border: 1px solid var(--cam-border);
+  border-radius: 8px;
+  padding: 6px 9px;
+  color: #e2e8f0;
+  font-size: 11px;
+  line-height: 1.5;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.cam-timeline-tooltip.show { display: block; }
+
+.cam-timeline-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 9px 12px;
+  border-top: 1px solid var(--cam-border);
+  background: rgba(4, 10, 20, .5);
+}
+
+.cam-legend {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: var(--cam-muted);
+  font-size: 11px;
+}
+
+.cam-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.cam-legend i {
+  display: inline-block;
+  width: 12px;
+  height: 7px;
+  border-radius: 3px;
+}
+
+.cam-legend .dot-loop { background: #22d3ee; }
+.cam-legend .dot-manual { background: #f59e0b; }
+.cam-legend .dot-selected { background: #fff; box-shadow: 0 0 8px rgba(255,255,255,.8); }
+
+.cam-selected-info {
+  color: #cbd5e1;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  max-width: 70%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 分片管理 */
+.cam-segment-panel {
+  margin-top: 14px;
+}
+
+.cam-segment-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--cam-border);
+  background: rgba(4, 10, 20, .5);
+}
+
+.cam-search {
+  width: 220px;
+  margin: 0;
+  padding: 7px 10px;
+  background: #0b1322;
+  border-color: var(--cam-border);
+}
+
+.cam-segment-table {
+  margin: 0;
+  font-size: 12px;
+}
+
+.cam-segment-table th,
+.cam-segment-table td {
+  padding: 9px 10px;
+  white-space: nowrap;
+}
+
+.cam-segment-table tbody tr:hover { background: rgba(59, 130, 246, .07); }
+
+.cam-check-col { width: 34px; }
+
+.cam-type-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 99px;
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.cam-type-badge.loop { color: #a5f3fc; background: rgba(8, 145, 178, .22); }
+.cam-type-badge.manual { color: #fde68a; background: rgba(217, 119, 6, .2); }
+.cam-type-badge.other { color: #cbd5e1; background: rgba(100, 116, 139, .22); }
+
+.cam-row-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.cam-row-actions .btn {
+  padding: 5px 9px;
+  font-size: 11px;
+  border-radius: 7px;
+}
+
+.cam-pagination {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  border-top: 1px solid var(--cam-border);
+}
+
+.cam-segment-empty {
+  text-align: center;
+  color: var(--cam-muted);
+  padding: 26px 10px;
+}
+
+.btn.ghost.danger {
+  color: #fca5a5;
+  border-color: rgba(239, 68, 68, .4);
+}
+
+.btn.ghost.danger:hover {
+  border-color: var(--cam-red);
+  background: rgba(239, 68, 68, .1);
+}
+
+@media (max-width: 1080px) {
+  .cam-console-grid { grid-template-columns: 1fr; }
+  .cam-player-wrap,
+  .cam-player-wrap video { min-height: 260px; }
+  .cam-storage-panel { min-height: auto; }
+}
+
+@media (max-width: 640px) {
+  .cam-console { padding: 10px; border-radius: 12px; }
+  .cam-console-head { flex-direction: column; }
+  .cam-console-grid { gap: 10px; }
+  .cam-storage-gauges { grid-template-columns: repeat(3, 1fr); }
+  .cam-storage-meta { grid-template-columns: 1fr 1fr; }
+  .cam-entry-metrics,
+  .cam-storage-policy-grid { grid-template-columns: 1fr 1fr; }
+  .cam-controlbar { gap: 6px; }
+  .cam-time { font-size: 11px; }
+  .cam-segment-toolbar > div { width: 100%; flex-wrap: wrap; }
+  .cam-search { width: 100%; }
+  .cam-policy-grid { grid-template-columns: 1fr; }
+  .cam-selected-info { max-width: 100%; white-space: normal; }
+}
+
+
+/* ================================================================
+   摄像头页统一风格（2026-09-15）
+   让「实时预览 / 录像控制 / 运行状态 / 高级设置」与回放控制台同一视觉体系
+   ================================================================ */
+#tab-camera.cam-modern .panel-head { align-items: center; gap: 12px; flex-wrap: wrap; }
+#tab-camera.cam-modern .panel-head h2 { margin: 0; }
+.cam-head-meta b { color: var(--cam-text); font-weight: 600; }
+
+.cam-top-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(300px, .6fr);
+  gap: 14px;
+  margin-top: 12px;
+}
+.cam-top-side { display: grid; gap: 14px; align-content: start; }
+@media (max-width: 1080px) { .cam-top-grid { grid-template-columns: 1fr; } }
+
+/* 卡片与回放控制台同色系 */
+#tab-camera.cam-modern .card,
+#tab-camera.cam-modern details.cam-advanced {
+  background: linear-gradient(180deg, #0e1727, var(--cam-panel));
+  border: 1px solid var(--cam-border);
+  border-radius: 16px;
+  color: var(--cam-text);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, .22);
+}
+#tab-camera.cam-modern .card-title { color: var(--cam-text); font-size: 14px; letter-spacing: .3px; }
+#tab-camera.cam-modern .muted,
+#tab-camera.cam-modern .muted.small { color: var(--cam-muted); }
+#tab-camera.cam-modern .kv-list span { color: var(--cam-text); }
+#tab-camera.cam-modern hr.sep { border: none; border-top: 1px solid var(--cam-border-soft); margin: 14px 0; }
+
+/* 按钮统一（与 .cam-ctl 手感一致） */
+#tab-camera.cam-modern .btn {
+  border-radius: 10px; padding: 8px 14px; font-size: 13px; font-weight: 600;
+  border: 1px solid var(--cam-border); background: rgba(255, 255, 255, .05); color: var(--cam-text);
+  transition: transform .12s ease, box-shadow .12s ease, background .12s ease, border-color .12s ease;
+}
+#tab-camera.cam-modern .btn:hover { transform: translateY(-1px); border-color: #35507d; }
+#tab-camera.cam-modern .btn.primary {
+  background: linear-gradient(180deg, var(--cam-blue), #2563eb);
+  border-color: transparent; color: #fff;
+  box-shadow: 0 8px 20px rgba(37, 99, 235, .32);
+}
+#tab-camera.cam-modern .btn.ghost { background: rgba(255, 255, 255, .05); }
+#tab-camera.cam-modern .btn.danger {
+  background: rgba(239, 68, 68, .14); border-color: rgba(239, 68, 68, .5); color: #fecaca;
+}
+
+/* 表单控件统一 */
+#tab-camera.cam-modern input,
+#tab-camera.cam-modern select {
+  background: #0b1320; border: 1px solid var(--cam-border); color: var(--cam-text);
+  border-radius: 10px; padding: 8px 10px; width: 100%;
+}
+#tab-camera.cam-modern input:focus,
+#tab-camera.cam-modern select:focus { outline: none; border-color: var(--cam-blue); box-shadow: 0 0 0 3px rgba(59, 130, 246, .18); }
+#tab-camera.cam-modern label { color: var(--cam-muted); font-size: 12px; }
+#tab-camera.cam-modern .checkline { display: inline-flex; align-items: center; gap: 6px; }
+#tab-camera.cam-modern .checkline input { width: auto; }
+
+/* 预览区 */
+.cam-preview-card .camera-view {
+  border-radius: 12px; border: 1px solid var(--cam-border); background: #04070d;
+  min-height: 240px; position: relative; overflow: hidden;
+}
+.cam-preview-card .camera-view img { width: 100%; display: block; }
+.cam-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.cam-actions .btn { flex: 0 0 auto; }
+
+/* 录像控制行 */
+.cam-btn-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+.cam-btn-row .cam-tag {
+  min-width: 42px; text-align: center; font-size: 11px; font-weight: 600;
+  padding: 3px 8px; border-radius: 999px;
+  background: rgba(34, 211, 238, .12); color: var(--cam-cyan); border: 1px solid rgba(34, 211, 238, .3);
+}
+
+/* 折叠的高级设置 */
+details.cam-advanced { margin-top: 14px; padding: 0; overflow: hidden; }
+details.cam-advanced > summary {
+  cursor: pointer; list-style: none; padding: 15px 16px;
+  display: flex; align-items: center; gap: 8px;
+  font-weight: 600; color: var(--cam-text); font-size: 14px;
+}
+details.cam-advanced > summary::-webkit-details-marker { display: none; }
+details.cam-advanced > summary::before {
+  content: '▸'; color: var(--cam-cyan); display: inline-block; transition: transform .15s ease;
+}
+details.cam-advanced[open] > summary::before { transform: rotate(90deg); }
+details.cam-advanced[open] > summary { border-bottom: 1px solid var(--cam-border-soft); }
+.cam-advanced-body { padding: 14px 16px 18px; }
+.cam-advanced-body .cal-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 10px; }
+.cam-advanced-body label { display: block; margin-bottom: 4px; }
+@media (max-width: 720px) { .cam-advanced-body .cal-row { grid-template-columns: 1fr; } }

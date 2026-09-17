@@ -1,0 +1,21 @@
+[Unit]
+Description=ELF2 Relay Web Control Center (Flask)
+After=network.target elf2-ptt-gpio.service
+Wants=elf2-ptt-gpio.service
+
+[Service]
+Type=simple
+User=elf
+WorkingDirectory=/www
+Environment=PYTHONUNBUFFERED=1
+Environment=RELAY_WEB_PORT=8080
+Environment=RELAY_AUDIO_DEVICE=plughw:CARD=rockchipnau8822,DEV=0
+Environment=RELAY_PTT_GPIO=97
+Environment=RELAY_PTT_ACTIVE_HIGH=1
+ExecStart=/usr/bin/python3 /www/app.py
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

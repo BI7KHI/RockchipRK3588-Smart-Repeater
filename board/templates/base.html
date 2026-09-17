@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <title>{% block title %}{{ site_title or 'ELF2 智能中继控制中心' }}{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css', v='20260912d') }}">
+  {% block head_extra %}{% endblock %}
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◉</span>
+      <span>ELF2 智能中继控制中心</span>
+    </div>
+    <nav class="main-nav">
+      <button class="tab-btn active" data-tab="overview">总览</button>
+      <button class="tab-btn" data-tab="intercom">网页对讲</button>
+      <button class="tab-btn" data-tab="llm">LLM 对话</button>
+      <button class="tab-btn" data-tab="camera">摄像头</button>
+      <button class="tab-btn" data-tab="weather">气象</button>
+      <button class="tab-btn admin-only" data-tab="users">用户管理</button>
+      <button class="tab-btn admin-only" data-tab="settings">设置 / 校准</button>
+    </nav>
+    <div class="user-box">
+      <span id="clock-beijing" class="clock-beijing">--</span>
+      <span id="current-user">{{ user }}</span>
+      <form method="post" action="{{ url_for('logout') }}" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="btn ghost" type="submit">退出</button>
+      </form>
+    </div>
+  </header>
+
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+
+  <div id="toast" class="toast"></div>
+  <script>
+    window.APP_ROLE = {{ role|tojson }};
+    window.APP_USER = {{ user|tojson }};
+  </script>
+  <script src="{{ url_for('static', filename='js/app.js', v='20260915e') }}"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
