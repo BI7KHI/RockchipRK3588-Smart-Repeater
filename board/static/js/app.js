@@ -142,17 +142,13 @@
     calCache = v || {};
     const box = $('#cal-live');
     if (!box) return;
-    const line = (key) => {
+    const item = (key) => {
       const c = calCache[key];
       if (!c) return '';
-      const ratio = c.divider_ratio != null ? c.divider_ratio.toFixed(6) : '--';
-      const design = c.design_multiplier != null ? c.design_multiplier : '--';
-      const fs = c.full_scale != null ? c.full_scale.toFixed(3) : '--';
-      const mv = c.mv_per_lsb != null ? c.mv_per_lsb.toFixed(3) : '--';
-      return `<div>${escapeHtml(c.label || key)}（VIN${c.adc_channel} / ${escapeHtml(c.raw_file || '')}）：raw <b>${c.raw ?? '--'}</b> · 引脚 <b>${c.pin_voltage ?? '--'} V</b> · 实际 <b>${c.voltage ?? '--'} V</b>` +
-             `<span class="muted small">（分压比 ${ratio} · 倍率 ${c.multiplier} V/V · 设计值 ${design} · 满量程 ${fs} V · ${mv} mV/LSB）</span></div>`;
+      return `${escapeHtml(c.label || key)} <b>${c.voltage ?? '--'} V</b>`;
     };
-    box.innerHTML = line('battery') + line('pv') || '<span class="muted">--</span>';
+    const parts = [item('battery'), item('pv')].filter(Boolean);
+    box.innerHTML = parts.length ? ('实时值：' + parts.join('　·　')) : '实时值：--';
   }
 
   async function loadCalibration() {
@@ -1697,6 +1693,44 @@
     ctx.fillText(label(points[n - 1]), pad.l + cw - 30, h - 8);
   }
 
+  // 传感器卡片实时状态（设置页友好显示：是否采集 / 当前值 / 最后成功 / 错误）
+  async function loadSensorStatus() {
+    if (role !== 'admin') return;
+    try {
+      const w = await apiFetch('/api/weather/realtime');
+      const r = w.realtime || {};
+      const ok = r.last_ok ? new Date(r.last_ok * 1000).toLocaleTimeString('zh-CN') : '--';
+      const el = $('#wind-sensor-status');
+      if (el) {
+        const spd = (r.last_speed == null || r.last_speed === '') ? '--' : (r.last_speed + ' m/s');
+        el.textContent = r.running
+          ? `状态：采集中　风速 ${spd}　最后成功 ${ok}　错误 ${r.error_count || 0}` +
+            (r.last_error ? `（${r.last_error}）` : '')
+          : '状态：未运行（保存设置后自动启动）';
+      }
+      const bus = $('#bus-status');
+      if (bus) {
+        bus.textContent = r.running
+          ? `状态：采集中　轮询 ${r.poll_count || 0} 次　错误 ${r.error_count || 0}`
+          : '状态：未运行';
+      }
+    } catch (e) { /* 忽略 */ }
+    try {
+      const d = await apiFetch('/api/rain/realtime');
+      const rt = d.realtime || {};
+      const el = $('#rain-sensor-status');
+      if (el) {
+        const today = (d.today && d.today.total_mm != null) ? d.today.total_mm : 0;
+        const hour = (d.recent_hour_mm != null) ? d.recent_hour_mm : 0;
+        const ok = rt.last_ok ? new Date(rt.last_ok * 1000).toLocaleTimeString('zh-CN') : '--';
+        el.textContent = rt.enabled
+          ? `状态：已启用　今日 ${today} mm　近 1 小时 ${hour} mm　最后成功 ${ok}　错误 ${rt.error_count || 0}` +
+            (rt.last_error ? `（${rt.last_error}）` : '')
+          : '状态：已停用';
+      }
+    } catch (e) { /* 忽略 */ }
+  }
+
   async function loadWeatherSettings() {
     if (role !== 'admin') return;
     try {
@@ -2138,6 +2172,8 @@
     $('#btn-weather-export')?.addEventListener('click', exportWeatherCsv);
     $('#weather-sample-interval')?.addEventListener('change', loadWeatherDaily);
     $('#btn-weather-settings-save')?.addEventListener('click', saveWeatherSettings);
+    $('#btn-wind-settings-save')?.addEventListener('click', saveWeatherSettings);
+    $('#btn-rain-settings-save')?.addEventListener('click', saveWeatherSettings);
     $('#weather-date')?.addEventListener('change', loadWeatherDaily);
     $('#btn-rain-query')?.addEventListener('click', loadRainHourly);
     $('#btn-rain-export')?.addEventListener('click', exportRainCsv);
@@ -2255,6 +2291,7 @@
       loadSettings();
       loadAudioVolume();
       loadWeatherSettings();
+      loadSensorStatus();
       loadLlmAgentSettings();
       loadLlmStats();
     }

@@ -521,7 +521,6 @@
   </details>
 </section>
 
-
 <!-- 气象 -->
 <section id="tab-weather" class="tab-panel">
   <div class="panel-head">
@@ -701,15 +700,11 @@
           <input id="pv-mult" type="number" step="0.01" min="0.01" max="200">
         </div>
       </div>
-      <div class="kv-list mt" id="cal-live"><span class="muted">--</span></div>
+      <div class="muted small mt" id="cal-live">实时值：--</div>
       <div class="row gap mt">
         <button class="btn primary" id="btn-save-cal">保存校准</button>
         <button class="btn ghost" id="btn-cal-design">填入设计值（电池 10.11 / 光伏 17.01）</button>
       </div>
-      <p class="muted small">换算链路：<b>引脚电压</b> = (raw − 零点) × 0.43945 mV（1.8V/4096）；<b>实际电压</b> = 引脚电压 × 倍率。<br>
-        倍率单位统一为 <b>V/引脚电压</b>，等于分压比倒数 = (R上 + R下) / R下：<br>
-        电池 R14 100Ω + R15 91kΩ / R16 10kΩ → 10k/101.1k = 0.098912 → 倍率 <b>10.11</b>，满量程 <b>18.198 V</b>，分辨率 4.443 mV/LSB；<br>
-        光伏 100Ω + 160kΩ / 10kΩ → 10k/170.1k = 0.058789 → 倍率 <b>17.01</b>，满量程 <b>30.618 V</b>，分辨率 7.475 mV/LSB。</p>
     </div>
     <div class="card" id="ptt-diag-card">
       <div class="card-title">PTT 发射自检（硬件排查 · 不接音频）</div>
@@ -720,14 +715,7 @@
       </div>
       <div class="kv-list mt" id="ptt-diag-live"><span class="muted">--</span></div>
       <div class="mt" id="ptt-diag-events"><span class="muted small">暂无 PTT 事件</span></div>
-      <p class="muted small">
-        按住期间 GPIO3_A1（<b>gpiochip3 line1 → Linux 全局 GPIO 97</b>）输出高电平，
-        经隔离/驱动送控制板 PTT，用于<b>不带音频</b>地验证整条发射链路；
-        松开、3 秒无心跳或超过 30 秒会自动松开（防止一直压着信道）。<br>
-        排查顺序：① 本页「引脚实测」是否变 1 → ② 万用表量 RK3588 侧 P26 pin1 对 GND（0V ↔ 3.3V）
-        → ③ 量隔离板输入/输出侧 → ④ 量控制板 PTT 端子（<b>注意有效极性：低有效需反相</b>）
-        → ⑤ 用导线短接控制板 PTT 端子模拟发射，判断断点在控制板还是隔离板一侧。
-      </p>
+      <p class="muted small">按住发射、松开即释放；3 秒无心跳或超过 30 秒自动松开。</p>
     </div>
     <div class="card">
       <div class="card-title">系统全局音量</div>
@@ -803,8 +791,6 @@
       <select id="set-tts-icao-voice"></select>
       <label class="checkline"><input type="checkbox" id="set-tts-icao"> 呼号/单字母按 ICAO 字母解释法朗读（BG7XYZ → Bravo Golf Seven X-ray Yankee Zulu）</label>
       <label class="checkline"><input type="checkbox" id="set-tts-auto-speak"> LLM 回复后自动朗读到 3.5mm AUX</label>
-      <p class="muted small">外部 OpenAI 兼容 TTS 已下线，板端只使用 /opt/ai/voices 下的本地 Piper ONNX 模型（完全离线）。<br>
-        音色包上传后可在此切换；试听请在「语音对话」页用“测试朗读（板端 AUX）”或“朗读到网页”。</p>
       <hr class="sep">
       <div class="card-title">音色包管理</div>
       <div class="table-wrap">
@@ -832,12 +818,24 @@
       <div class="muted small" id="train-upload-info">未上传</div>
       <p class="muted small">RK3588 板端不直接训练大模型；训练在 PC/服务器完成后，将导出的 Piper ONNX 音色包上传即可部署。GPT-SoVITS 等方案建议在 PC 侧完成，板端只部署推理权重。</p>
     </div>
-    <div class="card">
-      <div class="card-title">气象 Modbus / 串口设置</div>
+    <div class="card" style="grid-column: 1 / -1">
+      <div class="card-title">RS485 总线（风速 / 雨量共用）</div>
       <div class="cal-row">
         <div><label>串口</label><input id="weather-port" value="/dev/ttyS9"></div>
         <div><label>波特率</label><input id="weather-baud" type="number" value="9600"></div>
       </div>
+      <div class="cal-row">
+        <div><label>轮询间隔 (秒)</label><input id="weather-interval" type="number" step="0.5" value="2"></div>
+        <div><label>数据格式</label><input value="8N1 · Modbus RTU" disabled></div>
+      </div>
+      <button class="btn primary" id="btn-weather-settings-save">保存总线设置</button>
+      <div class="muted small mt" id="bus-status">状态：--</div>
+    </div>
+  </div>
+
+  <div class="grid grid-2 mt">
+    <div class="card">
+      <div class="card-title">风力变送器（风速）</div>
       <div class="cal-row">
         <div><label>从站地址</label><input id="weather-slave" type="number" value="1"></div>
         <div><label>功能码</label><select id="weather-function"><option value="3">03 保持寄存器</option><option value="4">04 输入寄存器</option></select></div>
@@ -847,28 +845,29 @@
         <div><label>读取数量</label><input id="weather-quantity" type="number" value="1"></div>
       </div>
       <div class="cal-row">
-        <div><label>倍率</label><input id="weather-scale" type="number" step="0.0001" value="0.1"></div>
-        <div><label>轮询间隔 (秒)</label><input id="weather-interval" type="number" step="0.5" value="2"></div>
+        <div><label>倍率 (m/s per raw)</label><input id="weather-scale" type="number" step="0.0001" value="0.1"></div>
+        <div></div>
       </div>
-      <button class="btn primary" id="btn-weather-settings-save">保存气象设置</button>
-      <p class="muted small">RS485 / Modbus RTU，默认 9600 8N1，功能号 03，寄存器 0x0000，倍率 0.1。保存后轮询自动生效。</p>
+      <button class="btn primary" id="btn-wind-settings-save">保存风速设置</button>
+      <div class="muted small mt" id="wind-sensor-status">状态：--</div>
     </div>
-  </div>
-  <div class="card mt">
-    <div class="card-title">降水量传感器设置（翻斗式）</div>
-    <div class="cal-row">
-      <div><label>启用</label><select id="rain-enabled"><option value="1">启用</option><option value="0">停用</option></select></div>
-      <div><label>从站地址</label><input id="rain-slave" type="number" value="23"></div>
+    <div class="card">
+      <div class="card-title">降水量传感器（翻斗式）</div>
+      <div class="cal-row">
+        <div><label>启用</label><select id="rain-enabled"><option value="1">启用</option><option value="0">停用</option></select></div>
+        <div><label>从站地址</label><input id="rain-slave" type="number" value="23"></div>
+      </div>
+      <div class="cal-row">
+        <div><label>功能码</label><select id="rain-function"><option value="3">03 保持寄存器</option><option value="4">04 输入寄存器</option></select></div>
+        <div><label>寄存器地址</label><input id="rain-register" type="number" value="0"></div>
+      </div>
+      <div class="cal-row">
+        <div><label>读取数量</label><input id="rain-quantity" type="number" value="1"></div>
+        <div><label>倍率 (mm per raw)</label><input id="rain-scale" type="number" step="0.0001" value="0.1"></div>
+      </div>
+      <button class="btn primary" id="btn-rain-settings-save">保存雨量设置</button>
+      <div class="muted small mt" id="rain-sensor-status">状态：--</div>
     </div>
-    <div class="cal-row">
-      <div><label>功能码</label><select id="rain-function"><option value="3">03 保持寄存器</option><option value="4">04 输入寄存器</option></select></div>
-      <div><label>寄存器地址</label><input id="rain-register" type="number" value="0"></div>
-    </div>
-    <div class="cal-row">
-      <div><label>读取数量</label><input id="rain-quantity" type="number" value="1"></div>
-      <div><label>倍率 (mm/raw)</label><input id="rain-scale" type="number" step="0.0001" value="0.1"></div>
-    </div>
-    <p class="muted small">翻斗式雨量计默认寄存器 0x0000 为累计降水量；小时雨量由累计值差分计算。默认站号 23、倍率 0.1（raw×0.1 mm）。保存后随轮询自动生效。</p>
   </div>
   <div class="card mt">
     <div class="card-title">修改当前用户密码</div>
