@@ -80,6 +80,12 @@ RK3588 负责全部"智能"部分：网页控制台、端侧大模型（LLM）�
 | **Web 控制台** | 账号/角色、CSRF、审计日志、HTTPS 反向代理、系统监控 | ✅ |
 | **硬件板卡** | IO 隔离/驱动板、ADC 分压采集板 | 🔶 原理图完成，PCB 联调中 |
 
+> **EN** — Feature set: on-device LLM (RKNPU Qwen2.5-1.5B) with **agent skills + prompt injection +
+> real-time token-rate metrics**; on-device **Piper TTS** (zh/en/ICAO) with streaming read-out;
+> **web intercom** (hold-to-talk with auto-PTT); **PTT state machine** (refcount, debounce,
+> manual self-test, event tracing); **dual-channel SARADC** voltage telemetry with calibration;
+> **RS485 Modbus** wind & rain; **V4L2 camera** preview/recording/playback; secured **web console**.
+
 ---
 
 ## 4. 项目结构 / Repository Layout
@@ -123,6 +129,10 @@ RockchipRK3588-Smart-Repeator/
     └── 3.5mm耳机接口音频输入原理图结论.md
 ```
 
+> **EN** — `board/` = on-device application (deploy to `/www`); `hardware/` = custom board docs +
+> EDA automation + BOM; `tools/` = bring-up scripts; `docs/` = design & deployment notes;
+> `assets/` = architecture diagram (SVG) and its generator.
+
 ---
 
 ## 5. 实现方式 / Implementation
@@ -156,6 +166,10 @@ RockchipRK3588-Smart-Repeator/
 - **流式朗读**：LLM 增量按句切分 → 逐段合成 → 逐段播放（RTF≈0.11~0.13），
   整条回复期间 **PTT 保持使能**（会话级引用计数）。
 
+> **EN** — Piper runs locally; text is split by language (zh / en / ICAO spelling) and rendered
+> with the best-matching voice, then streamed sentence-by-sentence to the 3.5 mm AUX output while
+> PTT is held for the whole reply.
+
 ### 5.3 PTT 控制状态机 / PTT state machine
 
 ```
@@ -169,12 +183,20 @@ _ptt_release() ──► HOLD_COUNT-1 ──(→0)───► 0.8s 定时 ─�
 - **事件追踪**：每次拉高/拉低记录「动作 + 原因 + 调用者 + 引用计数」，页面直接可见。
 - **AT 侧极性**：GM3188 PTT 为**低有效**；隔离板必须匹配该极性（必要时反相）。
 
+> **EN** — A refcounted PTT state machine: first retain pulls the GPIO high; the last release
+> waits 0.8 s (bridging segment gaps), enforces a minimum key-up time (default 1 s, anti-chatter),
+> and can be forced low by watchdogs (idle stream / stalled intercom / missing heartbeat).
+
 ### 5.4 遥测：SARADC 与 Modbus / Telemetry
 
 - **SARADC**：12 bit、0–1.8 V（`0.43945 mV/LSB`），通过 sysfs IIO 读取
   `in_voltage{4,6}_raw`；分压网络 → 倍率校准（电池 **10.11 V/V**、光伏 **17.01 V/V**）。
 - **Modbus RTU**：`/dev/ttyS9` 9600 8N1，站号 1（风速）、23（雨量），
   自实现 CRC16 与帧解析，数据入 SQLite 供图表与统计。
+
+> **EN** — Battery/PV rails are scaled by resistor dividers into the RK3588 12-bit SARADC
+> (0–1.8 V); voltage = ADC pin voltage × calibrated multiplier. Wind and rain sensors are polled
+> over RS485 Modbus RTU with a hand-rolled CRC16 stack; samples are stored in SQLite.
 
 ### 5.5 音视频 / Audio & Video
 
@@ -183,11 +205,19 @@ _ptt_release() ──► HOLD_COUNT-1 ──(→0)───► 0.8s 定时 ─�
 - **视频**：V4L2 MJPEG 采集 → ffmpeg 转封装为分段 MP4 / RTMP 推流；
   循环录像按容量/文件数/总配额自动清理。
 
+> **EN** — Audio uses ALSA (`plughw:CARD=rockchipnau8822`) with `aplay`/`arecord`; video uses
+> V4L2 MJPEG capture piped into ffmpeg for segmented MP4 recording, playback and RTMP streaming,
+> with retention limits by size/count/quota.
+
 ### 5.6 Web 控制台与安全 / Web console & security
 
 - nginx（443，自签证书）→ Flask（`127.0.0.1:8080`，dev server，threaded）；
 - 账号（admin/user）+ 会话 + CSRF（含 multipart/octet-stream 兼容）+ 审计日志；
 - 前端：原生 JS，SSE 流式（LLM/Agent）+ 定时轮询（状态/电平），无外部 CDN 依赖。
+
+> **EN** — nginx terminates HTTPS (self-signed) and proxies to a local Flask app; users/roles,
+> CSRF (including multipart/octet-stream), audit log and system metrics are built in. The
+> frontend is dependency-free vanilla JS using SSE for streaming and polling for telemetry.
 
 ---
 
@@ -282,6 +312,11 @@ sudo systemctl daemon-reload && sudo systemctl restart relay-web nginx
 控制板到 GM3188 的 PTT 为**低有效**（拉低发射）。详见
 [`hardware/README.md`](hardware/README.md) 与 `assets/ELF2_40P20P_接线核对图.svg`。
 
+> **EN** — Two custom boards: an **IO isolation/driver board** (opto-isolated digital IO, PTT
+> driver, audio isolation/attenuation, isolated 12 V and RS485) and an **ADC divider board**.
+> Note the RK3588 GPIO drives only ~2–4 mA — size the opto series resistor accordingly
+> (≈1 kΩ for If≈2 mA), otherwise the pin voltage collapses and the radio keys intermittently.
+
 ---
 
 ## 9. 任务进度 / Progress
@@ -302,6 +337,12 @@ sudo systemctl daemon-reload && sudo systemctl restart relay-web nginx
 | 12 | 端侧模型工具选择稳定性（关键词→技能强制映射） | 🔶 进行中 |
 | 13 | 整机联调、现场覆盖测试、OTA 远程升级 | ⏳ 待开始 |
 
+> **EN** — Completed: on-device LLM/TTS, web console, PTT control, web intercom, camera,
+> telemetry, and the **agent/tool-calling + prompt injection + rate monitoring** stack.
+> In progress: isolation board PCB, divider-board bring-up, RX/TX audio node sharing, and
+> stabilising tool selection of the 1.5 B model. Planned: system-level integration test,
+> field coverage test and OTA update.
+
 ---
 
 ## 10. 已知问题与踩坑 / Known Issues & Pitfalls
@@ -319,6 +360,12 @@ sudo systemctl daemon-reload && sudo systemctl restart relay-web nginx
 | 官方英文音色报 "Model file doesn't exist" | 文件名必须为 `model.onnx` / `model.onnx.json` | 上传/登记时统一改名 |
 | 网页长连接偶发中断 | eth0 自协商抖动（1G↔100M） | 强制 `100M/Full` 且关闭自协商；前端分片投递加退避重试 |
 
+> **EN** — Hard-won lessons: the board-side RKLLM **ignores the `system` role** (inject the prompt
+> into the user message) and `usage` is always zero (estimate tokens locally); Qwen's
+> `<tool_call>` special token makes the server emit **empty output** (use a plain-text `READ`
+> protocol); prompts longer than ~400 characters also yield empty output (keep them compact);
+> Piper requires **single-codepoint** `phoneme_id_map` keys and `model.onnx(.json)` naming.
+
 ---
 
 ## 11. 文档索引 / Documentation
@@ -328,7 +375,7 @@ sudo systemctl daemon-reload && sudo systemctl restart relay-web nginx
 | [`board/README.md`](board/README.md) | **板端软件详解**：API、参数、部署、排障（推荐先读） |
 | [`hardware/README.md`](hardware/README.md) | 隔离板/分压板设计说明与验算 |
 | [`tools/README.md`](tools/README.md) | Modbus/RS485 调试脚本用法 |
-| [`docs/多模态端侧智能无线电中继系统架构.md`](docs/) | 系统架构设计长文 |
+| [`docs/多模态端侧智能无线电中继系统架构.md`](docs/多模态端侧智能无线电中继系统架构.md) | 系统架构设计长文 |
 | [`docs/部署记录-*.md`](docs/) | 各子系统部署实录（LLM / NPU / TTS / 摄像头 / 气象 / PTT） |
 | [`docs/端侧TTS选型与音色训练方案.md`](docs/) | TTS 选型与音色训练（含 ICAO 适配） |
 
