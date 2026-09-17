@@ -72,6 +72,7 @@ RK3588 负责全部"智能"部分：网页控制台、端侧大模型（LLM）�
 | **速率监测** | 实时 TTFT / tok·s⁻¹ / tokens；历史统计入库与图表 | ✅ |
 | **提示词注入** | 系统提示词 + 实时变量 `{battery} {pv} {cpu_temp} {wind} …` | ✅ |
 | **端侧 TTS** | Piper 中/英/ICAO 混读、音色包上传/删除、流式分句朗读 | ✅ |
+| **端侧 ASR** | sherpa-onnx + SenseVoice int8（中英日韩粤），离线语音转文字，**RTF≈0.05（约 20× 实时）** | ✅ |
 | **网页对讲** | 麦克风 → 板端 AUX（按住说话，自动 PTT，看门狗释放） | ✅ |
 | **PTT 控制** | 引用计数、0.8 s 桥接、最短压发防抖、手动发射自检、事件追踪 | ✅ |
 | **电压遥测** | SARADC 12 bit 双路分压（电池/光伏）+ 零点/倍率校准 | ✅ |
@@ -209,7 +210,34 @@ _ptt_release() ──► HOLD_COUNT-1 ──(→0)───► 0.8s 定时 ─�
 > V4L2 MJPEG capture piped into ffmpeg for segmented MP4 recording, playback and RTMP streaming,
 > with retention limits by size/count/quota.
 
-### 5.6 Web 控制台与安全 / Web console & security
+### 5.6 端侧语音识别 / On-device ASR
+
+**方案选型 / Options considered**（RK3588，需离线）：
+
+| 方案 | 体积 | 语言 | 实时性 | 说明 |
+|---|---|---|---|---|
+| **sherpa-onnx + SenseVoice int8** ✅ 已采用 | 155 MB | 中英日韩粤 | 非流式，**RTF≈0.05** | onnxruntime CPU，测速 5~7 s 音频 ≈ 200~310 ms；中英混说稳，带 ITN 数字规整 |
+| sherpa-onnx 流式 zipformer 双语 | 123 MB | 中英 | 流式 | 可"边说边出字"，精度略低；后续可加 |
+| whisper-tiny / base (sherpa-onnx) | 111 / 198 MB | 多语 | 非流式 | 小模型精度一般，中英混说易错 |
+| paraformer-zh-small | 74 MB | 仅中文 | 非流式 | 最省资源，但无英文能力 |
+| RKNPU Whisper（rknn_model_zoo） | 需转换 | 多语 | 最快 | 吞吐最高，但需转模型 + 改推理代码，成本大 |
+| 云端 ASR API | — | — | 依赖网络 | 与"端侧自治"目标冲突，不采用 |
+
+**实现 / Implementation**：
+- 模型 `/opt/ai/asr/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17`，
+  服务模块 `board/asr_service.py`（懒加载 + 串行解码 + ffmpeg 统一转 16 kHz 单声道）。
+- 前端 **BUSY 虚拟按键**（LLM 对话页，按住说话）：网页麦克风采集 → 16 kHz PCM → 打包 WAV →
+  `POST /api/asr/transcribe` → 文本回填输入框 →（可选）自动发送给端侧 LLM → 回复可由 TTS 朗读，
+  形成"语音进 → 文字 → LLM → 语音出"的闭环；**录音同时留档**到 `/www/asr_recordings`。
+- 总览页「中继状态」实时同步 **PTT / BUSY**：GPIO3_A1 拉高即显示「PTT 使能（发射中）」。
+
+> **EN** — Chosen after comparing whisper.cpp / sherpa-onnx / Vosk / FunASR / RKNPU-Whisper:
+> **sherpa-onnx + SenseVoice int8** (155 MB, zh/en/ja/ko/yue) runs fully offline on the RK3588
+> CPU at **RTF≈0.05**. A **BUSY virtual button** in the LLM tab records from the browser mic,
+> sends 16 kHz WAV to `/api/asr/transcribe`, fills the chat input (optional auto-send) and keeps
+> the recording. The overview now mirrors **PTT/BUSY** state from GPIO3_A1 in real time.
+
+### 5.7 Web 控制台与安全 / Web console & security
 
 - nginx（443，自签证书）→ Flask（`127.0.0.1:8080`，dev server，threaded）；
 - 账号（admin/user）+ 会话 + CSRF（含 multipart/octet-stream 兼容）+ 审计日志；
@@ -275,6 +303,9 @@ sudo systemctl daemon-reload && sudo systemctl restart relay-web nginx
 | `/api/chat` | POST | LLM 对话（支持 `stream`，含提示词注入与速率统计） |
 | `/api/agent/chat` | POST | **Agent 对话**（SSE：`iter/delta/tool_start/tool_result/usage`） |
 | `/api/agent/tools` | GET | 技能清单、启用状态、提示词实时变量 |
+| `/api/asr/status` | GET | 语音识别引擎状态（模型、是否已加载、最近一次识别） |
+| `/api/asr/transcribe` | POST | **语音转文字**：上传录音（multipart `audio`）或板端文件 `{"path"}` |
+| `/api/asr/recordings` | GET | 识别录音留档与最近识别记录 |
 | `/api/llm/stats` | GET/DELETE | 生成速率统计（最近 N 次 + 今日汇总） |
 | `/api/tts/speak` `/api/tts/stream/*` | POST | 普通朗读 / 流式朗读会话 |
 | `/api/tts/voices` `/api/tts/voice/<id>` | GET/DELETE | 音色包管理 |
@@ -331,11 +362,12 @@ sudo systemctl daemon-reload && sudo systemctl restart relay-web nginx
 | 6 | 摄像头预览 / 录像 / 回放 / 清理 | ✅ 完成 |
 | 7 | 遥测：SARADC 电压 + RS485 风速/雨量 | ✅ 完成 |
 | 8 | **Agent 技能/工具调用 + 提示词注入 + 速率监测** | ✅ 完成 |
-| 9 | IO 隔离/驱动板：原理图 → PCB 布线 → 打样 | 🔶 进行中（原理图完成） |
-| 10 | ADC 分压采集板：接入实机并校准 | 🔶 进行中（设计/验算完成） |
-| 11 | 音频链路：RPT MIC 与 ELF2 MIC 共节点方案 | 🔶 进行中（需隔直/限幅/增益重设） |
-| 12 | 端侧模型工具选择稳定性（关键词→技能强制映射） | 🔶 进行中 |
-| 13 | 整机联调、现场覆盖测试、OTA 远程升级 | ⏳ 待开始 |
+| 9 | **端侧语音识别（ASR）+ BUSY 语音输入 + 总览 PTT/BUSY 同步** | ✅ 完成 |
+| 10 | IO 隔离/驱动板：原理图 → PCB 布线 → 打样 | 🔶 进行中（原理图完成） |
+| 11 | ADC 分压采集板：接入实机并校准 | 🔶 进行中（设计/验算完成） |
+| 12 | 音频链路：RPT MIC 与 ELF2 MIC 共节点方案 | 🔶 进行中（需隔直/限幅/增益重设） |
+| 13 | 端侧模型工具选择稳定性（关键词→技能强制映射） | 🔶 进行中 |
+| 14 | 整机联调、现场覆盖测试、OTA 远程升级 | ⏳ 待开始 |
 
 > **EN** — Completed: on-device LLM/TTS, web console, PTT control, web intercom, camera,
 > telemetry, and the **agent/tool-calling + prompt injection + rate monitoring** stack.
@@ -359,6 +391,8 @@ sudo systemctl daemon-reload && sudo systemctl restart relay-web nginx
 | 音色包上传后 piper 直接崩溃 | 板端 piper 要求 `phoneme_id_map` 键为**单码点** | 打包时剥离 `aɪ aʊ ɔɪ eɪ oʊ` 等多码点键 |
 | 官方英文音色报 "Model file doesn't exist" | 文件名必须为 `model.onnx` / `model.onnx.json` | 上传/登记时统一改名 |
 | 网页长连接偶发中断 | eth0 自协商抖动（1G↔100M） | 强制 `100M/Full` 且关闭自协商；前端分片投递加退避重试 |
+| sherpa-onnx 1.13 无 `read_wave`/`accept_wave_file` | Python API 未导出该便捷函数 | 用 `wave`+`numpy` 读样本，调 `accept_waveform(sr, samples)` |
+| 英文识别串词（"Video chat as he left…"） | 合成音色 `Rosmontis_en` 本身发音不清 | 换 `en_US-lessac-medium` 后明显改善；真人语音效果更好 |
 
 > **EN** — Hard-won lessons: the board-side RKLLM **ignores the `system` role** (inject the prompt
 > into the user message) and `usage` is always zero (estimate tokens locally); Qwen's

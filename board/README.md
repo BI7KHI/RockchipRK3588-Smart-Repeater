@@ -476,3 +476,40 @@ aplay 若中途意外退出（设备被抢占/出错），每来一块数据就�
 - 提示词注入 + `{battery}` 变量：回答开头正确带出实时电压 12.98 V；
 - 前端真机验证：技能芯片、速率条、设置页技能清单/统计表均正常，无 5xx。
 
+---
+
+## 端侧语音识别（ASR）/ On-device ASR
+
+| 项 | 值 |
+|---|---|
+| 引擎 | sherpa-onnx 1.13.8 + SenseVoice int8（onnxruntime，CPU 4 线程） |
+| 模型 | `/opt/ai/asr/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17`（155 MB，中英日韩粤） |
+| 服务模块 | `/www/asr_service.py`（懒加载 / 串行解码 / ffmpeg 归一化成 16 kHz 单声道） |
+| 实测性能 | 模型加载 2~3 s（仅首次）；识别 **RTF 0.045~0.07**（5~7 s 音频 → 170~310 ms） |
+| 录音留档 | `/www/asr_recordings/asr_YYYYmmdd_HHMMSS.wav`；识别记录写 `asr_logs` 表 |
+| 依赖 | `pip3 install --user sherpa-onnx`；`ffmpeg`（已在板端）；`numpy`（sherpa-onnx 依赖） |
+
+### 接口
+
+| 接口 | 方法 | 说明 |
+|---|---|---|
+| `/api/asr/status` | GET | 引擎状态（模型文件、是否已加载、最近一次识别） |
+| `/api/asr/transcribe` | POST | 上传录音（multipart 字段 `audio`）或 `{"path": "/www/xxx.wav"}` → `{text, ms, seconds, rtf, filename}` |
+| `/api/asr/recordings` | GET | 留档录音列表 + 最近 50 条识别记录 |
+
+### 前端用法（LLM 对话页）
+
+- **BUSY（按住说话）**：按住 → 网页麦克风采集 16 kHz PCM → 松开 → 打包 WAV 上传识别 →
+  文本回填输入框；勾选「转写后自动发送」则直接发给端侧 LLM（可再接 TTS 朗读，形成语音闭环）。
+- 识别耗时与 RTF 会显示在按键右侧；录音同时留档。
+- 总览页「中继状态」的 **PTT / BUSY** 行由 `/api/ptt/status` 每 1.5 s 同步：
+  GPIO3_A1 拉高 → 显示「PTT 使能（发射中）」；本地录音中 → BUSY 显示「本地录音中（语音输入）」。
+
+### 调参
+
+```bash
+RELAY_ASR_MODEL=/opt/ai/asr/<其他模型目录>   # 换模型
+RELAY_ASR_THREADS=4                          # 解码线程（A76 大核）
+RELAY_ASR_LANG=auto|zh|en|yue|ja|ko          # 强制语言可略提精度
+RELAY_ASR_ITN=1                              # 数字/标点规整（"十二点八" → "12.8"）
+```

@@ -46,12 +46,14 @@ from werkzeug.utils import secure_filename
 
 import tts_service
 import agent_service
+import asr_service
 import camera_service
 import weather_service
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / 'relay.db'
 RECORDINGS_DIR = BASE_DIR / 'recordings'
+ASR_RECORD_DIR = BASE_DIR / 'asr_recordings'      # 语音识别录音留档
 INSTANCE_DIR = BASE_DIR / 'instance'
 SECRET_FILE = INSTANCE_DIR / 'secret.key'
 
@@ -224,6 +226,7 @@ def _load_secret_key():
 
 app.secret_key = _load_secret_key()
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+ASR_RECORD_DIR.mkdir(parents=True, exist_ok=True)
 
 # nginx 反向代理（80 -> 443 -> 127.0.0.1:8080）时，让 request.scheme/remote_addr 反映真实来源
 try:
@@ -281,6 +284,10 @@ def _set_default_settings(db):
         'agent_enabled': '1',
         'agent_max_iters': '3',
         'agent_tools': '',
+        # 端侧语音识别（ASR）
+        'asr_enabled': '1',
+        'asr_model_dir': '',
+        'asr_language': 'auto',
         # 全局音频
         'audio_volume_percent': '80',
         'audio_muted': '0',
@@ -397,6 +404,16 @@ def init_db():
             model TEXT,
             role TEXT,
             content TEXT
+        );
+        CREATE TABLE IF NOT EXISTS asr_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            username TEXT,
+            filename TEXT,
+            seconds REAL DEFAULT 0,
+            ms INTEGER DEFAULT 0,
+            rtf REAL DEFAULT 0,
+            text TEXT
         );
         CREATE TABLE IF NOT EXISTS llm_stats (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -763,6 +780,8 @@ def api_status():
         uptime_seconds=read_uptime(),
         voltages=voltage_payload(),
         llm={'provider': get_setting('llm_provider', 'local')},
+        ptt=ptt_status(),
+        voice={'asr_enabled': _setting_direct('asr_enabled', '1') in ('1', 'true', 'True', 'on')},
     )
 
 
@@ -1536,6 +1555,125 @@ def api_agent_chat():
 
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+# ---------------------------------------------------------------------------
+# 端侧语音识别（ASR）：sherpa-onnx + SenseVoice（离线）
+# ---------------------------------------------------------------------------
+def _asr_enabled():
+    return _setting_direct('asr_enabled', '1') in ('1', 'true', 'True', 'on')
+
+
+@app.route('/api/asr/status')
+@login_required
+def api_asr_status():
+    """ASR 引擎状态（模型文件、是否已加载、最近一次识别）。"""
+    st = asr_service.status()
+    md = (_setting_direct('asr_model_dir', '') or '').strip()
+    if md:
+        st['model_dir'] = md
+        ok, model, tokens = asr_service.model_ready(md)
+        st.update({'files_ok': bool(ok), 'model': Path(model).name if model else '',
+                   'tokens': Path(tokens).name if tokens else ''})
+    st['enabled'] = _asr_enabled()
+    st['language'] = (_setting_direct('asr_language', '') or st.get('language') or 'auto')
+    try:
+        row = get_db().execute('SELECT * FROM asr_logs ORDER BY id DESC LIMIT 1').fetchone()
+        st['last_log'] = dict(row) if row else {}
+    except Exception:
+        st['last_log'] = {}
+    return api_ok(**st)
+
+
+@app.route('/api/asr/transcribe', methods=['POST'])
+@login_required
+def api_asr_transcribe():
+    """语音转文字：接收前端录音（multipart 字段 audio/file），返回识别文本。
+
+    也支持 JSON {"path": "..."} 直接识别板端已有音频文件。
+    """
+    if not _asr_enabled():
+        return api_err('语音识别未启用', 403)
+    tmp = None
+    saved = None
+    try:
+        f = request.files.get('audio') or request.files.get('file')
+        if f is not None:
+            raw = f.read()
+            if not raw:
+                return api_err('音频为空')
+            if len(raw) > 32 * 1024 * 1024:
+                return api_err('音频过大（上限 32MB）', 413)
+            ext = (Path(f.filename or 'rec.webm').suffix or '.webm').lower()
+            if ext not in ('.wav', '.webm', '.ogg', '.opus', '.mp3', '.m4a', '.mp4', '.flac'):
+                ext = '.webm'
+            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+            tmp = Path('/tmp') / ('asr_up_%s%s' % (uuid.uuid4().hex[:8], ext))
+            tmp.write_bytes(raw)
+            ASR_RECORD_DIR.mkdir(parents=True, exist_ok=True)
+            saved = ASR_RECORD_DIR / ('asr_%s%s' % (ts, ext))
+            try:
+                shutil.copyfile(tmp, saved)
+            except Exception:
+                saved = None
+        else:
+            data = request.get_json(silent=True) or {}
+            src = str(data.get('path') or '').strip()
+            if not src or not Path(src).exists():
+                return api_err('缺少音频（multipart 字段 audio，或 JSON path）')
+            tmp = Path(src)
+            saved = None
+
+        res = asr_service.transcribe(str(tmp))
+        if not res.get('ok'):
+            return api_err('识别失败：%s' % res.get('error'), 500)
+        text = (res.get('text') or '').strip()
+        try:
+            db_exec('INSERT INTO asr_logs(ts,username,filename,seconds,ms,rtf,text) '
+                    'VALUES(?,?,?,?,?,?,?)',
+                    (now_iso(), session.get('username'), saved.name if saved else '',
+                     float(res.get('seconds') or 0), int(res.get('ms') or 0),
+                     float(res.get('rtf') or 0), text[:2000]))
+        except Exception:
+            pass
+        try:
+            audit('asr_transcribe', 'chars=%d ms=%s rtf=%s' % (len(text), res.get('ms'),
+                                                               res.get('rtf')))
+        except Exception:
+            pass
+        return api_ok(text=text, ms=res.get('ms'), seconds=res.get('seconds'),
+                      rtf=res.get('rtf'), filename=saved.name if saved else '',
+                      engine='sherpa-onnx-sensevoice')
+    finally:
+        try:
+            if tmp is not None and str(tmp).startswith('/tmp') and Path(tmp).exists():
+                Path(tmp).unlink()
+        except Exception:
+            pass
+
+
+@app.route('/api/asr/recordings')
+@login_required
+def api_asr_recordings():
+    """已留档的语音识别录音 + 最近识别记录。"""
+    items = []
+    try:
+        ASR_RECORD_DIR.mkdir(parents=True, exist_ok=True)
+        for f in sorted(ASR_RECORD_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True)[:100]:
+            if f.is_file():
+                st = f.stat()
+                items.append({'name': f.name, 'size': st.st_size,
+                              'ts': datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M:%S')})
+    except Exception:
+        pass
+    logs = []
+    try:
+        logs = [dict(r) for r in get_db().execute(
+            'SELECT id,ts,username,filename,seconds,ms,rtf,text FROM asr_logs '
+            'ORDER BY id DESC LIMIT 50').fetchall()]
+    except Exception:
+        pass
+    return api_ok(recordings=items, logs=logs, dir=str(ASR_RECORD_DIR))
 
 
 # ---------------------------------------------------------------------------

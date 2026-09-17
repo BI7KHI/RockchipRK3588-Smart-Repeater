@@ -8,6 +8,9 @@
   .msg.tool.result { border-left-color: #2ecc71; }
   .msg.tool.error { border-left-color: #e74c3c; }
   #llm-rate, #llm-tools-live { font-variant-numeric: tabular-nums; }
+  .kv-list b.on { color: #f5a623; }           /* PTT 使能 / 占用 */
+  .kv-list b.rec { color: #2ecc71; }          /* 本地录音中 */
+  #btn-voice-busy.recording { background: #e74c3c; border-color: #e74c3c; color: #fff; }
   #agent-tool-list label { margin: 2px 0; }
 </style>
 {% endblock %}
@@ -54,8 +57,8 @@
       <div class="card-title">中继状态</div>
       <div class="kv-list">
         <div><span>频段/信道</span><b>预留</b></div>
-        <div><span>PTT</span><b class="muted">预留</b></div>
-        <div><span>BUSY</span><b class="muted">预留</b></div>
+        <div><span>PTT</span><b class="muted" id="relay-ptt" title="GPIO3_A1（全局 GPIO 97）拉高即 PTT 使能">--</b></div>
+        <div><span>BUSY</span><b class="muted" id="relay-busy" title="本地录音 / 发射占用">--</b></div>
         <div><span>运行时间</span><b id="uptime">--</b></div>
       </div>
     </div>
@@ -183,8 +186,14 @@
     <div class="card chat-card">
       <div class="chat-history" id="chat-history"></div>
       <div class="chat-input">
-        <textarea id="chat-text" rows="3" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+        <textarea id="chat-text" rows="3" placeholder="输入消息，Enter 发送，Shift+Enter 换行；（也可按 BUSY 语音输入）"></textarea>
         <button class="btn primary" id="btn-chat-send">发送</button>
+      </div>
+      <div class="row gap small">
+        <button class="btn" id="btn-voice-busy" title="按住说话：板端离线识别（sherpa-onnx + SenseVoice）后转文字">🎙 BUSY（按住说话）</button>
+        <span id="voice-state" class="muted small">语音输入：就绪</span>
+        <label class="checkline"><input type="checkbox" id="voice-auto-send" checked> 转写后自动发送</label>
+        <span id="voice-info" class="muted small">录音留档：/www/asr_recordings</span>
       </div>
       <div class="row gap small muted">
         <label><input type="checkbox" id="chat-stream" checked> 流式输出</label>

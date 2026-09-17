@@ -78,7 +78,7 @@ out.append(f'<rect x="118" y="288" width="{W - 236}" height="236" rx="12" fill="
 feat = [
     ('Web 控制中心', 'Flask · 账号/审计/CSRF', PRIMARY),
     ('端侧 LLM + Agent', 'Qwen2.5-1.5B RKNPU · 8 技能', PINK),
-    ('端侧 TTS', 'Piper 中/英/ICAO · 流式', GREEN),
+    ('端侧 TTS / ASR', 'Piper 合成 · SenseVoice 识别', GREEN),
     ('摄像头 / 录像', 'V4L2 MJPEG · ffmpeg', AMBER),
     ('SARADC 电压采集', '12bit · 电池 CH4 / 光伏 CH6', CYAN),
     ('RS485 Modbus', '风速变送器 + 翻斗雨量计', CYAN),

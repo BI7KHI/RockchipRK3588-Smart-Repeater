@@ -2095,6 +2095,189 @@
     } catch (e) { /* 忽略 */ }
   }
 
+  // ---------------- 语音输入：BUSY 虚拟按键 → 录音 → 端侧 ASR → 文本 ----------------
+  let voiceStream = null;
+  let voiceCtx = null;
+  let voiceNode = null;
+  let voiceSink = null;
+  let voiceChunks = [];
+  let voiceActive = false;
+  let voiceT0 = 0;
+  let voicePeak = 0;
+  let voiceTick = null;
+  let voicePointerDown = false;
+
+  function voiceSetState(text, cls) {
+    const el = $('#voice-state');
+    if (el) el.textContent = '语音输入：' + text;
+    const b = $('#btn-voice-busy');
+    if (b) b.classList.toggle('recording', cls === 'on');
+  }
+
+  // 16k 单声道 PCM → WAV Blob
+  function encodeWav(chunks, sampleRate) {
+    let len = 0;
+    chunks.forEach((c) => { len += c.length; });
+    const view = new DataView(new ArrayBuffer(44 + len * 2));
+    const str = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+    str(0, 'RIFF'); view.setUint32(4, 36 + len * 2, true); str(8, 'WAVE');
+    str(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true); str(36, 'data'); view.setUint32(40, len * 2, true);
+    let off = 44;
+    chunks.forEach((c) => {
+      for (let i = 0; i < c.length; i++, off += 2) view.setInt16(off, c[i], true);
+    });
+    return new Blob([view], { type: 'audio/wav' });
+  }
+
+  async function startVoiceInput() {
+    if (voiceActive) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showToast('需要 HTTPS 才能访问麦克风', 'error');
+      voiceSetState('麦克风不可用');
+      return;
+    }
+    try {
+      voiceStream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      voiceCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      await voiceCtx.resume();
+      const src = voiceCtx.createMediaStreamSource(voiceStream);
+      voiceNode = voiceCtx.createScriptProcessor(4096, 1, 1);
+      voiceSink = voiceCtx.createGain();
+      voiceSink.gain.value = 0;
+      voiceChunks = [];
+      voicePeak = 0;
+      voiceActive = true;
+      voiceT0 = Date.now();
+      voiceNode.onaudioprocess = (ev) => {
+        if (!voiceActive) return;
+        const f = ev.inputBuffer.getChannelData(0);
+        const pcm = new Int16Array(f.length);
+        for (let i = 0; i < f.length; i++) {
+          const a = Math.abs(f[i]);
+          if (a > voicePeak) voicePeak = a;
+          let s = f[i] * 2.0;
+          if (s > 1) s = 1; else if (s < -1) s = -1;
+          pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+        }
+        voiceChunks.push(pcm);
+      };
+      src.connect(voiceNode);
+      voiceNode.connect(voiceSink);
+      voiceSink.connect(voiceCtx.destination);
+      voiceSetState('录音中…（松开结束）', 'on');
+      voiceTick = setInterval(() => {
+        const sec = (Date.now() - voiceT0) / 1000;
+        const info = $('#voice-info');
+        if (info) info.textContent = `已录 ${sec.toFixed(1)}s · 峰值 ${(voicePeak * 100).toFixed(0)}%`;
+      }, 200);
+    } catch (e) {
+      showToast('无法访问麦克风：' + e.message, 'error');
+      stopVoiceInput(true);
+    }
+  }
+
+  async function stopVoiceInput(cancel) {
+    if (!voiceActive) return;
+    voiceActive = false;
+    if (voiceTick) { clearInterval(voiceTick); voiceTick = null; }
+    try { if (voiceNode) voiceNode.disconnect(); } catch (e) {}
+    try { if (voiceSink) voiceSink.disconnect(); } catch (e) {}
+    if (voiceStream) { voiceStream.getTracks().forEach((x) => x.stop()); voiceStream = null; }
+    try { if (voiceCtx) await voiceCtx.close(); } catch (e) {}
+    voiceCtx = null; voiceNode = null; voiceSink = null;
+    const secs = (Date.now() - voiceT0) / 1000;
+    const chunks = voiceChunks;
+    voiceChunks = [];
+    if (cancel || !chunks.length || secs < 0.3) {
+      voiceSetState(chunks.length ? '太短，已取消' : '已取消');
+      return;
+    }
+    const blob = encodeWav(chunks, 16000);
+    voiceSetState(`识别中…（${secs.toFixed(1)}s 音频）`);
+    try {
+      const fd = new FormData();
+      fd.append('audio', blob, 'voice.wav');
+      const resp = await fetch('/api/asr/transcribe', {
+        method: 'POST', body: fd, credentials: 'same-origin',
+        headers: { 'X-CSRF-Token': csrfToken },
+      });
+      const d = await resp.json().catch(() => null);
+      if (!resp.ok || !d || d.ok === false) throw new Error((d && d.error) || ('HTTP ' + resp.status));
+      const text = String(d.text || '').trim();
+      if (!text) { voiceSetState('未识别到内容'); return; }
+      voiceSetState(`识别完成：${d.ms} ms（RTF ${d.rtf}，${d.seconds}s 音频）`);
+      const info = $('#voice-info');
+      if (info) info.textContent = `已留档 ${d.filename || '--'}`;
+      const ta = $('#chat-text');
+      if (ta) ta.value = ta.value ? (ta.value.trim() + ' ' + text) : text;
+      if ($('#voice-auto-send')?.checked) await sendChat();
+    } catch (e) {
+      voiceSetState('识别失败：' + e.message);
+      showToast('语音识别失败：' + e.message, 'error');
+    }
+  }
+
+  function bindVoiceInput() {
+    const btn = $('#btn-voice-busy');
+    if (!btn) return;
+    btn.style.touchAction = 'none';
+    btn.style.userSelect = 'none';
+    btn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      voicePointerDown = true;
+      try { btn.setPointerCapture(e.pointerId); } catch (_) {}
+      startVoiceInput();
+    });
+    btn.addEventListener('pointerup', () => { voicePointerDown = false; stopVoiceInput(false); });
+    btn.addEventListener('pointercancel', () => { voicePointerDown = false; stopVoiceInput(false); });
+    btn.addEventListener('lostpointercapture', () => { if (voiceActive && !voicePointerDown) stopVoiceInput(false); });
+    window.addEventListener('pointerup', () => {
+      if (voiceActive && !voicePointerDown) stopVoiceInput(false);
+    });
+  }
+
+  // ---------------- 总览：PTT / BUSY 实时状态（GPIO3_A1 拉高即 PTT 使能） ----------------
+  async function updateRelayState() {
+    if (role && document.getElementById('tab-overview')?.classList.contains('active') === false) return;
+    try {
+      const d = await apiFetch('/api/ptt/status');
+      const p = d.ptt || {};
+      const el = $('#relay-ptt');
+      if (el) {
+        el.classList.remove('on', 'rec');
+        if (p.high) {
+          el.textContent = 'PTT 使能（发射中）';
+          el.classList.add('on');
+          el.classList.remove('muted');
+        } else {
+          el.textContent = 'PTT 释放（接收）';
+          el.classList.add('muted');
+        }
+      }
+      const b = $('#relay-busy');
+      if (b) {
+        b.classList.remove('on', 'rec');
+        if (voiceActive) {
+          b.textContent = '本地录音中（语音输入）';
+          b.classList.add('rec');
+          b.classList.remove('muted');
+        } else if (p.high) {
+          b.textContent = '发射占用';
+          b.classList.add('on');
+          b.classList.remove('muted');
+        } else {
+          b.textContent = '空闲';
+          b.classList.add('muted');
+        }
+      }
+    } catch (e) { /* 忽略 */ }
+  }
+
   // ---------------- event bindings ----------------
   function initEvents() {
     $('#volume-slider')?.addEventListener('input', (e) => {
@@ -2106,6 +2289,7 @@
     $('#btn-save-cal')?.addEventListener('click', saveCalibration);
     bindPttSelfTest();
     $('#btn-cal-design')?.addEventListener('click', fillDesignCal);
+    bindVoiceInput();
     $('#btn-save-prompt')?.addEventListener('click', saveLlmAgentSettings);
     $('#btn-save-agent')?.addEventListener('click', saveLlmAgentSettings);
     $('#btn-refresh-tools')?.addEventListener('click', () => loadAgentTools(''));
@@ -2297,6 +2481,8 @@
     }
     loadCalibration();
     setInterval(loadStatus, 3000);
+    updateRelayState();
+    setInterval(updateRelayState, 1500);
     setInterval(pollPttDiag, 1200);
     setInterval(loadRecordings, 10000);
     setInterval(loadWeatherRealtime, 2000);
