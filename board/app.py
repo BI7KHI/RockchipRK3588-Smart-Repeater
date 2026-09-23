@@ -50,6 +50,7 @@ import asr_service
 import camera_service
 import weather_service
 import voice_service
+import assistant_service
 import aprs_service
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -98,6 +99,7 @@ AUDIO_DEVICE = os.environ.get('RELAY_AUDIO_DEVICE', 'plughw:CARD=rockchipnau8822
 weather_service_instance = weather_service.WeatherService(DB_PATH)
 voice_service_instance = voice_service.VoiceService(DB_PATH)
 aprs_service_instance = aprs_service.AprsService(DB_PATH)
+assistant_service_instance = assistant_service.AssistantService(DB_PATH)
 MAX_RECORDING_BYTES = 32 * 1024 * 1024          # 单次录音上传上限
 # 音色包 / 训练数据 zip 可以很大（Rosmontis 音色包约 56MB），这里单独放宽
 MAX_UPLOAD_BYTES = int(os.environ.get('RELAY_MAX_UPLOAD_MB', '512') or 512) * 1024 * 1024
@@ -478,6 +480,41 @@ def _set_default_settings(db):
         'agent_enabled': '1',
         'agent_max_iters': '3',
         'agent_tools': '',
+        # 中继语音助手（BUSY 语音唤醒 → ASR → LLM → TTS → 受控发射）
+        'assist_enabled': '0',
+        'assist_wake_words': '智能中继,中继台',
+        'assist_wake_fuzzy': '1',
+        'assist_channel': 'left',
+        'assist_dbfs_open': '-50',
+        'assist_dbfs_close': '-56',
+        'assist_preroll_ms': '1200',
+        'assist_silence_ms': '450',
+        'assist_min_speech_ms': '350',
+        'assist_max_utterance': '15',
+        'assist_followup_seconds': '30',
+        'assist_ack_reply': '请讲',
+        'assist_use_vad': '1',
+        'assist_enhance': '1',
+        'assist_max_tx_seconds': '30',
+        'assist_min_gap_seconds': '15',
+        'assist_busy_wait_seconds': '8',
+        'assist_tx_guard_ms': '600',
+        'assist_quiet_hours': '',
+        'assist_test_mode': '0',
+        'assist_max_reply_chars': '80',
+        'assist_max_tokens': '256',
+        'assist_history_turns': '6',
+        'assist_max_input_chars': '3000',
+        'assist_temperature': '0.3',
+        'assist_provider': 'local',
+        'assist_use_tools': '1',
+        'assist_agent_iters': '2',
+        'assist_keep_llm_warm': '1',
+        'assist_llm_wait': '25',
+        'assist_prompt_suffix': '你是中继台的语音助手，回复会被合成语音后发射出去。\n只输出可直接朗读的纯口语，不要 Markdown、星号、井号、列表、emoji；\n不超过 {max_chars} 字，一句答完，不复述问题、不解释过程；\n没数据就说不知道，不要编造。',
+        'assist_voice': '',
+        'assist_retention_days': '30',
+        'assist_debug_keep': '12',
         # 端侧语音识别（ASR）
         'asr_enabled': '1',
         'asr_model_dir': '',
@@ -1078,6 +1115,38 @@ def api_settings_get():
         'tts_provider', 'tts_local_voice', 'tts_en_voice', 'tts_icao', 'tts_icao_voice', 'tts_auto_speak',
         'llm_system_prompt', 'llm_system_prompt_on', 'llm_prompt_vars',
         'agent_enabled', 'agent_max_iters', 'agent_tools',
+        'assist_enabled',
+        'assist_wake_words',
+        'assist_wake_fuzzy',
+        'assist_channel',
+        'assist_dbfs_open',
+        'assist_dbfs_close',
+        'assist_preroll_ms',
+        'assist_silence_ms',
+        'assist_min_speech_ms',
+        'assist_max_utterance',
+        'assist_followup_seconds',
+        'assist_ack_reply',
+        'assist_use_vad',
+        'assist_max_tx_seconds',
+        'assist_min_gap_seconds',
+        'assist_busy_wait_seconds',
+        'assist_tx_guard_ms',
+        'assist_quiet_hours',
+        'assist_test_mode',
+        'assist_max_reply_chars',
+        'assist_max_tokens',
+        'assist_history_turns',
+        'assist_max_input_chars',
+        'assist_temperature',
+        'assist_provider',
+        'assist_use_tools',
+        'assist_agent_iters',
+        'assist_keep_llm_warm',
+        'assist_llm_wait',
+        'assist_prompt_suffix',
+        'assist_voice',
+        'assist_retention_days',
         'vlog_enabled', 'vlog_dir', 'vlog_channel', 'vlog_pre_roll', 'vlog_post_roll',
         'vlog_min_seconds', 'vlog_max_seconds', 'vlog_silence_dbfs',
         'vlog_asr_enabled', 'vlog_vad_enabled', 'vlog_enhance', 'vlog_keep_transient',
@@ -1138,6 +1207,43 @@ def api_settings_set():
         'agent_max_iters': lambda v: str(max(1, min(5, int(float(v))))),
         'agent_tools': lambda v: ','.join(
             [x.strip() for x in re.split(r'[,;\s]+', str(v)) if x.strip()][:20]),
+        # 中继语音助手
+        'assist_enabled': _bool_caster,
+        'assist_use_vad': _bool_caster,
+        'assist_enhance': _bool_caster,
+        'assist_wake_fuzzy': _bool_caster,
+        'assist_use_tools': _bool_caster,
+        'assist_keep_llm_warm': _bool_caster,
+        'assist_test_mode': _bool_caster,
+        'assist_wake_words': lambda v: ','.join(
+            [x.strip() for x in re.split(r'[,;\u3001\s]+', str(v)) if x.strip()][:8]
+            ) or '\u667a\u80fd\u4e2d\u7ee7,\u4e2d\u7ee7\u53f0',
+        'assist_channel': lambda v: v if v in ('left', 'right', 'mix') else 'left',
+        'assist_dbfs_open': lambda v: str(round(max(-80.0, min(-5.0, float(v))), 1)),
+        'assist_dbfs_close': lambda v: str(round(max(-85.0, min(-5.0, float(v))), 1)),
+        'assist_preroll_ms': lambda v: str(int(max(0, min(3000, int(float(v)))))),
+        'assist_silence_ms': lambda v: str(int(max(150, min(5000, int(float(v)))))),
+        'assist_min_speech_ms': lambda v: str(int(max(100, min(5000, int(float(v)))))),
+        'assist_max_utterance': lambda v: str(round(max(2.0, min(120.0, float(v))), 1)),
+        'assist_followup_seconds': lambda v: str(int(max(0, min(600, int(float(v)))))),
+        'assist_ack_reply': lambda v: str(v).strip()[:40] or '\u8bf7\u8bb2',
+        'assist_max_tx_seconds': lambda v: str(int(max(3, min(300, int(float(v)))))),
+        'assist_min_gap_seconds': lambda v: str(int(max(0, min(600, int(float(v)))))),
+        'assist_busy_wait_seconds': lambda v: str(int(max(1, min(120, int(float(v)))))),
+        'assist_tx_guard_ms': lambda v: str(int(max(0, min(5000, int(float(v)))))),
+        'assist_quiet_hours': lambda v: str(v).strip()[:80],
+        'assist_max_reply_chars': lambda v: str(int(max(10, min(300, int(float(v)))))),
+        'assist_max_tokens': lambda v: str(int(max(32, min(512, int(float(v)))))),
+        'assist_history_turns': lambda v: str(int(max(0, min(12, int(float(v)))))),
+        'assist_max_input_chars': lambda v: str(int(max(400, min(8000, int(float(v)))))),
+        'assist_temperature': lambda v: str(round(max(0.0, min(1.5, float(v))), 2)),
+        'assist_provider': lambda v: v if v in ('local', 'external') else 'local',
+        'assist_agent_iters': lambda v: str(int(max(0, min(4, int(float(v)))))),
+        'assist_llm_wait': lambda v: str(int(max(5, min(120, int(float(v)))))),
+        'assist_prompt_suffix': lambda v: str(v)[:2000],
+        'assist_voice': lambda v: str(v).strip()[:80],
+        'assist_retention_days': lambda v: str(int(max(1, min(3650, int(float(v)))))),
+        'assist_debug_keep': lambda v: str(int(max(0, min(200, int(float(v)))))),
         # 中继语音日志
         'vlog_dir': lambda v: str(v).strip()[:120] or '/opt/ai/relay_voice',
         'vlog_channel': lambda v: v if v in ('left', 'right', 'mix') else 'left',
@@ -1233,6 +1339,10 @@ def api_settings_set():
         pass
     try:
         aprs_service_instance.invalidate()
+    except Exception:
+        pass
+    try:
+        assistant_service_instance.invalidate()
     except Exception:
         pass
     return api_ok(changed=changed)
@@ -1945,7 +2055,9 @@ def _vlog_capture_guard():
     time.sleep(8)
     while True:
         try:
-            if voice_service_instance.enabled():
+            # 语音日志**或**中继语音助手任一启用，就必须保证 arecord 常驻：
+            # 关掉语音日志时助手不能跟着失聪。
+            if voice_service_instance.enabled() or assistant_service_instance.enabled():
                 with MIC_CAPTURE_LOCK:
                     running = bool(MIC_CAPTURE.get('running'))
                 if not running:
@@ -3262,6 +3374,12 @@ def _mic_capture_loop():
             # 不能再开第二路 arecord）。不受 BUSY/分段影响，全程监听。
             try:
                 aprs_service_instance.feed(chunk, time.time())
+            except Exception:
+                pass
+            # 中继语音助手：同样挂在采集中枢上。它自己按能量分段、
+            # 自己判发射余波，绝不与语音日志/APRS 抢设备。
+            try:
+                assistant_service_instance.feed(chunk, time.time())
             except Exception:
                 pass
             try:
@@ -5461,6 +5579,462 @@ def api_weather():
 # ---------------------------------------------------------------------------
 # 启动
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 中继语音助手：BUSY 语音唤醒 → ASR → LLM → TTS → 受控发射
+# ---------------------------------------------------------------------------
+def _assist_settings_direct():
+    """无 app context 读取全部 assist_* 设置（供助手后台线程使用）。"""
+    out = {}
+    try:
+        db = sqlite3.connect(str(DB_PATH), timeout=3)
+        for k, v in db.execute("SELECT key,value FROM settings WHERE key LIKE 'assist_%'"):
+            out[k] = v
+        db.close()
+    except Exception:
+        pass
+    return out
+
+
+def _assist_prompt_base():
+    """助手与网页对话**共用**的基础系统提示词（含实时变量展开）。
+
+    变量展开后可能变长，因此仍按 llm_system_prompt 的长度上限截断，
+    真正的输入长度控制由 assistant_service._build_prompt 的逐级降配负责。
+    """
+    if _setting_direct('llm_system_prompt_on', '1') not in ('1', 'true', 'True', 'on'):
+        return ''
+    base = (_setting_direct('llm_system_prompt', '') or '').strip()
+    if not base:
+        return ''
+    if _setting_direct('llm_prompt_vars', '1') in ('1', 'true', 'True', 'on'):
+        try:
+            base = _expand_vars(base)
+        except Exception:
+            pass
+    return base[:1200]
+
+
+def _assist_channel_busy():
+    """信道忙判据：硬件 BUSY 有效，或开发板正在发射。
+
+    「正在发射」包含手动 PTT、网页对讲、流式朗读、APRS 发射四路——只要
+    aplay 还活着或 PTT 还压着，助手就必须让路，否则会把别人的音频切掉。
+    """
+    try:
+        if BUSY_STATE.get('active'):
+            return True
+    except Exception:
+        pass
+    try:
+        if PTT_LEVEL:
+            return True
+    except Exception:
+        pass
+    try:
+        with PLAY_LOCK:
+            p = CURRENT_PLAY_PROC
+        if p is not None and p.poll() is None:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _assist_ask(prompt, question='', max_tokens=256, temperature=0.3,
+                use_tools=True, max_iters=2):
+    """阻塞式 LLM 调用（可选 Agent 工具循环），供中继语音助手后台线程使用。
+
+    参数说明（两者不能混用）：
+      prompt   —— assistant_service 已经拼好的「系统设定+对话历史+当前问题」，
+                  只用于**第一轮**。绝不能再拿它去拼第二轮，否则模型会把
+                  系统设定当成用户问题照抄回来（实测踩过）。
+      question —— 用户那一句短问题，只用于**拿到数据后的总结轮**。
+
+    为什么不用 /api/agent/chat 那套 SSE：助手要的是**完整一句话**才能合成语音，
+    流式只增加复杂度没有收益，而且这里必须在后台线程里同步拿到结果。
+    工具协议仍复用 agent_service，保证和网页 Agent 对话行为一致。
+    """
+    t0 = time.time()
+    out = {'ok': False, 'reply': '', 'ms': 0, 'provider': '', 'model': '',
+           'iters': 0, 'tools': '', 'error': ''}
+    try:
+        provider = (_setting_direct('assist_provider', 'local') or 'local').strip()
+        if provider not in ('local', 'external'):
+            provider = 'local'
+        cfg = provider_config(provider) or {}
+        if not cfg.get('url'):
+            out['error'] = 'LLM 地址未配置（provider=%s）' % provider
+            return out
+        out['provider'] = cfg.get('provider') or provider
+        out['model'] = cfg.get('model') or ''
+        if (cfg.get('provider') or provider) == 'local':
+            ok, msg = voice_service_instance.ensure_llm_ready(
+                wait=float(_setting_direct('assist_llm_wait', '25') or 25))
+            if not ok:
+                out['error'] = '本地 LLM 未就绪：%s' % msg
+                return out
+        agent_on = bool(use_tools) and _setting_direct(
+            'agent_enabled', '1') in ('1', 'true', 'True', 'on')
+        valid, ctx = [], {}
+        if agent_on:
+            # 只取只读工具。speak 之类 action=True 的工具会直接压 PTT 发射，
+            # 绕过本模块所有的发射安全线（BUSY 让路/最短间隔/单次上限/
+            # 禁发时段/测试模式），对无人值守的语音助手是致命的，必须排除。
+            valid = [t['name'] for t in agent_service.enabled_tools(_agent_enabled())
+                     if not t.get('action')]
+            if not valid:
+                agent_on = False
+            else:
+                _all = _agent_ctx() or {}
+                ctx = {k: v for k, v in _all.items() if k in set(valid)}
+        # 注意：enabled_tools([]) 会因空列表为假而返回**全部**工具，
+        # 所以这里只能传非空列表或 None，不能传空列表。
+        enabled = valid if agent_on else None
+        max_iters = max(0, min(4, int(max_iters or 0)))
+        # q_short 只用于总结轮；prompt 只用于第一轮
+        q_short = (question or '').strip() or (prompt or '')[:120]
+        q_short = q_short[:120]
+        collected, used = [], []
+        text = ''
+        force_first = agent_on and agent_service.wants_realtime(q_short or prompt)
+        it = 0
+        while True:
+            voice_service.llm_lease(300.0)
+            if it == 0:
+                content = prompt
+                if agent_on:
+                    # 工具协议附在**拼好的提示词之后**，不再二次包装
+                    content = prompt + '\n\n' + agent_service.tools_prompt(enabled)
+                    if force_first:
+                        content += ('\n现在只输出一行读取指令'
+                                    '（格式 READ 名称 {}），不要回答用户。')
+            else:
+                # 数据已拿到：用一条**很短**的用户消息让它总结。
+                # 板端 RKLLM 提示词一长就空输出，这里必须短。
+                content = ('设备实时数据：' + json.dumps(collected, ensure_ascii=False)[:280] +
+                           '\n直接给结论，不要说「根据数据」「根据您提供的数据」这类开场白，不要复述问题，用中文 1~2 句回答：' + q_short)
+            body = {'model': cfg.get('model') or 'qwen2.5-1.5b',
+                    'messages': [{'role': 'user', 'content': content}],
+                    'max_tokens': int(max_tokens), 'temperature': float(temperature),
+                    'stream': False}
+            r = requests.post(cfg['url'], json=body,
+                              headers=_llm_headers(cfg.get('api_key')), timeout=(5, 180))
+            voice_service.llm_lease(300.0)
+            if r.status_code != 200:
+                out['error'] = 'HTTP %s: %s' % (r.status_code, r.text[:160])
+                out['ms'] = int((time.time() - t0) * 1000)
+                return out
+            try:
+                text = (r.json()['choices'][0]['message']['content'] or '').strip()
+            except Exception:
+                out['error'] = 'LLM 返回结构异常'
+                out['ms'] = int((time.time() - t0) * 1000)
+                return out
+            out['iters'] = it + 1
+            if not agent_on:
+                break
+            calls = agent_service.parse_tool_calls(text, valid=valid)
+            if not calls or it >= max_iters:
+                break
+            for c in calls[:3]:
+                if c['name'] in used:
+                    continue
+                used.append(c['name'])
+                try:
+                    fn = ctx.get(c['name'])
+                    res = fn(**(c.get('arguments') or {})) if fn else {'error': '未知工具'}
+                except Exception as e:
+                    res = {'error': '%s: %s' % (type(e).__name__, e)}
+                collected.append({c['name']: res})
+            out['tools'] = ','.join(used)
+            if not collected:
+                break
+            it += 1
+        # 收尾：拿到数据但最后一轮还是工具指令（或空），补一次总结
+        if collected and (not text or agent_service.parse_tool_calls(text, valid=valid)):
+            voice_service.llm_lease(300.0)
+            body = {'model': cfg.get('model') or 'qwen2.5-1.5b',
+                    'messages': [{'role': 'user', 'content':
+                                  '设备实时数据：' +
+                                  json.dumps(collected, ensure_ascii=False)[:280] +
+                                  '\n直接给结论，不要说「根据数据」「根据您提供的数据」这类开场白，不要复述问题，用中文 1~2 句回答：' + q_short}],
+                    'max_tokens': int(max_tokens), 'temperature': float(temperature),
+                    'stream': False}
+            r = requests.post(cfg['url'], json=body,
+                              headers=_llm_headers(cfg.get('api_key')), timeout=(5, 180))
+            voice_service.llm_lease(300.0)
+            if r.status_code == 200:
+                try:
+                    text = (r.json()['choices'][0]['message']['content'] or '').strip()
+                    out['iters'] = int(out['iters']) + 1
+                except Exception:
+                    pass
+        out['reply'] = text
+        out['ok'] = bool(text)
+        if not text:
+            out['error'] = out['error'] or 'LLM 返回空内容'
+    except Exception as e:
+        out['error'] = '%s: %s' % (type(e).__name__, e)
+    out['ms'] = int((time.time() - t0) * 1000)
+    print('[ASSIST] LLM %s %dms iters=%s tools=%s reply=%d字%s' % (
+        'OK' if out['ok'] else 'FAIL', out['ms'], out['iters'], out['tools'] or '-',
+        len(out['reply']), (' ' + out['error'][:60]) if out['error'] else ''), flush=True)
+    return out
+
+
+def _assist_tts(text, voice=''):
+    """把回复合成成 WAV。与网页朗读共用同一条 Piper 中英混读路径。
+
+    清洗（去 Markdown/emoji）已在 tts_service 内部强制生效，
+    这里不再重复处理，避免两处规则不一致。
+    """
+    voice = (voice or '').strip() or (
+        _setting_direct('tts_local_voice', 'zh_CN-huayan-medium') or 'zh_CN-huayan-medium')
+    en_voice = (_setting_direct('tts_en_voice', '') or '').strip() or None
+    icao_voice = (_setting_direct('tts_icao_voice', '') or '').strip() or None
+    icao = _setting_direct('tts_icao', '1') in ('1', 'true', 'True', 'on')
+    return tts_service.synthesize_multilingual(text, voice, en_voice=en_voice,
+                                               icao=icao, icao_voice=icao_voice)
+
+
+def _assist_play(wav_path, max_seconds=30.0):
+    """把 WAV 送上发射机，带**硬超时**保护。
+
+    与 play_audio_async 的关键区别：助手是自动发射，旁边没有人盯着，所以必须
+    能保证「最多占用信道 N 秒」——超时立刻 kill aplay 并松 PTT，绝不允许因为
+    某个异常把信道一直压住。
+    """
+    result = {'ok': False, 'error': '', 'seconds': 0.0, 'truncated': False}
+    t0 = time.time()
+    ptt_on = False
+    try:
+        if not Path(wav_path).exists():
+            result['error'] = '音频文件不存在'
+            return result
+        _ensure_audio_unmuted()
+        _ptt_retain()                       # 先拉 PTT，再送音频
+        ptt_on = True
+        time.sleep(0.12)                    # 等继电器/功放稳定
+        proc = _play_file_locked(wav_path)
+        if proc is None:
+            result['error'] = 'aplay 启动失败'
+            return result
+        limit = max(3.0, float(max_seconds))
+        try:
+            proc.wait(timeout=limit)
+            if proc.returncode == 0:
+                result['ok'] = True
+            else:
+                result['error'] = 'aplay 退出码 %s' % proc.returncode
+        except Exception:
+            _stop_proc(proc)                # 超时：硬截断
+            global CURRENT_PLAY_PROC
+            try:
+                if CURRENT_PLAY_PROC is proc:
+                    CURRENT_PLAY_PROC = None
+            except Exception:
+                pass
+            result['ok'] = True
+            result['truncated'] = True
+            result['error'] = '超过单次发射上限 %.0fs，已强制截断' % limit
+        return result
+    except Exception as e:
+        result['error'] = '%s: %s' % (type(e).__name__, e)
+        return result
+    finally:
+        result['seconds'] = round(time.time() - t0, 2)
+        if ptt_on:
+            try:
+                _ptt_release()
+            except Exception:
+                pass
+        try:
+            _ptt_event('assist_tx_done', '%.1fs' % result['seconds'])
+            print('[ASSIST] 发射结束 %.1fs ok=%s %s' % (
+                result['seconds'], result['ok'], result['error'][:80]), flush=True)
+        except Exception:
+            pass
+
+
+def _assist_stop_play():
+    """手动停止：立刻打断播放。PTT 由 _ptt_release 的引用计数负责落下来。"""
+    try:
+        with PLAY_LOCK:
+            proc = CURRENT_PLAY_PROC
+        _stop_proc(proc)
+    except Exception:
+        pass
+
+
+assistant_service_instance.configure(
+    setting_getter=_assist_settings_direct,
+    busy_getter=_assist_channel_busy,
+    tx_getter=lambda: bool(PTT_LEVEL),
+    ask_fn=_assist_ask,
+    tts_fn=_assist_tts,
+    play_fn=_assist_play,
+    base_prompt_fn=_assist_prompt_base,
+    stop_play_fn=_assist_stop_play,
+    expand_fn=_expand_vars,
+)
+assistant_service_instance.start()
+
+
+@app.route('/assistant')
+@login_required
+def assistant_page():
+    return render_template('assistant.html', user=session.get('username'),
+                           role=session.get('role'))
+
+
+@app.route('/api/assist/status')
+@login_required
+def api_assist_status():
+    st = assistant_service_instance.status()
+    st['busy'] = bool(BUSY_STATE.get('active'))
+    st['ptt'] = bool(PTT_LEVEL)
+    st['vlog_enabled'] = voice_service_instance.enabled()
+    try:
+        st['mic_running'] = bool(MIC_CAPTURE.get('running'))
+    except Exception:
+        st['mic_running'] = False
+    return api_ok(**st)
+
+
+@app.route('/api/assist/list')
+@login_required
+def api_assist_list():
+    day = (request.args.get('day') or '').strip() or datetime.now().strftime('%Y-%m-%d')
+    try:
+        limit = max(1, min(500, int(float(request.args.get('limit', 100) or 100))))
+    except Exception:
+        limit = 100
+    items = assistant_service_instance.list_turns(day=day, limit=limit)
+    return api_ok(day=day, items=items,
+                  stats=assistant_service_instance.day_stats(day))
+
+
+@app.route('/api/assist/<int:rid>/audio')
+@login_required
+def api_assist_audio(rid):
+    row = assistant_service_instance.store.one(
+        'SELECT rx_wav,tx_wav FROM assist_turns WHERE id=?', (rid,))
+    if not row:
+        return api_err('记录不存在', 404)
+    which = (request.args.get('which') or 'rx').strip()
+    name = row.get('tx_wav') if which == 'tx' else row.get('rx_wav')
+    p = assistant_service_instance.wav_path(name)
+    if not p or not Path(p).exists():
+        return api_err('音频不存在', 404)
+    return send_file(str(p), mimetype='audio/wav', conditional=True)
+
+
+@app.route('/api/assist/test', methods=['POST'])
+@login_required
+def api_assist_test():
+    """本地回环测试：走完整链路（提示词→LLM→TTS），默认只网页试听不发射。"""
+    data = request.get_json(silent=True) or {}
+    text = (data.get('text') or '').strip()
+    if not text:
+        return api_err('测试文本不能为空')
+    audit('assist_test', text[:120])
+    return api_ok(**assistant_service_instance.test_turn(text))
+
+
+@app.route('/api/assist/wake', methods=['POST'])
+@login_required
+def api_assist_wake():
+    """只做唤醒词匹配自测：不调 LLM、不发射，用于调唤醒词与容错。"""
+    data = request.get_json(silent=True) or {}
+    return api_ok(**assistant_service_instance.test_wake((data.get('text') or '').strip()))
+
+
+@app.route('/api/assist/stop', methods=['POST'])
+@login_required
+def api_assist_stop():
+    audit('assist_stop', '')
+    return api_ok(**assistant_service_instance.stop())
+
+
+@app.route('/api/assist/clear', methods=['POST'])
+@login_required
+@admin_required
+def api_assist_clear():
+    data = request.get_json(silent=True) or {}
+    day = (data.get('day') or '').strip()
+    if day:
+        n = assistant_service_instance.store.exec(
+            'DELETE FROM assist_turns WHERE ts LIKE ?', (day + '%',)).rowcount
+    else:
+        n = assistant_service_instance.store.exec('DELETE FROM assist_turns').rowcount
+    audit('assist_clear', day or 'all')
+    return api_ok(removed=int(n or 0))
+
+
+@app.route('/api/assist/prompt')
+@login_required
+def api_assist_prompt():
+    """预览「运行前实际注入的提示词」——网页 LLM 对话与中继助手各一份。
+
+    这是排查「为什么模型不照做」最直接的工具：直接看到最终拼出来的文本。
+    """
+    st = assistant_service_instance.settings(force=True)
+    base = _assist_prompt_base()
+    suffix = (st.get('assist_prompt_suffix') or '').strip()
+    try:
+        suffix = _expand_vars(suffix)
+    except Exception:
+        pass
+    suffix = suffix.replace('{max_chars}',
+                            str(assistant_service_instance.max_chars(st)))
+    q = (request.args.get('q') or '现在风速多少').strip()
+    prompt, chars = assistant_service_instance._build_prompt(q, st, base)
+    clean_demo = ''
+    try:
+        clean_demo = tts_service.clean_for_tts(
+            request.args.get('demo') or
+            '**风速 3.2 米每秒**，请注意！\n- 电压 12.6V\n### 结束')
+    except Exception:
+        pass
+    return api_ok(base=base, suffix=suffix, question=q, prompt=prompt,
+                  prompt_chars=chars,
+                  max_input=int(float(st.get('assist_max_input_chars') or 3000)),
+                  max_reply=assistant_service_instance.max_chars(st),
+                  max_tokens=int(float(st.get('assist_max_tokens') or 256)),
+                  history_turns=assistant_service_instance.hist_turns(st),
+                  clean_demo=clean_demo)
+
+
+@app.route('/api/assist/debug')
+@login_required
+def api_assist_debug():
+    """识别音频留档：直接看助手每一段到底听到了什么（含未命中唤醒词的）。"""
+    return api_ok(items=assistant_service_instance.debug_list(),
+                  keep=assistant_service_instance.settings().get('assist_debug_keep'))
+
+
+@app.route('/api/assist/debug/<name>')
+@login_required
+def api_assist_debug_audio(name):
+    p = assistant_service_instance.debug_path(name)
+    if not p:
+        return api_err('留档不存在', 404)
+    return send_file(str(p), mimetype='audio/wav', conditional=True)
+
+
+@app.route('/api/assist/clean', methods=['POST'])
+@login_required
+def api_assist_clean():
+    """预览 TTS 清洗效果：看到「模型原文」和「实际会念出来的文本」。"""
+    data = request.get_json(silent=True) or {}
+    text = str(data.get('text') or '')
+    try:
+        cleaned = tts_service.clean_for_tts(text)
+    except Exception as e:
+        return api_err('清洗失败：%s' % e, 500)
+    return api_ok(raw=text, cleaned=cleaned, raw_len=len(text), cleaned_len=len(cleaned))
+
+
 if __name__ == '__main__':
     init_db()
     _ensure_audio_unmuted()

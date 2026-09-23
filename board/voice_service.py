@@ -805,6 +805,78 @@ REDUCE_PROMPT = (
 )
 
 
+# ---------------------------------------------------------------------------
+# 共用识别入口：语音日志与中继语音助手都走这里
+# ---------------------------------------------------------------------------
+_SHARED_VAD = None
+_SHARED_VAD_LOCK = threading.Lock()
+
+
+def shared_vad():
+    """全局唯一的 silero VAD 实例（懒加载）。"""
+    global _SHARED_VAD
+    with _SHARED_VAD_LOCK:
+        if _SHARED_VAD is None:
+            _SHARED_VAD = Vad()
+        return _SHARED_VAD
+
+
+def transcribe_pcm(x, sr=SAMPLE_RATE, enhance=True, min_seconds=0.30,
+                   vad_empty_fallback=False):
+    """把一段单声道波形按**语音日志的同一套流程**识别。
+
+    返回 (segments, asr_ms)：
+        segments = [{'start','end','text'}, ...]，按时间升序
+        asr_ms   = 该段累计识别耗时
+
+    这是语音日志与中继语音助手共用的**唯一识别入口**。之所以要共用：
+    实测同一条录音在两处识别出不同结果（一处「中继台…」一处「一台…」），
+    原因就是两边各写了一套预处理/VAD/合并逻辑并逐渐漂移。
+    """
+    import asr_service
+    if x is None or len(x) < int(0.10 * sr):
+        return [], 0
+    xa = enhance_for_asr(x, sr) if enhance else x
+    total_ms = 0
+
+    def _one(sig):
+        nonlocal total_ms
+        res = asr_service.transcribe_samples(sig, sr)
+        total_ms += int(res.get('ms') or 0)
+        return (res.get('text') or '').strip() if res.get('ok') else ''
+
+    segs = shared_vad().split(xa, sr)
+    if not segs:
+        # vad_empty_fallback：VAD 判空时整段送识别。
+        #   助手必须开 —— 只有 0.5~0.8 秒的「中继台」偶尔被 silero 判成非语音，
+        #     丢了就永远唤不醒；
+        #   语音日志必须关 —— 那里宁可不写也不写垃圾（实测开着的后果是
+        #     单音/信标段被写进一个「.」，污染归档）。
+        if not vad_empty_fallback:
+            return [], total_ms
+        t = _one(xa)
+        return ([{'start': 0.0, 'end': round(len(x) / float(sr), 2), 'text': t}]
+                if t else []), total_ms
+    out = []
+    for (a, b) in merge_segments(segs):
+        i0 = max(0, int(a * sr))
+        i1 = min(len(xa), int(b * sr))
+        if i1 - i0 < int(max(0.05, min_seconds) * sr):
+            continue
+        t = _one(xa[i0:i1])
+        if t:
+            out.append({'start': round(a, 2), 'end': round(b, 2), 'text': t})
+    return out, total_ms
+
+
+def transcribe_pcm_text(x, sr=SAMPLE_RATE, enhance=True, min_seconds=0.30,
+                        vad_empty_fallback=False):
+    """只要拼接后的文本。"""
+    segs, ms = transcribe_pcm(x, sr, enhance=enhance, min_seconds=min_seconds,
+                              vad_empty_fallback=vad_empty_fallback)
+    return ' '.join(s['text'] for s in segs).strip(), ms
+
+
 def chunk_text(text, size):
     """按行切块，尽量不切断一行。"""
     parts = []
@@ -1087,23 +1159,16 @@ class VoiceService:
         xa = enhance_for_asr(x, sr) if _flag(st.get('vlog_enhance'), True) else x
         min_s = max(0.0, _f(st.get('vlog_min_seconds'), 1.0))
         silence_db = _f(st.get('vlog_silence_dbfs'), -48.0)
+        # VAD 切分现在在 transcribe_pcm 内部完成，这里不再预切
         segs = []
-        if _flag(st.get('vlog_vad_enabled'), True) and row.get('seconds', 0) >= min_s:
-            segs = self.vad.split(xa, sr)
+        # 走共用识别入口（与中继语音助手同一份实现，避免两处逻辑漂移）。
+        # 注意：segs 为空也照样送识别——VAD 可能把短句判成非语音，不能丢。
         texts = []
         asr_ms = 0
         rtf = 0.0
-        if segs and _flag(st.get('vlog_asr_enabled'), True):
-            for (a, b) in merge_segments(segs):
-                i0 = max(0, int(a * sr))
-                i1 = min(len(xa), int(b * sr))
-                if i1 - i0 < int(0.3 * sr):
-                    continue
-                res = asr_service.transcribe_samples(xa[i0:i1], sr)
-                asr_ms += int(res.get('ms') or 0)
-                if res.get('ok') and (res.get('text') or '').strip():
-                    texts.append({'start': round(a, 2), 'end': round(b, 2),
-                                  'text': res['text'].strip()})
+        if _flag(st.get('vlog_asr_enabled'), True):
+            texts, asr_ms = transcribe_pcm(
+                x, sr, enhance=_flag(st.get('vlog_enhance'), True), min_seconds=0.30)
         text = ' '.join(t['text'] for t in texts)
         raw_calls = extract_callsigns(text) if text else []
         wl = [x for x in re.split(r'[,;\s]+', st.get('vlog_callsign_whitelist') or '') if x]

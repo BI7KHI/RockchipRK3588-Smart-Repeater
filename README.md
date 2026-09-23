@@ -84,6 +84,7 @@ RK3588 负责全部"智能"部分：网页控制台、端侧大模型（LLM）�
 | **摄像头** | V4L2 MJPEG 采集、**开机自动循环录像（掉线自愈）**、单次录像、回放/时间轴、容量清理、OSD/RTMP；实时预览与回放合并为同一控制台（模式切换） | ✅ |
 | **BUSY 检测** | **GPIO3_A5（全局 GPIO 101）光耦输入**，总览实时显示接收状态、发射期自激告警、极性与电平沿诊断 | ✅ |
 | **中继语音日志** | **BUSY/PTT 触发录音**（3 s 前滚 + 2 s 尾音）、**异步 ASR 段级时间戳**、非语音自动分类（APRS/单音/噪声/静音/抖动，**不出幻觉文字**）、**ICAO 字母解释法呼号自动还原**、独立日志页（全天时间轴 + 波形 + 文字高亮 + 搜索 + txt/srt/csv 导出）、**每日 23:30 分块 map-reduce 总结**（本地 rkllm / 外部 DeepSeek） | ✅ |
+| **中继语音助手** | **BUSY 语音唤醒**（自定义唤醒词 + 同音容错）→ **与语音日志共用识别入口** → 端侧 LLM 调**只读**工具取实时数据 → TTS 合成 → **自动压 PTT 语音回答**；**一句话唤醒 + 30 s 追问窗口**（窗口内无需重复唤醒词）；发射四级安全线（单次上限 30 s / 最短间隔 15 s / BUSY 让路 8 s / 禁发时段）+ 一键停止；独立 `/assistant` 页（状态机 + 电平波形 + **含未命中唤醒词的实况识别流** + 对话记录可回放 + **识别音频留档环**） | ✅ |
 | **APRS 收发** | **自研纯 Python 1200 bps Bell 202 软件 TNC**：常驻采集中枢连续解码（不依赖 BUSY 分段与尾音长度，因采集设备独占而不能跑 Direwolf）、**CRC 校验定帧**、相位×极性搜索；解析位置/气象/状态/遥测/消息/对象（**未知类型也原样入库**）；发射气象 `_WX`／遥测 `T#`／位置信标／状态／文本消息；**载波侦听仲裁**（BUSY/PTT 忙则顺延并在静默后随机延迟，避免语音与 AFSK 叠加导致两边都解不出）；独立 `/aprs` 页（**天地图**底图 + 瓦片代理与磁盘缓存，断网可看已浏览区域） | ✅ |
 | **Web 控制台** | 账号/角色、CSRF、审计日志、HTTPS 反向代理、系统监控 | ✅ |
 | **硬件板卡** | IO 隔离/驱动板、ADC 分压采集板 | ✅ 硬件完成（软件调试中） |
@@ -99,6 +100,12 @@ RK3588 负责全部"智能"部分：网页控制台、端侧大模型（LLM）�
 > asynchronously with **segment-level timestamps**, classifies non-speech (APRS / tone / noise)
 > so no hallucinated text is stored, and generates a **daily summary at 23:30** via chunked
 > map-reduce on the local NPU model or an external OpenAI-compatible API.
+> A **relay voice assistant** completes the loop: a custom wake word (with homophone tolerance)
+> triggers recognition through the **same ASR entry point as the voice log**, the on-device LLM
+> calls **read-only** tools for live data, and the answer is spoken back over the air via TTS with
+> automatic PTT. It supports **one-shot wake + a 30 s follow-up window**, and every transmission is
+> bounded by hard limits (max duration, minimum gap, BUSY yield, quiet hours) with a one-click stop.
+> The `speak` tool is excluded from its toolset precisely because it would bypass every one of those limits.
 
 ---
 
@@ -120,10 +127,13 @@ RockchipRK3588-Smart-Repeator/
 │   ├── tts_service.py            Piper 合成 + 中英/ICAO 分段 + 音色包管理
 │   ├── weather_service.py        RS485 Modbus 采集（风速/雨量）+ SQLite 存储
 │   ├── asr_service.py            sherpa-onnx + SenseVoice 离线识别（文件 / 波形数组）
-│   ├── voice_service.py          ★ 中继语音日志：触发录音、ASR 队列、分类、每日总结
+│   ├── voice_service.py          ★ 中继语音日志：触发录音、ASR 队列、分类、每日总结；
+│   │                               内含**共用识别入口 transcribe_pcm()**（与语音助手同一份）
+│   ├── assistant_service.py      ★ 中继语音助手：唤醒、分段、追问窗口、受控发射
 │   ├── camera_service.py         V4L2 采集 + ffmpeg 录像/推流
 │   ├── postfilter.py             TTS 音频后处理（响度/滤波）
 │   ├── templates/ static/        Web 前端（原生 JS + SSE + 轮询）
+│   │                               assistant.html / assistant.js / assistant.css = 语音助手页
 │   ├── deploy/                   systemd / nginx / udev / GPIO 部署脚本
 │   ├── tests/                    PTT 与流式朗读自动验证脚本
 │   ├── requirements.txt          Flask 2.2.2 / Werkzeug 2.2.2 / requests
@@ -141,6 +151,7 @@ RockchipRK3588-Smart-Repeator/
     ├── 多模态端侧智能无线电中继系统架构.md
     ├── 部署记录-2026-09-09-端侧LLM.md … 部署记录-2026-09-13-PTT-GPIO.md
     ├── 部署记录-2026-09-23-中继语音日志.md
+    ├── 部署记录-2026-09-24-中继语音助手.md（含**语音识别路线**与实测基线）
     ├── 端侧TTS选型与音色训练方案.md / 板端TTS后处理接入说明.md
     ├── ELF240P20P管脚功能分配和硬件连线.md
     └── 3.5mm耳机接口音频输入原理图结论.md
@@ -253,6 +264,11 @@ _ptt_release() ──► HOLD_COUNT-1 ──(→0)───► 0.8s 定时 ─�
 **实现 / Implementation**：
 - 模型 `/opt/ai/asr/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17`，
   服务模块 `board/asr_service.py`（懒加载 + 串行解码 + ffmpeg 统一转 16 kHz 单声道）。
+- **唯一识别入口 `voice_service.transcribe_pcm()`**：语音日志与中继语音助手共用同一条
+  「去直流 + 250 Hz 高通 + 峰值归一化 → silero VAD 切分 → `merge_segments` 合并 →
+  SenseVoice 逐段识别」流水线。曾一度两处各写一套，同一条空口录音识别出不同结果
+  （语音日志得到「中继台现在风速多少？」，助手得到「一台现在风速多少？」，首字被吃）；
+  抽成唯一入口后两边一致，回归脚本 `board/deploy/test_shared_asr.py` 守着这一点。
 - 前端 **BUSY 虚拟按键**（LLM 对话页，按住说话）：网页麦克风采集 → 16 kHz PCM → 打包 WAV →
   `POST /api/asr/transcribe` → 文本回填输入框 →（可选）自动发送给端侧 LLM → 回复可由 TTS 朗读，
   形成"语音进 → 文字 → LLM → 语音出"的闭环；**录音同时留档**到 `/www/asr_recordings`。
@@ -382,6 +398,55 @@ WGS-84 实用精度一致（差 <1 m），坐标可直接绘制**。对比之下
 > Tiles are proxied and disk-cached server-side so the key never leaves the board and
 > already-viewed areas still render offline.
 
+### 5.10 中继语音助手 / Relay voice assistant
+
+> 与 5.8 语音日志**共用同一路采集**：`nau8822` 设备独占，全板只有一路 `arecord`，
+> `_mic_capture_loop` 把同一份 16 kHz 立体声块同时喂给 `voice_service`（归档）、
+> `aprs_service`（常驻 TNC）与 `assistant_service`（唤醒）。助手**不能**再开第二路。
+
+**链路 / Pipeline**：`BUSY/能量分段` → **`transcribe_pcm()`（与语音日志同一入口）** →
+唤醒词匹配 → LLM（只读工具取实时数据）→ TTS → **受控发射**。松手到出声约 **8 秒**
+（收段 0.45 + ASR 0.15 + LLM 4.5 + TTS 1.4 + 起 PTT 0.12）。
+首次空口验收连发 3 次全部命中并成功发射（气象 / CPU 温度 / 电池电压）。
+
+**语音识别路线 / ASR route**（完整版见 `docs/部署记录-2026-09-24-中继语音助手.md` §2）：
+
+| 决策 | 备选 | 实测依据 |
+|---|---|---|
+| 助手**自带轻量分段**，不订阅语音日志的 ASR 结果 | 挂 `vlog` 转录回调 | 归档 `post_roll=2.0 s` 才收段，唤醒白等 2 秒 |
+| 与语音日志**共用 `transcribe_pcm()`** | 各写一套 | 同一条录音两处结果不同（首字被吃） |
+| 保留 `asr_language=auto` | 强制 `zh` | 4 组对照实验（auto/zh × 原始/预处理）**全部 1/5**，`auto` 无劣势 |
+| 起判 **-50 / -56 dBFS** | -40 / -46 | 实测空闲噪声底中位 **-68.9**、最弱真实语音 **-42.1**，取两者之间 |
+| 前置缓冲 **1200 ms** | 400 ms | 反推取音窗口：起点比语音起点晚约 0.65 s（「中」是低能量声母） |
+| VAD **不自裁边界** | 裁 50 ms 余量 | silero 首段起点比真实起点晚约 320 ms，自裁会剪掉「中继」 |
+
+**发射安全 / Transmit safety**（自动发射、无人值守，故为硬约束）：
+
+| 保护 | 默认 | 行为 |
+|---|---|---|
+| 单次发射上限 | 30 s | 到点 kill aplay 并松 PTT |
+| 两次发射最短间隔 | 15 s | 不足则等待，超预算放弃本次回答 |
+| BUSY 等待上限 | 8 s | 信道一直忙就放弃，**绝不硬插** |
+| 发射余波保护 | 600 ms | 发射后这段时间不收音，防自激 |
+| 禁发时段 | 可配 | 如 `23:00-07:00`，跨零点正确解析 |
+| 手动测试 | — | **无条件不发射**，优先级高于一切设置 |
+| 一键停止 | — | 立即打断播放 + 清空待处理队列 + 关闭追问窗口 |
+
+**工具白名单**：助手只允许 `action=false` 的**只读**工具。`agent_service` 的 `speak`
+是 `action=true`（会直接压 PTT 发射），若被模型调用将**绕过上述全部安全线**，
+因此被显式排除，且 `ctx` 中连引用都不保留。
+
+> **EN** — The assistant shares the single capture hub with the voice log and the APRS TNC
+> (the codec is exclusive, so a second `arecord` is impossible). After a wake word it runs the
+> **same `transcribe_pcm()` entry point as the voice log**, lets the on-device LLM call
+> **read-only** tools, then speaks the answer back with automatic PTT — about 8 s from
+> unkeying to audio. First on-air acceptance: 3 of 3 calls answered. Recognition thresholds
+> were calibrated against measured data (idle noise floor −68.9 dBFS, weakest real speech
+> −42.1 dBFS). Because transmission is unattended, hard limits are enforced: 30 s max
+> duration, 15 s minimum gap, 8 s BUSY yield, 600 ms self-echo guard, optional quiet hours,
+> and a one-click stop. The `speak` tool is excluded from the assistant's toolset precisely
+> because it would bypass every one of those limits.
+
 ---
 
 ## 6. 快速开始 / Quick Start
@@ -439,6 +504,13 @@ sudo dd if=/dev/zero of=/opt/ai/swapfile bs=1M count=4096 status=none
 sudo chmod 600 /opt/ai/swapfile && sudo mkswap /opt/ai/swapfile && sudo swapon -p 10 /opt/ai/swapfile
 printf 'vm.swappiness=10\nvm.vfs_cache_pressure=50\nvm.min_free_kbytes=65536\n' \
   | sudo tee /etc/sysctl.d/99-elf2-swap.conf && sudo sysctl -p /etc/sysctl.d/99-elf2-swap.conf
+
+# 6) 中继语音助手所需（详见 docs/部署记录-2026-09-24-中继语音助手.md）
+sudo mkdir -p /opt/ai/relay_assist && sudo chown -R elf:elf /opt/ai/relay_assist
+#    助手与语音日志共用同一路采集与同一个识别入口，无需额外模型；
+#    但需保证 silero VAD 就位（见上），且若要让助手常驻响应，
+#    应把 assist_keep_llm_warm 置 1（占约 2.3 GB 内存）。
+#    一键部署：bash board/deploy/deploy_assist.sh（自动备份 + 去 CR + py_compile + 重启）
 ```
 
 浏览器访问 `https://<板卡IP>/`（自签证书需"继续前往"）→ 默认账号 `Admin`（首次部署密码可经
@@ -486,6 +558,13 @@ printf 'vm.swappiness=10\nvm.vfs_cache_pressure=50\nvm.min_free_kbytes=65536\n' 
 | `/api/aprs/tile/<layer>/<z>/<x>/<y>` | GET | 天地图瓦片代理 + 磁盘缓存（服务端 key，受登录保护） |
 | `/api/aprs/export` `/api/aprs/cleanup` | GET/POST | 导出 `txt`/`csv`/`json`、按天清理记录与瓦片缓存 |
 | `/api/intercom/push` `/api/intercom/push/stop` | POST | 网页实时对讲推流（自动 PTT） |
+| `/assistant` | GET | **中继语音助手页**（状态机 / 电平波形 / 实况识别流 / 对话记录 / 设置） |
+| `/api/assist/status` | GET | 助手实时状态（状态机、电平、队列、计数器、LLM 保活、全部设置） |
+| `/api/assist/list` `/api/assist/<id>/audio` | GET | 对话记录（双方原文/回复/耗时/发射时长）、回放双方音频 |
+| `/api/assist/test` `/api/assist/wake` | POST | 手动跑一轮（**无条件不发射**）/ 只测唤醒词匹配 |
+| `/api/assist/stop` `/api/assist/clear` | POST | 一键停止（打断播放 + 清队列）/ 清空记录 |
+| `/api/assist/prompt` `/api/assist/clean` | GET/POST | 逐字预览最终注入的提示词 / TTS 朗读前的 Markdown·emoji 清洗效果 |
+| `/api/assist/debug` `/api/assist/debug/<name>` | GET | **识别音频留档环**（最近 12 条，含未命中唤醒词的） |
 | `/api/camera/*` | GET/POST | 采集/预览、循环与单次录像、分段回放、存储统计、容量清理 |
 | `/api/camera/status` | GET | 含 `loop_running` / `loop_autostart` / `loop_manual_stop` |
 | `/api/weather/*` `/api/rain/*` | GET | 风速/雨量实时与历史 |

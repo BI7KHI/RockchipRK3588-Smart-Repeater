@@ -35,6 +35,62 @@ def safe_name(name, default='voice'):
     return name or default
 
 
+# ---------------------------------------------------------------------------
+# TTS 文本清洗：把 Markdown / emoji 等在语音里会被逐字念出来的符号去掉
+# ---------------------------------------------------------------------------
+# Piper 走 espeak-ng 前端，`*` `#` 反引号 `>` 这类符号不是语音学字符，会被当成
+# 可读字符念出来（实测 `**重要**` 被读成「星星星星重要星星星星」）。大模型天然
+# 爱输出 Markdown，所以必须在送合成前统一剥掉。本函数幂等，重复调用结果一致。
+_EMOJI_RE = re.compile(
+    '[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002B00-\U00002BFF'
+    '\U00002190-\U000021FF\uFE0F\u20E3\u200D]+')
+_ZW_RE = re.compile('[\u200b-\u200f\u202a-\u202e\u2060\ufeff]')
+_ROLE_RE = re.compile(r'(?im)^\s*(assistant|ai|助手|中继助手|回复)\s*[:：]\s*')
+
+
+def clean_for_tts(text):
+    """清洗要朗读的文本：去 Markdown / emoji / 控制符，收敛重复标点。"""
+    if not text:
+        return ''
+    s = _ZW_RE.sub('', str(text))
+    s = s.replace('\r\n', '\n').replace('\r', '\n')
+    # 工具调用协议块：整块丢弃（agent 模式的中间产物，绝不能念出来）
+    s = re.sub(r'<(tool_call|tool_result|tool_response)>.*?</\1>', '', s, flags=re.S)
+    # 代码块围栏 / 行内反引号：内容保留，符号去掉
+    s = re.sub(r'```[a-zA-Z0-9_+-]*\n?', '', s)
+    s = s.replace('`', '')
+    # 图片 ![alt](url) → alt；链接 [text](url) → text；裸 URL 不朗读
+    s = re.sub(r'!\[([^\]]*)\]\([^)]*\)', r'\1', s)
+    s = re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', s)
+    s = re.sub(r'https?://\S+', '', s)
+    # 粗体/斜体：只脱掉包裹符号，文字保留
+    s = re.sub(r'\*\*\*(.+?)\*\*\*', r'\1', s, flags=re.S)
+    s = re.sub(r'\*\*(.+?)\*\*', r'\1', s, flags=re.S)
+    s = re.sub(r'\*(.+?)\*', r'\1', s, flags=re.S)
+    s = re.sub(r'___(.+?)___', r'\1', s, flags=re.S)
+    s = re.sub(r'__(.+?)__', r'\1', s, flags=re.S)
+    # 行首标记：# 标题、> 引用、- * + 列表、1. 有序列表、--- 分隔线、| 表格
+    s = re.sub(r'(?m)^\s{0,3}#{1,6}\s*', '', s)
+    s = re.sub(r'(?m)^\s{0,3}>\s?', '', s)
+    s = re.sub(r'(?m)^\s{0,3}[-*+]\s+', '', s)
+    s = re.sub(r'(?m)^\s{0,3}\d+[.)]\s+', '', s)
+    s = re.sub(r'(?m)^\s{0,3}([-*_])\1{2,}\s*$', '', s)
+    s = re.sub(r'(?m)^\s{0,3}\|(.+)\|\s*$',
+               lambda m: m.group(1).replace('|', ' '), s)
+    # 残留的孤立符号（成串的 * _ # ~ ^ | < > { } [ ] \ 等）整体删除
+    s = re.sub(r'[*_#~^|<>{}\[\]\\]+', '', s)
+    s = _EMOJI_RE.sub('', s)
+    s = _ROLE_RE.sub('', s)
+    # 收敛重复标点与破折号：**** → 空、。。。 → 。、！！！ → ！
+    s = re.sub(r'([,、。！？；：.!?;:])\1{1,}', r'\1', s)
+    s = re.sub(r'[-—–]{2,}', '—', s)
+    # 空白收敛
+    s = re.sub(r'[ \t]+', ' ', s)
+    s = re.sub(r' *\n *', '\n', s)
+    s = re.sub(r'\n{2,}', '\n', s)
+    return s.strip()
+
+
 def list_voices():
     ensure_dirs()
     voices = []
@@ -121,9 +177,9 @@ def synthesize(text, provider, voice_id, model=None, external_apis=None):
     为兼容旧调用方，provider / model / external_apis 参数保留但会被忽略。
     """
     ensure_dirs()
-    text = (text or '').strip()
+    text = clean_for_tts(text)
     if not text:
-        raise ValueError('文本不能为空')
+        raise ValueError('文本不能为空（清洗后无可朗读内容）')
     out_path = TTS_CACHE_DIR / f'tts_{time.strftime("%Y%m%d_%H%M%S")}_{os.getpid()}.wav'
     piper_speak(text, voice_id, out_path)
     return str(out_path)
@@ -266,9 +322,9 @@ def synthesize_multilingual(text, zh_voice, en_voice=None, icao=False, aviation_
       等官方英文音色，咬字更清楚；都没有则退回 en_voice）
     """
     ensure_dirs()
-    text = (text or '').strip()
+    text = clean_for_tts(text)
     if not text:
-        raise ValueError('文本不能为空')
+        raise ValueError('文本不能为空（清洗后无可朗读内容）')
     if icao:
         text = expand_icao(text, aviation_digits=aviation_digits, mark=True)
     en_voice = en_voice or pick_english_voice()

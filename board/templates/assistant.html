@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+{% block title %}中继语音助手 - ELF2 智能中继控制中心{% endblock %}
+
+{% block nav %}
+<a class="tab-btn" href="/">&larr; 返回控制台</a>
+<span class="tab-btn active">中继语音助手</span>
+{% endblock %}
+
+{% block head_extra %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/assistant.css', v='20260925a') }}">
+{% endblock %}
+
+{% block app_js %}{% endblock %}
+
+{% block content %}
+<div class="panel-head">
+  <h2>中继语音助手</h2>
+  <div class="row gap wrap">
+    <span id="as-enable-badge" class="badge">未启用</span>
+    <span id="as-mic-badge" class="badge">采集 --</span>
+    <span id="as-busy-badge" class="badge">BUSY --</span>
+    <span id="as-ptt-badge" class="badge">PTT --</span>
+    <span id="as-llm-badge" class="badge">LLM --</span>
+    <button class="btn" id="btn-as-refresh">刷新</button>
+    <button class="btn" id="btn-as-stop" title="立刻打断当前发射并清空待处理语音">一键停止</button>
+  </div>
+</div>
+
+<div class="grid grid-4 as-metrics">
+  <div class="card">
+    <div class="metric-label">今日对话轮次</div>
+    <div class="metric-value" id="m-turns">0</div>
+    <div class="metric-sub" id="m-turns-sub">—</div>
+  </div>
+  <div class="card">
+    <div class="metric-label">今日占用信道</div>
+    <div class="metric-value" id="m-txsec">0<small style="font-size:14px;color:var(--muted)"> s</small></div>
+    <div class="metric-sub" id="m-txsec-sub">—</div>
+  </div>
+  <div class="card">
+    <div class="metric-label">唤醒命中 / 忽略</div>
+    <div class="metric-value" id="m-wake">0</div>
+    <div class="metric-sub" id="m-wake-sub">—</div>
+  </div>
+  <div class="card">
+    <div class="metric-label">追问窗口</div>
+    <div class="metric-value" id="m-follow">关</div>
+    <div class="metric-sub" id="m-follow-sub">—</div>
+  </div>
+</div>
+
+<div class="as-main">
+  <div class="card">
+    <div class="as-stage">
+      <span class="as-stage-dot off" id="as-dot"></span>
+      <div class="as-stage-text">
+        <div class="as-stage-name" id="as-stage-name">未启用</div>
+        <div class="as-stage-detail" id="as-stage-detail">—</div>
+      </div>
+      <div class="as-stage-right">
+        <div id="as-stage-elapsed">—</div>
+        <div id="as-queue">队列 0</div>
+      </div>
+    </div>
+
+    <div class="as-wave-wrap">
+      <canvas class="as-wave" id="as-wave" width="900" height="74"></canvas>
+      <div class="as-wave-legend">
+        <span>输入电平（约 20 秒）</span>
+        <span id="as-dbfs">-120 dBFS</span>
+      </div>
+    </div>
+
+    <div class="as-sub">
+      唤醒词：<b id="as-words">—</b>
+      <span class="muted">（同音容错 <span id="as-fuzzy">—</span>，命中后可直接接问题；30 秒内可追问）</span>
+    </div>
+
+    <div class="as-sub">实况识别流（含未命中唤醒词的内容，用于调唤醒词与查看灵敏度）</div>
+    <div class="as-stream" id="as-stream">
+      <div class="as-empty">等待语音…</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="as-sub" style="margin-top:0">
+      对话记录
+      <span class="muted" id="as-turn-count"></span>
+      <button class="btn ghost" id="btn-as-list-refresh" style="float:right;padding:2px 10px;font-size:12px">刷新</button>
+    </div>
+    <div class="as-turns" id="as-turns">
+      <div class="as-empty">暂无记录</div>
+    </div>
+  </div>
+</div>
+
+<div class="as-tabs">
+  <button class="tab-btn active" data-atab="cfg">设置</button>
+  <button class="tab-btn" data-atab="prompt">提示词与清洗</button>
+  <button class="tab-btn" data-atab="test">手动测试</button>
+  <button class="tab-btn" data-atab="stat">信道占用统计</button>
+</div>
+
+<div class="as-pane active" data-apane="cfg">
+  <div class="as-warn">
+    <b>调试顺序建议：</b>
+    ① 先在「手动测试」里用文字跑通 LLM 与语音合成；
+    ② 再做一次无线电实测，喊「中继台，现在风速多少」看实况识别流里的原文与唤醒命中情况；
+    ③ 若识别不到，用「手动测试」里的唤醒词自测调词，或降低 <code>语音起判电平</code>；
+    ④ 全部确认后再启用自动发射。
+  </div>
+  <form id="as-form" autocomplete="off">
+    <div id="as-groups"></div>
+    <div class="row gap wrap" style="margin-top:6px">
+      <button class="btn primary" type="submit">保存设置</button>
+      <button class="btn" type="button" id="btn-as-reload">放弃修改</button>
+      <span class="muted small" id="as-save-state"></span>
+    </div>
+  </form>
+</div>
+
+<div class="as-pane" data-apane="prompt">
+  <p class="muted small">
+    「运行前提示词注入」的<b>实际结果</b>在这里逐字可见 —— 网页 LLM 对话与中继语音助手
+    <b>共用同一份基础设定</b>（<code>llm_system_prompt</code>），助手再追加一段语音播报约束。
+    变量（如 <code>{battery}</code>）已展开为实时值。
+  </p>
+  <div class="row gap wrap" style="margin-bottom:10px">
+    <input id="as-prompt-q" class="input-lg" value="现在风速多少" placeholder="模拟一个提问，看历史与问题如何拼接">
+    <button class="btn" id="btn-as-prompt">生成预览</button>
+    <span class="muted small" id="as-prompt-state"></span>
+  </div>
+  <div class="as-kv">
+    <span>注入后总长 <b id="pk-chars">—</b> 字</span>
+    <span>输入上限 <b id="pk-maxin">—</b></span>
+    <span>回复上限 <b id="pk-maxreply">—</b> 字</span>
+    <span>max_tokens <b id="pk-maxtok">—</b></span>
+    <span>保留历史 <b id="pk-hist">—</b> 轮</span>
+  </div>
+  <div class="as-pre" id="as-prompt-out">点「生成预览」查看最终注入文本</div>
+
+  <div class="as-sub">Piper 朗读文本清洗（修「读到 **** 等 Markdown 符号」）</div>
+  <div class="as-cmp">
+    <div>
+      <div class="head">模型原始输出（只读示意，可编辑）</div>
+      <textarea id="as-clean-in" class="as-field" style="width:100%;min-height:120px;background:#0d1524;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px;font-size:12.5px">**风速 3.2 米每秒**，请注意！
+- 电池电压 <b>12.6V</b>
+### 结束
+😀 感谢通联</textarea>
+    </div>
+    <div>
+      <div class="head">实际会被念出来的文本</div>
+      <div class="as-pre" id="as-clean-out" style="max-height:200px">—</div>
+    </div>
+  </div>
+  <div class="row gap wrap" style="margin-top:8px">
+    <button class="btn" id="btn-as-clean">清洗预览</button>
+    <span class="muted small" id="as-clean-state"></span>
+  </div>
+</div>
+
+<div class="as-pane" data-apane="test">
+  <div class="as-warn">
+    手动测试走<b>完整链路</b>（提示词注入 → LLM → 工具调用 → TTS 清洗 → 语音合成），
+    但<b>默认不发射</b>：结果只出现在「对话记录」里并可网页试听。
+    确认没问题后再关掉设置里的「测试模式（不发射）」。
+  </div>
+  <div class="row gap wrap" style="align-items:flex-start">
+    <textarea id="as-test-text" class="as-field" style="flex:1;min-width:260px;min-height:78px;background:#0d1524;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px;font-size:13px"
+      placeholder="例如：现在风速多少">现在风速多少</textarea>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <button class="btn primary" id="btn-as-test">跑一轮（不发射）</button>
+      <button class="btn" id="btn-as-test-wake">只测唤醒词匹配</button>
+    </div>
+  </div>
+  <div class="as-sub">唤醒词匹配结果</div>
+  <div class="as-pre" id="as-wake-out" style="max-height:220px">—</div>
+  <div class="as-sub">常用问句（点一下填入）</div>
+  <div class="row gap wrap">
+    <button class="btn ghost" data-fill="中继台，现在风速多少">风速</button>
+    <button class="btn ghost" data-fill="中继台，电池电压是多少">电压</button>
+    <button class="btn ghost" data-fill="中继台，今天下雨了吗">雨量</button>
+    <button class="btn ghost" data-fill="中继台，板子温度正常吗">板卡状态</button>
+        <button class="btn ghost" data-fill="中继台，现在几点了">时间</button>
+    <button class="btn ghost" data-fill="中继台，帮我讲个笑话">闲聊（测简短约束）</button>
+  </div>
+</div>
+
+<div class="as-pane" data-apane="stat">
+  <div class="as-stat" id="as-stat"></div>
+  <div class="as-sub">计数器（进程生命周期累计）</div>
+  <div class="as-stat" id="as-counters"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/assistant.js', v='20260925a') }}"></script>
+{% endblock %}

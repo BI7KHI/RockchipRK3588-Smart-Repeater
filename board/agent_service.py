@@ -22,14 +22,14 @@ import time
 TOOL_SPECS = [
     {
         'name': 'get_weather',
-        'title': '实时气象',
-        'desc': '读取当前风速、风向与气象采集服务状态（含最后一次 Modbus 原始报文、错误计数）。',
+        'title': '风速风向',
+        'desc': '读取当前风速、风向与气象采集服务状态（含最后一次 Modbus 原始报文、错误计数）。注意：风速风向属于本工具，与降雨量无关。',
         'params': {},
         'action': False,
     },
     {
         'name': 'get_rain',
-        'title': '降水量',
+        'title': '降雨量',
         'desc': '读取翻斗式雨量计数据：今日累计降水量、最近一小时降水量。',
         'params': {
             'hours': {'required': False, 'desc': '统计最近多少小时，默认 1，最大 24'},
@@ -38,42 +38,42 @@ TOOL_SPECS = [
     },
     {
         'name': 'get_power',
-        'title': '电源电压',
+        'title': '电压电池',
         'desc': '读取电池电压、光伏电压（含 SARADC 原始值、引脚电压、倍率、满量程）。',
         'params': {},
         'action': False,
     },
     {
         'name': 'get_system',
-        'title': '开发板运行状态',
+        'title': '温度内存负载',
         'desc': '读取 SoC/CPU 温度、CPU 占用、负载、内存、磁盘与开机时长。',
         'params': {},
         'action': False,
     },
     {
         'name': 'get_radio',
-        'title': '中继/发射状态',
+        'title': '发射PTT状态',
         'desc': '读取 PTT 电平、是否正在发射、音频输出设备、手动发射与最近一次发射自检状态。',
         'params': {},
         'action': False,
     },
     {
         'name': 'get_camera',
-        'title': '摄像头与录像',
+        'title': '摄像头',
         'desc': '读取摄像头设备、分辨率、录像服务运行状态与录制文件数量/占用空间。',
         'params': {},
         'action': False,
     },
     {
         'name': 'get_time',
-        'title': '当前时间',
+        'title': '时间',
         'desc': '读取开发板当前日期、时间与星期（北京时间）。',
         'params': {},
         'action': False,
     },
     {
         'name': 'speak',
-        'title': '语音播报（发射）',
+        'title': '语音播报',
         'desc': '让中继台把一段文字用本地 TTS 从 3.5mm AUX 播报出去（会占用 PTT 发射，谨慎使用）。',
         'params': {
             'text': {'required': True, 'desc': '要播报的中文内容，建议不超过 60 字'},
@@ -106,26 +106,28 @@ def enabled_tools(enabled=None):
 def tools_prompt(enabled=None):
     """工具清单 + READ 协议（**务必保持精简**）。
 
-    实测：板端 RKLLM（Qwen2.5-1.5B）在提示词过长（>约 400 字）时会直接空输出，
-    因此这里只用「短标题」列工具，不写详细描述与多组示例。
+    实测两条硬约束：
+      1. 板端 RKLLM（Qwen2.5-1.5B）提示词过长（>约 400 字）会直接空输出；
+      2. **示例一多，模型会去照抄示例而不是按标题匹配工具**——曾给出 6 条
+         「关键词→READ」示例，探针命中率反而从 6/7 掉到 5/9（问「在发射吗」
+         输出 `发射→READ get_power {}`）。因此只保留一条示例。
+    工具标题必须**字面点名它提供的数据字段**（如「温度内存负载」），
+    模型只能靠字面匹配来选工具。
     """
     tools = enabled_tools(enabled)
     items = []
     for t in tools:
         params = t.get('params') or {}
-        if params:                      # 只列参数名，避免提示词过长导致空输出
+        if params:
             items.append('%s(%s,%s)' % (t['name'], t['title'],
                                         ','.join(list(params.keys()))))
         else:
             items.append('%s(%s)' % (t['name'], t['title']))
     return '\n'.join([
-        '你是 ELF2 中继台端侧助手"小中"，可直接读取本机与电台实时数据（不要反问设备型号）。',
-        '用户问到电压/电池/温度/负载/风速/雨量/时间/设备状态时，'
-        '只输出一行读取指令，不要解释、不要直接回答：',
-        'READ 名称 {}',
-        '问题涉及多项数据时，可以连续输出多行 READ 指令（每行一个）。',
-        '可用名称：' + ' '.join(items),
-        '例：用户问电压 → READ get_power {}',
+        '你是 ELF2 中继台的端侧助手，能直接读取本机与电台的实时数据（不要反问设备型号）。',
+        '需要实时数据时只输出一行读取指令，不要解释、不要直接回答：READ 名称 {}',
+        '多项数据可输出多行。可用名称：' + ' '.join(items),
+        '例：READ get_power {}',
     ])
 
 
