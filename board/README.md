@@ -102,7 +102,7 @@ sudo systemctl restart relay-web
 访问：
 
 ```text
-http://192.168.101.206:8080
+http://192.168.101.215:8080
 ```
 
 初始管理员凭据由部署方在首次部署时配置，登录页不显示默认账号或密码；首次登录后请立即修改密码。
@@ -139,7 +139,7 @@ http://192.168.101.206:8080
 - 浏览器麦克风采集使用 `getUserMedia`，Chrome 要求安全上下文：
   - `https://...` 或
   - `http://localhost` / `http://127.0.0.1`
-- 如果通过 `http://192.168.101.206:8080` 访问，浏览器可能不提供 `navigator.mediaDevices`，此时：
+- 如果通过 `http://192.168.101.215:8080` 访问，浏览器可能不提供 `navigator.mediaDevices`，此时：
   - 使用“上传 WAV 测试”验证 AUX 输出；
   - 或后续配置 HTTPS/FRP 反向代理；
   - 或在 Chrome 启动参数中把该地址加入 `--unsafely-treat-insecure-origin-as-secure`。
@@ -321,7 +321,7 @@ http://192.168.101.206:8080
 5. 播放限时 + `stop` 硬杀（2 s 未退出 SIGKILL），aplay 卡死不会把 PTT 卡住；
 6. 前端聊天页提交分片时带上 `en_voice` / `icao` / `icao_voice`，与 `speakText()` 行为一致。
 
-**验证**（板端 `192.168.101.206`，轮询 `/sys/class/gpio/gpio97/value`）：
+**验证**（板端 `192.168.101.215`，轮询 `/sys/class/gpio/gpio97/value`）：
 - 两段流式：`GPIO97 0→1 @2.5 s`，跨分片间隙保持高，最后一段播完 +0.8 s 拉低；
 - 单段 101 字（≈21 s 音频）：连续发射 21.5 s，看门狗未误停，播完自动释放；
 - 播放中 `POST /api/tts/stream/stop`：1.07 s 内 aplay 消失、PTT 归零、会话移除；
@@ -473,7 +473,7 @@ aplay 若中途意外退出（设备被抢占/出错），每来一块数据就�
 | 提示词超过约 **400 字** 时直接空输出 | 板端 RKLLM 长提示词异常 | 指令压到 ~350 字；工具结果**紧凑化**；第二轮改用短提示（数据+问题） |
 | 模型会自造工具名（`get_battery_voltage`） | 1.5B 模型不稳定 | 别名表 + 关键词归一（`get_battery_voltage`→`get_power` 等） |
 
-### 5. 实测（板端 192.168.101.206）
+### 5. 实测（板端 `192.168.101.215`；该次实测时旧地址为 192.168.101.206）
 
 - 提问「电池电压和光伏电压是多少？CPU 温度多少？」→ 模型输出 `READ get_battery_voltage {} …`，
   归一为 `get_power`/`get_system`，执行后回答：

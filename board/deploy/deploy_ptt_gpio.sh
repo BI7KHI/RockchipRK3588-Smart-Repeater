@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # 部署 ELF2 PTT GPIO3_A1 控制到开发板。
 # 用法：
-#   BOARD=elf@192.168.101.206 bash deploy_ptt_gpio.sh
+#   BOARD=elf@192.168.101.215 bash deploy_ptt_gpio.sh
 # 会提示输入开发板 sudo 密码（通常为 elf）。
 set -euo pipefail
 
-BOARD="${BOARD:-elf@192.168.101.206}"
+BOARD="${BOARD:-elf@192.168.101.215}"
 KEY="${KEY:-$HOME/.ssh/id_ed25519_elf2}"
 SSH_OPTS=(-i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o BatchMode=no)
 
@@ -42,4 +42,4 @@ systemctl restart relay-web
 echo "[3/3] 服务状态..."
 ssh "${SSH_OPTS[@]}" "$BOARD" "systemctl is-active elf2-ptt-gpio relay-web; ls -l /sys/class/gpio/gpio97/direction /sys/class/gpio/gpio97/value 2>/dev/null; cat /sys/class/gpio/gpio97/value 2>/dev/null"
 
-echo "部署完成。可打开 http://192.168.101.206:8080 并访问 /api/ptt/status 验证。"
+echo "部署完成。可打开 http://192.168.101.215:8080 并访问 /api/ptt/status 验证。"
