@@ -171,6 +171,28 @@ class AsrEngine:
         except Exception as e:
             return {'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}
 
+    def transcribe_samples(self, samples, sr=16000):
+        """直接识别 float32 波形数组（跳过 ffmpeg 转码）。
+
+        供「中继语音日志」按 VAD 切好的句子逐段识别使用：录音本身已经是
+        16k/单声道，再走一次 ffmpeg 转码纯属浪费，且能拿到段级时间戳。
+        """
+        if not self.ensure():
+            return {'ok': False, 'error': self._load_error or 'ASR 引擎不可用'}
+        try:
+            seconds = round(len(samples) / float(sr), 2) if sr else 0.0
+            with self._decode_lock:
+                t0 = time.time()
+                stream = self._rec.create_stream()
+                stream.accept_waveform(sr, samples)
+                self._rec.decode_stream(stream)
+                text = (stream.result.text or '').strip()
+                ms = int((time.time() - t0) * 1000)
+            rtf = round(ms / 1000.0 / seconds, 3) if seconds else 0
+            return {'ok': True, 'text': text, 'ms': ms, 'seconds': seconds, 'rtf': rtf}
+        except Exception as e:
+            return {'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}
+
 
 ENGINE = AsrEngine()
 
@@ -181,6 +203,11 @@ def status():
 
 def transcribe(path, work_dir='/tmp'):
     return ENGINE.transcribe(path, work_dir=work_dir)
+
+
+def transcribe_samples(samples, sr=16000):
+    """识别 float32 波形数组（语音日志分段识别用）。"""
+    return ENGINE.transcribe_samples(samples, sr)
 
 
 def ensure():

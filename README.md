@@ -79,6 +79,7 @@ RK3588 负责全部"智能"部分：网页控制台、端侧大模型（LLM）�
 | **气象雨量** | RS485 Modbus：风速变送器 + 翻斗式雨量计 + **温湿度变送器（从站 03）**，小时/日统计 | ✅ |
 | **摄像头** | V4L2 MJPEG 采集、**开机自动循环录像（掉线自愈）**、单次录像、回放/时间轴、容量清理、OSD/RTMP；实时预览与回放合并为同一控制台（模式切换） | ✅ |
 | **BUSY 检测** | **GPIO3_A5（全局 GPIO 101）光耦输入**，总览实时显示接收状态、发射期自激告警、极性与电平沿诊断 | ✅ |
+| **中继语音日志** | **BUSY/PTT 触发录音**（3 s 前滚 + 2 s 尾音）、**异步 ASR 段级时间戳**、非语音自动分类（APRS/单音/噪声/静音/抖动，**不出幻觉文字**）、独立日志页（全天时间轴 + 波形 + 文字高亮 + 搜索 + txt/srt/csv 导出）、**每日 23:30 分块 map-reduce 总结**（本地 rkllm / 外部 DeepSeek） | ✅ |
 | **Web 控制台** | 账号/角色、CSRF、审计日志、HTTPS 反向代理、系统监控 | ✅ |
 | **硬件板卡** | IO 隔离/驱动板、ADC 分压采集板 | 🔶 原理图完成，PCB 联调中 |
 
@@ -89,6 +90,10 @@ RK3588 负责全部"智能"部分：网页控制台、端侧大模型（LLM）�
 > **RS485 Modbus** wind, rain and a **temperature/humidity transmitter**; **V4L2 camera** with
 > **auto-start loop recording (self-healing)** and a merged preview/playback console; a
 > **BUSY input on GPIO3_A5** mirrored live in the overview; secured **web console**.
+> A **relay voice log** records automatically on **BUSY/PTT** (with pre-roll), transcribes
+> asynchronously with **segment-level timestamps**, classifies non-speech (APRS / tone / noise)
+> so no hallucinated text is stored, and generates a **daily summary at 23:30** via chunked
+> map-reduce on the local NPU model or an external OpenAI-compatible API.
 
 ---
 
@@ -109,6 +114,8 @@ RockchipRK3588-Smart-Repeator/
 │   ├── agent_service.py          端侧 Agent：技能注册、提示词、工具解析、速率统计
 │   ├── tts_service.py            Piper 合成 + 中英/ICAO 分段 + 音色包管理
 │   ├── weather_service.py        RS485 Modbus 采集（风速/雨量）+ SQLite 存储
+│   ├── asr_service.py            sherpa-onnx + SenseVoice 离线识别（文件 / 波形数组）
+│   ├── voice_service.py          ★ 中继语音日志：触发录音、ASR 队列、分类、每日总结
 │   ├── camera_service.py         V4L2 采集 + ffmpeg 录像/推流
 │   ├── postfilter.py             TTS 音频后处理（响度/滤波）
 │   ├── templates/ static/        Web 前端（原生 JS + SSE + 轮询）
@@ -128,6 +135,7 @@ RockchipRK3588-Smart-Repeator/
 └── docs/                         设计与部署文档 / design & deployment notes
     ├── 多模态端侧智能无线电中继系统架构.md
     ├── 部署记录-2026-09-09-端侧LLM.md … 部署记录-2026-09-13-PTT-GPIO.md
+    ├── 部署记录-2026-09-23-中继语音日志.md
     ├── 端侧TTS选型与音色训练方案.md / 板端TTS后处理接入说明.md
     ├── ELF240P20P管脚功能分配和硬件连线.md
     └── 3.5mm耳机接口音频输入原理图结论.md
@@ -264,6 +272,39 @@ _ptt_release() ──► HOLD_COUNT-1 ──(→0)───► 0.8s 定时 ─�
 > CSRF (including multipart/octet-stream), audit log and system metrics are built in. The
 > frontend is dependency-free vanilla JS using SSE for streaming and polling for telemetry.
 
+### 5.8 中继语音日志 / Relay voice log
+
+**触发与录音**：`BUSY`（GPIO3_A5）或 `PTT`（GPIO3_A1）任一有效即起录，空闲时用环形缓冲保留
+最近 3 s（pre-roll）补进文件头，状态结束后续录 2 s 尾音；同一会话内「只收 / 只发 / 收发同时」
+会切成独立分段并共享 `session_id`。落盘 16 kHz 单声道 WAV 到 NVMe（默认 `/opt/ai/relay_voice`，
+保留 30 天或 20 GB 滚动）。
+
+**采集中枢**：NAU88C22 的采集通道**同一时刻只允许一路**（实测第二路报 `Device or resource busy`），
+所以录音不自己开 `arecord`，而是复用网页实时对讲那条流 —— `app.py` 的采集中枢把每个
+16 kHz/立体声块喂给 `voice_service.feed()`。语音日志启用时，采集中枢会常驻（网页对讲关闭也不停）。
+
+**非语音不送 ASR**：先用 **silero VAD** 切出语音句，只对语音句做 SenseVoice 识别并保留
+**段级时间戳**；非语音按频谱特征分类为 `aprs`（Bell202 mark/space 1200/2200 Hz 能量占比）、
+`tone`（低频谱平坦度）、`noise`、`silence`、`jitter`（过短），**不产生文字**，避免 SenseVoice
+对噪声产生幻觉。
+
+**每日总结**：默认 23:30 触发，把当天 `voice` 记录按时间拼成转写，分块做 **map-reduce**：
+本地 rkllm（4096 token）2200 字/块、单块直接采用 map 结果、多块分层归并；`auto` 模式下
+文本超过 5000 字且已配置外部 Key 时自动改用 **DeepSeek**。
+
+**本地 LLM 按需启停**：rkllm 常驻占约 **2.3 GB RSS / 1.6 GB dma-buf**，会把 3.8 GB 内存压到
+危险水位，因此默认按需拉起、空闲卸载；`systemctl is-active` 在 `Type=simple` 下过早返回 active，
+必须用 **HTTP `/v1/models` 探活**；跨进程使用 **文件租约** `/tmp/elf2-llm-lease` 防止日报生成
+到一半被其它进程的空闲卸载停掉。
+
+> **EN** — The voice log reuses the single shared capture stream (the codec allows only one opener),
+> gates recording on BUSY/PTT with pre-roll and post-roll, and stores 16 kHz mono WAV on NVMe.
+> silero VAD splits speech first, so SenseVoice only runs on real utterances and returns
+> segment-level timestamps; non-speech is classified (APRS / tone / noise / silence / jitter) and
+> deliberately left untranscribed. A daily map-reduce summary runs at 23:30 on the local NPU model
+> or an external OpenAI-compatible API. The local model is started on demand and unloaded when idle,
+> coordinated across processes by an HTTP readiness probe plus a file lease.
+
 ---
 
 ## 6. 快速开始 / Quick Start
@@ -303,6 +344,24 @@ sudo systemctl daemon-reload && sudo systemctl restart relay-web nginx
 # 4) 端侧 AI 运行时（需自行准备）
 #    - rkllm-server：RKNPU LLM，监听 127.0.0.1:8001/v1
 #    - piper：/opt/ai/piper/piper + 音色 /opt/ai/voices/<voice>/model.onnx(.json)
+#    - silero VAD（语音日志用）：/opt/ai/asr/silero_vad.onnx
+#        curl -L -o /opt/ai/asr/silero_vad.onnx \
+#          https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx
+
+# 5) 中继语音日志所需（详见 docs/部署记录-2026-09-23-中继语音日志.md）
+sudo mkdir -p /opt/ai/relay_voice && sudo chown -R elf:elf /opt/ai/relay_voice
+# 5a) 允许按需启停本地 LLM（免密只放行 systemctl 的 4 个子命令）
+printf 'Cmnd_Alias ELF2_RKLLM = /usr/bin/systemctl start rkllm-server, /usr/bin/systemctl stop rkllm-server, /usr/bin/systemctl restart rkllm-server, /usr/bin/systemctl is-active rkllm-server\nelf ALL=(root) NOPASSWD: ELF2_RKLLM\n' \
+  | sudo tee /etc/sudoers.d/99-elf2-rkllm && sudo chmod 440 /etc/sudoers.d/99-elf2-rkllm
+sudo visudo -c
+# 5b) 把 rkllm 上下文从硬编码 512 提到 4096（否则 800 字提示词直接空输出）
+#     flask_server.py: rkllm_param.max_context_len = int(os.environ.get("RKLLM_MAX_CONTEXT", "4096"))
+#     systemd drop-in: [Service]\nEnvironment=RKLLM_MAX_CONTEXT=4096
+# 5c) NVMe swap（rkllm 与录像/ASR 抢内存时的兜底，swappiness 压低避免影响录音实时性）
+sudo dd if=/dev/zero of=/opt/ai/swapfile bs=1M count=4096 status=none
+sudo chmod 600 /opt/ai/swapfile && sudo mkswap /opt/ai/swapfile && sudo swapon -p 10 /opt/ai/swapfile
+printf 'vm.swappiness=10\nvm.vfs_cache_pressure=50\nvm.min_free_kbytes=65536\n' \
+  | sudo tee /etc/sysctl.d/99-elf2-swap.conf && sudo sysctl -p /etc/sysctl.d/99-elf2-swap.conf
 ```
 
 浏览器访问 `https://<板卡IP>/`（自签证书需"继续前往"）→ 默认账号 `Admin`（首次部署密码可经
@@ -334,6 +393,14 @@ sudo systemctl daemon-reload && sudo systemctl restart relay-web nginx
 | `/api/busy/status` | GET | **BUSY 接收状态**（GPIO3_A5：原始电平、触发态、时长、电平沿计数） |
 | `/api/busy/diag` | GET | BUSY 链路自检（原始电平、事件、排查提示） |
 | `/api/busy/polarity` | POST | 设置 BUSY 有效极性（高有效/低有效），立即生效 |
+| `/voice-log` | GET | **中继语音日志页**（时间轴 / 波形 / 文字 / 播放 / 搜索 / 导出 / 日报） |
+| `/api/voice/status` | GET | 语音日志实时状态（录音中、BUSY/PTT、ASR 队列、VAD、LLM、类别统计、保留策略） |
+| `/api/voice/list` `/api/voice/days` `/api/voice/timeline` | GET | 记录列表（日期/类别/类型/关键字）、有记录的日期、全天时间轴 |
+| `/api/voice/<id>/audio` `/download` `/peaks` | GET | 流式播放、下载 WAV、波形包络 |
+| `/api/voice/<id>/retranscribe` `/delete` | POST | 重新识别 / 删除记录与文件 |
+| `/api/voice/export` | GET | 导出 `txt` / `srt`（含时间轴）/ `csv` |
+| `/api/voice/summary` `/summary/list` `/summary/run` | GET/POST | 日报查询、历史日报、立即生成（可指定 `local`/`external`） |
+| `/api/voice/cleanup` | POST | 手动执行保留策略清理 |
 | `/api/intercom/push` `/api/intercom/push/stop` | POST | 网页实时对讲推流（自动 PTT） |
 | `/api/camera/*` | GET/POST | 采集/预览、循环与单次录像、分段回放、存储统计、容量清理 |
 | `/api/camera/status` | GET | 含 `loop_running` / `loop_autostart` / `loop_manual_stop` |

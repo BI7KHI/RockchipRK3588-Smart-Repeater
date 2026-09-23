@@ -49,6 +49,7 @@ import agent_service
 import asr_service
 import camera_service
 import weather_service
+import voice_service
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / 'relay.db'
@@ -94,6 +95,7 @@ ADC_CHANNELS = {
 
 AUDIO_DEVICE = os.environ.get('RELAY_AUDIO_DEVICE', 'plughw:CARD=rockchipnau8822,DEV=0')
 weather_service_instance = weather_service.WeatherService(DB_PATH)
+voice_service_instance = voice_service.VoiceService(DB_PATH)
 MAX_RECORDING_BYTES = 32 * 1024 * 1024          # 单次录音上传上限
 # 音色包 / 训练数据 zip 可以很大（Rosmontis 音色包约 56MB），这里单独放宽
 MAX_UPLOAD_BYTES = int(os.environ.get('RELAY_MAX_UPLOAD_MB', '512') or 512) * 1024 * 1024
@@ -478,6 +480,25 @@ def _set_default_settings(db):
         'asr_enabled': '1',
         'asr_model_dir': '',
         'asr_language': 'auto',
+        # 中继语音日志（BUSY/PTT 触发录音 + 异步 ASR + 每日总结）
+        'vlog_enabled': '1',
+        'vlog_dir': '/opt/ai/relay_voice',
+        'vlog_channel': 'left',
+        'vlog_pre_roll': '3.0',
+        'vlog_post_roll': '2.0',
+        'vlog_min_seconds': '1.0',
+        'vlog_max_seconds': '300',
+        'vlog_silence_dbfs': '-48',
+        'vlog_asr_enabled': '1',
+        'vlog_vad_enabled': '1',
+        'vlog_keep_transient': '0',
+        'vlog_retention_days': '30',
+        'vlog_retention_mb': '20480',
+        'vlog_summary_enabled': '1',
+        'vlog_summary_time': '23:30',
+        'vlog_summary_provider': 'auto',
+        'vlog_llm_on_demand': '1',
+        'vlog_llm_idle_unload': '300',
         # 全局音频
         'audio_volume_percent': '80',
         'audio_muted': '0',
@@ -1038,6 +1059,12 @@ def api_settings_get():
         'tts_provider', 'tts_local_voice', 'tts_en_voice', 'tts_icao', 'tts_icao_voice', 'tts_auto_speak',
         'llm_system_prompt', 'llm_system_prompt_on', 'llm_prompt_vars',
         'agent_enabled', 'agent_max_iters', 'agent_tools',
+        'vlog_enabled', 'vlog_dir', 'vlog_channel', 'vlog_pre_roll', 'vlog_post_roll',
+        'vlog_min_seconds', 'vlog_max_seconds', 'vlog_silence_dbfs',
+        'vlog_asr_enabled', 'vlog_vad_enabled', 'vlog_keep_transient',
+        'vlog_retention_days', 'vlog_retention_mb',
+        'vlog_summary_enabled', 'vlog_summary_time', 'vlog_summary_provider',
+        'vlog_llm_on_demand', 'vlog_llm_idle_unload',
     ]
     out = {k: get_setting(k) for k in keys}
     out['local_api_key_set'] = bool(out.get('local_api_key'))
@@ -1052,6 +1079,7 @@ def api_settings_get():
 @admin_required
 def api_settings_set():
     data = request.get_json(silent=True) or {}
+    _bool_caster = lambda v: '1' if str(v) in ('1', 'true', 'True', 'on') else '0'
     whitelist = {
         'llm_provider': lambda v: v if v in ('local', 'external') else None,
         'local_base_url': lambda v: str(v).strip(),
@@ -1076,6 +1104,26 @@ def api_settings_set():
         'agent_max_iters': lambda v: str(max(1, min(5, int(float(v))))),
         'agent_tools': lambda v: ','.join(
             [x.strip() for x in re.split(r'[,;\s]+', str(v)) if x.strip()][:20]),
+        # 中继语音日志
+        'vlog_dir': lambda v: str(v).strip()[:120] or '/opt/ai/relay_voice',
+        'vlog_channel': lambda v: v if v in ('left', 'right', 'mix') else 'left',
+        'vlog_pre_roll': lambda v: str(round(max(0.0, min(30.0, float(v))), 1)),
+        'vlog_post_roll': lambda v: str(round(max(0.0, min(30.0, float(v))), 1)),
+        'vlog_min_seconds': lambda v: str(round(max(0.0, min(60.0, float(v))), 1)),
+        'vlog_max_seconds': lambda v: str(int(max(10, min(3600, int(float(v)))))),
+        'vlog_silence_dbfs': lambda v: str(round(max(-90.0, min(-10.0, float(v))), 1)),
+        'vlog_retention_days': lambda v: str(max(0, min(3650, int(float(v))))),
+        'vlog_retention_mb': lambda v: str(max(100, min(1000000, int(float(v))))),
+        'vlog_summary_time': lambda v: (str(v).strip()
+            if re.fullmatch(r'\d{1,2}:\d{2}', str(v).strip()) else '23:30'),
+        'vlog_summary_provider': lambda v: v if v in ('auto', 'local', 'external') else 'auto',
+        'vlog_llm_idle_unload': lambda v: str(max(60, min(3600, int(float(v))))),
+        'vlog_enabled': _bool_caster,
+        'vlog_asr_enabled': _bool_caster,
+        'vlog_vad_enabled': _bool_caster,
+        'vlog_keep_transient': _bool_caster,
+        'vlog_summary_enabled': _bool_caster,
+        'vlog_llm_on_demand': _bool_caster,
     }
     changed = {}
     for k, caster in whitelist.items():
@@ -1092,6 +1140,10 @@ def api_settings_set():
         set_setting(k, str(val))
         changed[k] = '***' if k.endswith('_api_key') and val else val
     audit('settings_update', json.dumps(changed, ensure_ascii=False))
+    try:
+        voice_service_instance.invalidate()
+    except Exception:
+        pass
     return api_ok(changed=changed)
 
 
@@ -1439,6 +1491,10 @@ def api_chat():
     cfg = provider_config(provider)
     if not cfg['url']:
         return api_err('LLM API 地址未配置')
+    if cfg['provider'] == 'local':
+        _llm_ok, _llm_msg = voice_service_instance.ensure_llm_ready()
+        if not _llm_ok:
+            return api_err('本地 LLM 未就绪：%s' % _llm_msg)
     model = data.get('model') or cfg['model']
     stream = bool(data.get('stream', False))
     # 限制上下文，避免失控
@@ -1619,6 +1675,10 @@ def api_agent_chat():
     cfg = provider_config(provider)
     if not cfg['url']:
         return api_err('LLM API 地址未配置')
+    if cfg['provider'] == 'local':
+        _llm_ok, _llm_msg = voice_service_instance.ensure_llm_ready()
+        if not _llm_ok:
+            return api_err('本地 LLM 未就绪：%s' % _llm_msg)
     model = data.get('model') or cfg['model']
     clean = []
     for m in messages[-20:]:
@@ -1767,6 +1827,269 @@ def api_agent_chat():
 
     return Response(stream_with_context(generate()), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+# ---------------------------------------------------------------------------
+# 中继语音日志：BUSY/PTT 触发录音 + 异步 ASR + 智能分类 + 每日总结
+# ---------------------------------------------------------------------------
+def _vlog_settings_direct():
+    """无 app context 读取全部 vlog_* 设置（供语音服务后台线程使用）。"""
+    out = {}
+    try:
+        db = sqlite3.connect(str(DB_PATH), timeout=3)
+        for k, v in db.execute("SELECT key,value FROM settings WHERE key LIKE 'vlog_%'"):
+            out[k] = v
+        db.close()
+    except Exception:
+        pass
+    return out
+
+
+def _vlog_capture_guard():
+    """采集中枢守护：语音日志启用期间保证 arecord 常驻。
+
+    nau8822 同一时刻只允许一路采集，所以网页实时对讲与本录音共用同一条流：
+    这里只负责「确保在跑」，停止与否由 stop_mic_capture 统一判断。
+    """
+    time.sleep(8)
+    while True:
+        try:
+            if voice_service_instance.enabled():
+                with MIC_CAPTURE_LOCK:
+                    running = bool(MIC_CAPTURE.get('running'))
+                if not running:
+                    ok, msg = start_mic_capture()
+                    print('[VLOG] 采集中枢拉起：%s / %s' % (ok, msg), flush=True)
+        except Exception as e:
+            print('[VLOG] 采集中枢守护异常：%s: %s' % (type(e).__name__, e), flush=True)
+        time.sleep(15)
+
+
+voice_service_instance.configure(
+    get_rx=lambda: bool(BUSY_STATE.get('active')),
+    get_tx=lambda: bool(PTT_LEVEL),
+    provider_config=lambda p=None: provider_config(p),
+    setting_getter=_vlog_settings_direct,
+)
+voice_service_instance.start()
+threading.Thread(target=_vlog_capture_guard, daemon=True, name='vlog-capture').start()
+
+
+@app.route('/voice-log')
+@login_required
+def voice_log_page():
+    return render_template('voice_log.html', user=session.get('username'),
+                           role=session.get('role'))
+
+
+@app.route('/api/voice/status')
+@login_required
+def api_voice_status():
+    return api_ok(**voice_service_instance.status())
+
+
+@app.route('/api/voice/list')
+@login_required
+def api_voice_list():
+    day = (request.args.get('day') or '').strip() or None
+    category = (request.args.get('category') or '').strip() or None
+    kind = (request.args.get('kind') or '').strip() or None
+    q = (request.args.get('q') or '').strip() or None
+    try:
+        limit = max(1, min(1000, int(request.args.get('limit') or 200)))
+    except Exception:
+        limit = 200
+    try:
+        offset = max(0, int(request.args.get('offset') or 0))
+    except Exception:
+        offset = 0
+    items = voice_service_instance.list_logs(day, category, kind, q, limit, offset)
+    return api_ok(items=items, day=day, limit=limit, offset=offset,
+                  stats=voice_service_instance.day_stats(day))
+
+
+@app.route('/api/voice/days')
+@login_required
+def api_voice_days():
+    rows = voice_service_instance.store.query(
+        "SELECT substr(ts,1,10) AS day, COUNT(*) AS n, SUM(seconds) AS sec, SUM(bytes) AS b "
+        "FROM voice_logs GROUP BY day ORDER BY day DESC LIMIT 180")
+    return api_ok(days=[{'day': r['day'], 'n': r['n'],
+                         'seconds': round(float(r['sec'] or 0.0), 1),
+                         'mb': round(float(r['b'] or 0) / 1048576.0, 1)} for r in rows])
+
+
+@app.route('/api/voice/timeline')
+@login_required
+def api_voice_timeline():
+    day = (request.args.get('day') or '').strip() or None
+    return api_ok(items=voice_service_instance.day_peaks(day))
+
+
+@app.route('/api/voice/<int:rid>/audio')
+@login_required
+def api_voice_audio(rid):
+    row = voice_service_instance.store.one('SELECT path,filename FROM voice_logs WHERE id=?', (rid,))
+    if not row or not row.get('path') or not Path(row['path']).exists():
+        abort(404)
+    resp = send_file(row['path'], mimetype='audio/wav', conditional=True)
+    resp.headers['Accept-Ranges'] = 'bytes'
+    return resp
+
+
+@app.route('/api/voice/<int:rid>/download')
+@login_required
+def api_voice_download(rid):
+    row = voice_service_instance.store.one('SELECT path,filename FROM voice_logs WHERE id=?', (rid,))
+    if not row or not row.get('path') or not Path(row['path']).exists():
+        abort(404)
+    return send_file(row['path'], mimetype='audio/wav', as_attachment=True,
+                     download_name=row.get('filename') or ('vlog_%d.wav' % rid))
+
+
+@app.route('/api/voice/<int:rid>/peaks')
+@login_required
+def api_voice_peaks(rid):
+    try:
+        n = max(64, min(2000, int(request.args.get('n') or 600)))
+    except Exception:
+        n = 600
+    return api_ok(peaks=voice_service_instance.peaks(rid, n))
+
+
+@app.route('/api/voice/<int:rid>/retranscribe', methods=['POST'])
+@login_required
+def api_voice_retranscribe(rid):
+    voice_service_instance.retranscribe(rid)
+    audit('voice_retranscribe', 'id=%s' % rid)
+    return api_ok(id=rid)
+
+
+@app.route('/api/voice/<int:rid>/delete', methods=['POST'])
+@login_required
+@admin_required
+def api_voice_delete(rid):
+    row = voice_service_instance.store.one('SELECT path FROM voice_logs WHERE id=?', (rid,))
+    if row and row.get('path'):
+        try:
+            Path(row['path']).unlink()
+        except Exception:
+            pass
+    voice_service_instance.store.exec('DELETE FROM voice_logs WHERE id=?', (rid,))
+    audit('voice_delete', 'id=%s' % rid)
+    return api_ok(id=rid)
+
+
+@app.route('/api/voice/export')
+@login_required
+def api_voice_export():
+    """导出某天语音日志：fmt=txt|srt|csv。"""
+    day = (request.args.get('day') or datetime.now().strftime('%Y-%m-%d')).strip()
+    fmt = (request.args.get('fmt') or 'txt').strip().lower()
+    if fmt not in ('txt', 'srt', 'csv'):
+        fmt = 'txt'
+    rows = sorted(voice_service_instance.list_logs(day=day, limit=2000),
+                  key=lambda r: r.get('epoch') or 0)
+    lines = []
+    if fmt == 'csv':
+        lines.append('id,时间,类型,类别,时长s,识别文字')
+        for r in rows:
+            txt = (r.get('text') or '').replace('"', '""').replace('\n', ' ')
+            lines.append('%s,%s,%s,%s,%s,"%s"' % (
+                r['id'], r['ts'], r['kind_label'], r['category_label'], r['seconds'], txt))
+        text = '\n'.join(lines) + '\n'
+    elif fmt == 'srt':
+        idx = 1
+        for r in rows:
+            if not (r.get('text') or '').strip():
+                continue
+            base = float(r.get('epoch') or 0)
+
+            def _t(sec):
+                sec = max(0.0, sec)
+                h = int(sec // 3600)
+                m = int((sec % 3600) // 60)
+                s = sec % 60
+                return '%02d:%02d:%06.3f' % (h, m, s)
+
+            if r.get('segments'):
+                for sg in r['segments']:
+                    lines.append(str(idx))
+                    lines.append('%s --> %s' % (_t(base + float(sg.get('start') or 0)),
+                                                _t(base + float(sg.get('end') or 0))))
+                    lines.append(sg.get('text') or '')
+                    lines.append('')
+                    idx += 1
+            else:
+                lines.append(str(idx))
+                lines.append('%s --> %s' % (_t(base), _t(base + float(r.get('seconds') or 0))))
+                lines.append(r['text'])
+                lines.append('')
+                idx += 1
+        text = '\n'.join(lines) + '\n'
+    else:
+        lines.append('中继语音日志 %s（共 %d 条）' % (day, len(rows)))
+        lines.append('=' * 46)
+        for r in rows:
+            t = (r.get('ts') or '')[11:19]
+            lines.append('[%s] %s/%s %ss' % (t, r['kind_label'], r['category_label'], r['seconds']))
+            if (r.get('text') or '').strip():
+                for sg in (r.get('segments') or []):
+                    lines.append('    %5.1fs %s' % (float(sg.get('start') or 0), sg.get('text')))
+                if not r.get('segments'):
+                    lines.append('    ' + r['text'])
+        text = '\n'.join(lines) + '\n'
+    buf = io.BytesIO(text.encode('utf-8-sig'))
+    buf.seek(0)
+    return send_file(buf, mimetype='text/plain; charset=utf-8', as_attachment=True,
+                     download_name='voice_%s.%s' % (day, fmt))
+
+
+@app.route('/api/voice/summary')
+@login_required
+def api_voice_summary():
+    day = (request.args.get('day') or datetime.now().strftime('%Y-%m-%d')).strip()
+    row = voice_service_instance.store.one('SELECT * FROM voice_daily WHERE day=?', (day,))
+    data = voice_service_instance.day_transcript(day) if not row else None
+    return api_ok(day=day, summary=row,
+                  transcript=(row or {}).get('transcript') or (data or {}).get('text', ''),
+                  state=dict(voice_service_instance.summary_state))
+
+
+@app.route('/api/voice/summary/list')
+@login_required
+def api_voice_summary_list():
+    rows = voice_service_instance.store.query(
+        'SELECT day,ts,segments,voice_count,seconds,provider,model,status,error,elapsed,chunks '
+        'FROM voice_daily ORDER BY day DESC LIMIT 180')
+    return api_ok(items=rows)
+
+
+@app.route('/api/voice/summary/run', methods=['POST'])
+@login_required
+@admin_required
+def api_voice_summary_run():
+    data = request.get_json(silent=True) or {}
+    day = (data.get('day') or request.args.get('day')
+           or datetime.now().strftime('%Y-%m-%d')).strip()
+    if voice_service_instance.summary_state.get('running'):
+        return api_err('日报正在生成中，请稍候')
+    provider = (data.get('provider') or '').strip() or None
+    if provider not in (None, 'local', 'external'):
+        provider = None
+    threading.Thread(target=voice_service_instance.run_summary, args=(day, False, provider),
+                     daemon=True, name='vlog-summary-once').start()
+    audit('voice_summary_run', 'day=%s' % day)
+    return api_ok(started=True, day=day)
+
+
+@app.route('/api/voice/cleanup', methods=['POST'])
+@login_required
+@admin_required
+def api_voice_cleanup():
+    n = voice_service_instance.cleanup()
+    audit('voice_cleanup', 'removed=%s' % n)
+    return api_ok(removed=n, status=voice_service_instance.status())
 
 
 # ---------------------------------------------------------------------------
@@ -2361,6 +2684,11 @@ def _mic_capture_loop():
                 continue
             chunk = buf[:usable]
             buf = buf[usable:]
+            # 中继语音日志：原始立体声块交给触发状态机（BUSY/PTT 决定是否落盘）
+            try:
+                voice_service_instance.feed(chunk, time.time())
+            except Exception:
+                pass
             try:
                 arr = array.array('h')
                 arr.frombytes(chunk)
@@ -2427,7 +2755,10 @@ def start_mic_capture():
         return True, 'started'
 
 
-def stop_mic_capture():
+def stop_mic_capture(force=False):
+    # 语音日志启用时采集中枢必须常驻：网页对讲关掉不代表录音可以停
+    if not force and voice_service_instance.enabled():
+        return True, u"语音日志启用中，采集中枢保持运行（录音依赖它）"
     with MIC_CAPTURE_LOCK:
         proc = MIC_CAPTURE.get('proc')
         MIC_CAPTURE['running'] = False

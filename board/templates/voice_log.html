@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% block title %}中继语音日志 - ELF2 智能中继控制中心{% endblock %}
+
+{% block nav %}
+<a class="tab-btn" href="/">&larr; 返回控制台</a>
+<span class="tab-btn active">语音日志</span>
+{% endblock %}
+
+{% block head_extra %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/voice-log.css', v='20260924a') }}">
+{% endblock %}
+
+{% block content %}
+<div class="panel-head">
+  <h2>中继语音日志</h2>
+  <div class="row gap">
+    <span id="vlog-live-badge" class="badge idle">空闲</span>
+    <span id="vlog-rx-badge" class="badge idle">BUSY --</span>
+    <span id="vlog-tx-badge" class="badge idle">PTT --</span>
+    <button class="btn" id="btn-vlog-refresh">刷新</button>
+  </div>
+</div>
+
+<div class="grid grid-4 vlog-metrics">
+  <div class="card">
+    <div class="card-title">今日记录</div>
+    <div class="metric" id="vlog-m-total">--</div>
+    <div class="sub" id="vlog-m-total-sub">段</div>
+  </div>
+  <div class="card">
+    <div class="card-title">语音段</div>
+    <div class="metric" id="vlog-m-voice">--</div>
+    <div class="sub">含识别文字</div>
+  </div>
+  <div class="card">
+    <div class="card-title">累计时长</div>
+    <div class="metric" id="vlog-m-sec">--</div>
+    <div class="sub">含发射与噪声</div>
+  </div>
+  <div class="card">
+    <div class="card-title">占用空间</div>
+    <div class="metric" id="vlog-m-mb">--</div>
+    <div class="sub" id="vlog-m-mb-sub">MB</div>
+  </div>
+</div>
+
+<div class="card vlog-status-card">
+  <div class="kv-list">
+    <div><span class="muted">录音状态</span><span id="vlog-st-rec">--</span></div>
+    <div><span class="muted">ASR 队列</span><span id="vlog-st-asr">--</span></div>
+    <div><span class="muted">VAD</span><span id="vlog-st-vad">--</span></div>
+    <div><span class="muted">本地 LLM</span><span id="vlog-st-llm">--</span></div>
+    <div><span class="muted">类别统计</span><span id="vlog-st-cats">--</span></div>
+    <div><span class="muted">保留策略</span><span id="vlog-st-ret">--</span></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="panel-head">
+    <div class="card-title">全天时间轴（点击定位）</div>
+    <div class="row gap small muted">
+      <span class="lg-dot cat-voice"></span>语音
+      <span class="lg-dot cat-tx"></span>本机发射
+      <span class="lg-dot cat-aprs"></span>APRS
+      <span class="lg-dot cat-noise"></span>噪声
+      <span class="lg-dot cat-empty"></span>其他
+    </div>
+  </div>
+  <div class="vlog-timeline" id="vlog-timeline">
+    <div class="vlog-tl-axis">
+      <span>00</span><span>06</span><span>12</span><span>18</span><span>24</span>
+    </div>
+    <div class="vlog-tl-track" id="vlog-tl-track"></div>
+  </div>
+</div>
+
+<div class="vlog-main">
+  <div class="card vlog-list-card">
+    <div class="panel-head">
+      <div class="row gap">
+        <select id="vlog-day" class="vlog-day-select"></select>
+        <select id="vlog-cat">
+          <option value="">全部类别</option>
+          <option value="voice">语音</option>
+          <option value="nonspeech">非语音（APRS/噪声）</option>
+          <option value="aprs">APRS/数据</option>
+          <option value="tone">单音/信标</option>
+          <option value="noise">噪声</option>
+          <option value="silence">静音</option>
+          <option value="jitter">静噪抖动</option>
+        </select>
+        <select id="vlog-kind">
+          <option value="">全部类型</option>
+          <option value="rx">接收</option>
+          <option value="tx">本机发射</option>
+          <option value="both">收发同时</option>
+        </select>
+        <input id="vlog-q" placeholder="搜索识别文字…" class="vlog-q">
+        <button class="btn" id="btn-vlog-search">搜索</button>
+      </div>
+      <div class="row gap">
+        <button class="btn ghost" data-export="txt">导出 TXT</button>
+        <button class="btn ghost" data-export="srt">导出 SRT</button>
+        <button class="btn ghost" data-export="csv">导出 CSV</button>
+      </div>
+    </div>
+    <div class="vlog-list" id="vlog-list">
+      <div class="muted small vlog-empty">加载中…</div>
+    </div>
+    <div class="row gap vlog-pager">
+      <button class="btn ghost" id="btn-vlog-prev">上一页</button>
+      <span class="muted small" id="vlog-page-info">--</span>
+      <button class="btn ghost" id="btn-vlog-next">下一页</button>
+    </div>
+  </div>
+
+  <div class="card vlog-detail-card">
+    <div class="card-title" id="vlog-detail-title">选择左侧一条记录查看详情</div>
+    <div id="vlog-detail" class="vlog-detail hidden">
+      <div class="row gap vlog-detail-meta">
+        <span class="badge" id="vlog-d-kind">--</span>
+        <span class="badge" id="vlog-d-cat">--</span>
+        <span class="muted small" id="vlog-d-info">--</span>
+      </div>
+      <canvas id="vlog-canvas" class="vlog-canvas" height="120"></canvas>
+      <audio id="vlog-audio" controls preload="metadata" class="vlog-audio"></audio>
+      <div class="row gap vlog-detail-actions">
+        <button class="btn" id="btn-vlog-retranscribe">重新识别</button>
+        <a class="btn ghost" id="vlog-d-download" href="#" download>下载 WAV</a>
+        <button class="btn ghost danger" id="btn-vlog-delete">删除</button>
+        <label class="checkline vlog-auto"><input type="checkbox" id="vlog-autoplay" checked> 自动播放</label>
+      </div>
+      <div class="vlog-segs" id="vlog-segs">
+        <div class="muted small">暂无识别文字</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card vlog-summary-card">
+  <div class="panel-head">
+    <div class="card-title">每日中继日报</div>
+    <div class="row gap">
+      <select id="vlog-sum-provider">
+        <option value="auto">自动（长文走外部）</option>
+        <option value="local">仅本地 LLM</option>
+        <option value="external">仅外部 API</option>
+      </select>
+      <button class="btn primary" id="btn-vlog-summary-run">立即生成日报</button>
+    </div>
+  </div>
+  <div class="small muted" id="vlog-sum-state">--</div>
+  <pre class="vlog-summary" id="vlog-summary">该日期暂无日报。</pre>
+  <details class="vlog-transcript-box">
+    <summary class="muted small">查看当日语音转写原文（送审材料）</summary>
+    <pre class="vlog-transcript" id="vlog-transcript">--</pre>
+  </details>
+</div>
+{% endblock %}
+
+{% block app_js %}{% endblock %}
+
+{% block scripts %}
+<script>window.VLOG_CSRF = document.querySelector('meta[name="csrf-token"]')?.content || '';</script>
+<script src="{{ url_for('static', filename='js/voice-log.js', v='20260924a') }}"></script>
+{% endblock %}
