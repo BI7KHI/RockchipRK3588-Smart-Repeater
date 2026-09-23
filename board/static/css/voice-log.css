@@ -11,7 +11,10 @@
 
 .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
-.vlog-metrics { margin-bottom: 14px; }
+.vlog-metrics { margin-bottom: 14px;
+  /* app.css 未定义 .grid-4，原先 4 个指标卡会退化成单列堆叠 */
+  grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 980px) { .vlog-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .vlog-metrics .metric { font-size: 28px; }
 
 .vlog-status-card { margin-bottom: 14px; }

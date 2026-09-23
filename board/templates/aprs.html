@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+{% block title %}APRS 收发 - ELF2 智能中继控制中心{% endblock %}
+
+{% block nav %}
+<a class="tab-btn" href="/">&larr; 返回控制台</a>
+<span class="tab-btn active">APRS</span>
+{% endblock %}
+
+{% block head_extra %}
+<link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/leaflet.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/aprs.css', v='20260925a') }}">
+{% endblock %}
+
+{% block app_js %}{% endblock %}
+
+{% block content %}
+<div class="panel-head">
+  <h2>APRS 收发</h2>
+  <div class="row gap wrap">
+    <span id="aprs-enable-badge" class="badge idle">--</span>
+    <span id="aprs-busy-badge" class="badge idle">BUSY --</span>
+    <span id="aprs-ptt-badge" class="badge idle">PTT --</span>
+    <span id="aprs-tnc-badge" class="badge idle">TNC 待机</span>
+    <button class="btn" id="btn-aprs-refresh">刷新</button>
+  </div>
+</div>
+
+<div class="grid grid-4 aprs-metrics">
+  <div class="card">
+    <div class="metric-label">今日收包</div>
+    <div class="metric-value" id="m-rx">0</div>
+    <div class="metric-sub" id="m-rx-sub">—</div>
+  </div>
+  <div class="card">
+    <div class="metric-label">听到的台站</div>
+    <div class="metric-value" id="m-stations">0</div>
+    <div class="metric-sub" id="m-stations-sub">—</div>
+  </div>
+  <div class="card">
+    <div class="metric-label">位置点数 / 气象</div>
+    <div class="metric-value" id="m-pos">0</div>
+    <div class="metric-sub" id="m-pos-sub">—</div>
+  </div>
+  <div class="card">
+    <div class="metric-label">今日发射</div>
+    <div class="metric-value" id="m-tx">0</div>
+    <div class="metric-sub" id="m-tx-sub">—</div>
+  </div>
+</div>
+
+<div class="aprs-main">
+  <div class="card aprs-map-col">
+    <div class="aprs-colhead">
+      <strong>台站地图</strong>
+      <select id="aprs-window" class="select-sm" title="时间窗">
+        <option value="30">近 30 分钟</option>
+        <option value="180" selected>近 3 小时</option>
+        <option value="720">近 12 小时</option>
+        <option value="1440">近 24 小时</option>
+        <option value="10080">近 7 天</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="aprs-track" checked> 轨迹</label>
+      <button class="btn ghost btn-sm" id="btn-aprs-fit">回到本站</button>
+      <span id="aprs-map-status" class="muted small"></span>
+    </div>
+    <div id="aprs-map"></div>
+    <div class="aprs-legend">
+      <span><i class="dot dot-rx"></i>接收台站</span>
+      <span><i class="dot dot-home"></i>本站</span>
+      <span id="aprs-coord-note" class="muted small"></span>
+    </div>
+  </div>
+
+  <div class="card aprs-list-col">
+    <div class="aprs-colhead">
+      <input id="aprs-filter-src" class="input-sm" placeholder="呼号过滤" autocomplete="off">
+      <select id="aprs-filter-type" class="select-sm">
+        <option value="">全部类型</option>
+        <option value="position">位置</option>
+        <option value="weather">气象</option>
+        <option value="status">状态</option>
+        <option value="telemetry">遥测</option>
+        <option value="message">消息</option>
+        <option value="mice">Mic-E</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="aprs-live" checked> 实时</label>
+    </div>
+    <div id="aprs-list" class="aprs-list">
+      <div class="aprs-empty">暂无数据</div>
+    </div>
+  </div>
+</div>
+
+<div class="aprs-tabs">
+  <button class="tab-btn active" data-atab="tx">发射</button>
+  <button class="tab-btn" data-atab="txlog">发射记录</button>
+  <button class="tab-btn" data-atab="detail">收包详情</button>
+  <button class="tab-btn" data-atab="stat">统计</button>
+  <button class="tab-btn" data-atab="cfg">本站位置</button>
+</div>
+
+<div class="aprs-tabbody">
+  <!-- 发射 -->
+  <div class="aprs-pane" data-apane="tx">
+    <p class="muted small">
+      发射前会做载波侦听：若 BUSY 有效或本机 PTT 正忙，则暂缓并在信道空闲后随机延迟再发，
+      避免与语音叠加（语音 + AFSK 同时出现会让两边都解不出来）。
+    </p>
+    <div class="row gap wrap">
+      <button class="btn primary" data-tx="weather">发射气象包 _WX</button>
+      <button class="btn" data-tx="position">发射位置信标 !</button>
+      <button class="btn" data-tx="telemetry">发射遥测 T#</button>
+      <button class="btn" data-tx="status">发射状态 &gt;</button>
+    </div>
+    <div class="aprs-msgbox">
+      <input id="tx-msg-to" class="input-sm" placeholder="收件呼号（如 BI7KHI-7）" value="BI7KHI">
+      <input id="tx-msg-text" class="input-lg" placeholder="消息正文（≤67 字符）" maxlength="67">
+      <button class="btn" id="btn-tx-msg">发送消息</button>
+    </div>
+    <div id="tx-result" class="aprs-txresult"></div>
+    <div class="aprs-txnext">
+      <strong>定时发射计划</strong>
+      <div id="tx-next" class="muted small">—</div>
+      <label class="chk"><input type="checkbox" id="tx-force" > 忽略最短间隔限制</label>
+    </div>
+  </div>
+
+  <!-- 发射记录 -->
+  <div class="aprs-pane" data-apane="txlog" hidden>
+    <div class="aprs-scroll">
+      <table class="aprs-table" id="txlog-table">
+        <thead><tr>
+          <th>时间</th><th>触发</th><th>类型</th><th>收件</th><th>报文内容</th>
+          <th>顺延</th><th>音频</th><th>结果</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 收包详情 -->
+  <div class="aprs-pane" data-apane="detail" hidden>
+    <div id="detail-body" class="aprs-detail">
+      <div class="aprs-empty">在右侧列表点一条记录查看原始报文与十六进制</div>
+    </div>
+  </div>
+
+  <!-- 统计 -->
+  <div class="aprs-pane" data-apane="stat" hidden>
+    <div class="grid grid-2">
+      <div class="card">
+        <strong>今日按类型</strong>
+        <table class="aprs-table" id="stat-type"><tbody></tbody></table>
+      </div>
+      <div class="card">
+        <strong>今日最活跃台站</strong>
+        <table class="aprs-table" id="stat-station"><tbody></tbody></table>
+      </div>
+    </div>
+    <div class="card">
+      <strong>解码器状态</strong>
+      <table class="aprs-table" id="stat-tnc"><tbody></tbody></table>
+      <div class="row gap">
+        <button class="btn ghost btn-sm" id="btn-aprs-export-txt">导出今日文本</button>
+        <button class="btn ghost btn-sm" id="btn-aprs-export-csv">导出 CSV</button>
+        <button class="btn ghost btn-sm" id="btn-aprs-export-json">导出 JSON</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 本站位置 -->
+  <div class="aprs-pane" data-apane="cfg" hidden>
+    <p class="muted small">
+      本站坐标是信标与气象包的来源。<b>天地图为 CGCS2000 坐标系，与 WGS-84 实用精度一致
+      （差 &lt;1m），因此 APRS 的 WGS-84 坐标可直接绘制，无需 GCJ-02 偏移转换。</b>
+      后续接入 ZED-F9P RTK 基准站时，把「位置来源」改成 nmea 并填串口即可，其余无需改动。
+    </p>
+    <div class="aprs-form">
+      <label>呼号 <input id="cfg-call" class="input-sm" maxlength="6"></label>
+      <label>SSID <input id="cfg-ssid" class="input-xs" type="number" min="0" max="15"></label>
+      <label>纬度 <input id="cfg-lat" class="input-md" placeholder="22.533300"></label>
+      <label>经度 <input id="cfg-lon" class="input-md" placeholder="114.050000"></label>
+      <label>海拔 m <input id="cfg-alt" class="input-sm" placeholder="（可空）"></label>
+      <label>状态注释 <input id="cfg-comment" class="input-lg" maxlength="60"></label>
+      <button class="btn primary" id="btn-cfg-save">保存并定位</button>
+      <span id="cfg-result" class="muted small"></span>
+    </div>
+    <div class="muted small">
+      位置来源：<b id="cfg-pos-source">manual</b> ·
+      <span id="cfg-pos-stat">—</span>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
+<script src="{{ url_for('static', filename='js/aprs.js', v='20260925a') }}"></script>
+{% endblock %}

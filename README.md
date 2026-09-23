@@ -80,6 +80,7 @@ RK3588 负责全部"智能"部分：网页控制台、端侧大模型（LLM）�
 | **摄像头** | V4L2 MJPEG 采集、**开机自动循环录像（掉线自愈）**、单次录像、回放/时间轴、容量清理、OSD/RTMP；实时预览与回放合并为同一控制台（模式切换） | ✅ |
 | **BUSY 检测** | **GPIO3_A5（全局 GPIO 101）光耦输入**，总览实时显示接收状态、发射期自激告警、极性与电平沿诊断 | ✅ |
 | **中继语音日志** | **BUSY/PTT 触发录音**（3 s 前滚 + 2 s 尾音）、**异步 ASR 段级时间戳**、非语音自动分类（APRS/单音/噪声/静音/抖动，**不出幻觉文字**）、**ICAO 字母解释法呼号自动还原**、独立日志页（全天时间轴 + 波形 + 文字高亮 + 搜索 + txt/srt/csv 导出）、**每日 23:30 分块 map-reduce 总结**（本地 rkllm / 外部 DeepSeek） | ✅ |
+| **APRS 收发** | **自研纯 Python 1200 bps Bell 202 软件 TNC**：常驻采集中枢连续解码（不依赖 BUSY 分段与尾音长度，因采集设备独占而不能跑 Direwolf）、**CRC 校验定帧**、相位×极性搜索；解析位置/气象/状态/遥测/消息/对象（**未知类型也原样入库**）；发射气象 `_WX`／遥测 `T#`／位置信标／状态／文本消息；**载波侦听仲裁**（BUSY/PTT 忙则顺延并在静默后随机延迟，避免语音与 AFSK 叠加导致两边都解不出）；独立 `/aprs` 页（**天地图**底图 + 瓦片代理与磁盘缓存，断网可看已浏览区域） | ✅ |
 | **Web 控制台** | 账号/角色、CSRF、审计日志、HTTPS 反向代理、系统监控 | ✅ |
 | **硬件板卡** | IO 隔离/驱动板、ADC 分压采集板 | 🔶 原理图完成，PCB 联调中 |
 
@@ -328,6 +329,55 @@ VAD 与 ASR 全部失效（16-bit 削顶不可逆，软件救不回来）。实�
 > 23:30 on the local NPU model or an external OpenAI-compatible API; the local model is started on
 > demand and unloaded when idle, coordinated by an HTTP readiness probe plus a file lease.
 
+### 5.9 APRS 收发 / APRS transceiver
+
+**为什么自研 TNC**：NAU88C22 的 capture 通道是**独占**的（第二路 `arecord` 直接
+`Device or resource busy`），Direwolf 那类独立 TNC 进程开不了声卡；且实测 APRS 紧随
+话音尾部（`#51` 的 APRS 落在 8.72 s 而录音 11.25 s，余量仅 2.5 s），依赖 BUSY 分段
+必然漏包。因此 TNC 做成**常驻连续解码**，挂在已有的单一声道采集中枢上，与
+`voice_service.feed()` 并列。开销实测 **约 2.6% 单核**。
+
+**协议栈**：带通 300–3600 Hz → 双音相关（W=13 样本矩形窗 × 1200/2200 Hz）→
+判决变量 `|y₁₂₀₀|²−|y₂₂₀₀|²` → 双音纯度 `ratio` 做突发检测 → 突发窗内 64 相位 ×
+2 极性搜索 → NRZI → HDLC 去填充定界 → AX.25 → **CRC-16/X-25 校验**。
+正确性判据是 CRC 通过而非能量/相似度，故误报率极低；突发检测只用于省 CPU
+（纯 AFSK 的 ratio≈0.5，白噪声≈0.154）。
+
+**灵敏度靠实测选参数**：用 10+ 段真实录音对比，带通 400–3400 Hz 只能解出 1 个文件，
+放宽到 **300–3600 Hz** 后可解出 2 个（`#46` t=7.82 s、`#51` t=8.72 s）——
+窄带会削掉 2200 Hz 音调的边带与时钟分量。
+
+**发射**：`抢 PTT 引用计数 → 等 0.12 s 功放稳定 → 抢占声卡播原始 PCM → 松 PTT`，
+复用现有 `PTT_GPIO_NUM=97`、`PLAY_LOCK`、最短压发保护。气象数据直接取板上已有的
+Modbus 气象站；遥测 5 路模拟量可配（默认电池/光伏/CPU 温度/发射计数/风速）。
+
+**地图合规（重点）**：底图用**天地图**（国家地理信息公共服务平台）——
+地图内容已审核并自带审图号，测绘资质由平台承担；**天地图是 CGCS2000，与 APRS 的
+WGS-84 实用精度一致（差 <1 m），坐标可直接绘制**。对比之下高德（GCJ-02）/百度
+（BD-09）若不转换会有 **300–600 m 偏移**；OSM 的国界画法**不符合我国《公开地图内容
+表示规范》**，且本网络内 `tile.openstreetmap.org` 实测不可达。
+天地图 key 分**服务端**（无 Referer，供板端代理）与**浏览器端**（校验 Referer）两种，
+本项目走服务端代理 + 磁盘缓存，key 不外泄且断网可看缓存瓦片。
+
+**位置来源可换**：`aprs_pos_source` 支持 `manual`（手填固定坐标）与 `nmea`；
+接入 ZED-F9P RTK 基准站时只需改设置填串口，其余代码无需改动（GGA/RMC 解析已实现）。
+
+> **EN** — A from-scratch pure-Python 1200 bps Bell 202 software TNC. It cannot be Direwolf:
+> the codec's capture channel is exclusive, and real APRS arrives right behind voice (only a
+> 2.5 s margin in `#51`), so the TNC runs continuously on the existing single capture hub.
+> Framing validity is decided by **CRC-16/X-25**, never by energy or similarity, so false
+> positives are essentially impossible; burst detection exists only to save CPU. Sensitivity was
+> tuned against real recordings: widening the band-pass from 400–3400 Hz to **300–3600 Hz**
+> doubled the number of decodable recordings. Transmit reuses the existing PTT GPIO with
+> **carrier-sense arbitration** — deferring while BUSY/PTT is active and re-sending after a
+> random silent gap, because voice and AFSK on top of each other make both undecodable.
+> The basemap is **Tianditu** (China's national geospatial platform): its map content is
+> pre-approved and its CGCS2000 datum matches APRS's WGS-84 within a metre, so no GCJ-02 shift
+> is needed — Amap/Baidu would misplace the station by 300–600 m, and OSM's boundary depiction
+> does not conform to Chinese map regulations (its tile server is unreachable here anyway).
+> Tiles are proxied and disk-cached server-side so the key never leaves the board and
+> already-viewed areas still render offline.
+
 ---
 
 ## 6. 快速开始 / Quick Start
@@ -424,6 +474,13 @@ printf 'vm.swappiness=10\nvm.vfs_cache_pressure=50\nvm.min_free_kbytes=65536\n' 
 | `/api/voice/export` | GET | 导出 `txt` / `srt`（含时间轴）/ `csv` |
 | `/api/voice/summary` `/summary/list` `/summary/run` | GET/POST | 日报查询、历史日报、立即生成（可指定 `local`/`external`） |
 | `/api/voice/cleanup` | POST | 手动执行保留策略清理 |
+| `/api/aprs/status` | GET | APRS 实时状态（TNC 解码统计、信道 BUSY/PTT、今日收包与发射、定时计划、气象源） |
+| `/api/aprs/list` `/api/aprs/<id>` `/api/aprs/<id>/raw` | GET | 收包列表（呼号/类型/仅位置过滤）、单包详情（含完整 hex 与解析字段）、下载原始 AX.25 帧 |
+| `/api/aprs/geo` `/api/aprs/stations` | GET | 地图数据（时间窗内站点与轨迹）、当前在听的台站 |
+| `/api/aprs/tx` `/api/aprs/tx/list` | POST/GET | 手动发射（`position`/`weather`/`status`/`telemetry`/`message`）、发射记录 |
+| `/api/aprs/pos` | POST | 保存本站坐标/呼号/SSID/注释 |
+| `/api/aprs/tile/<layer>/<z>/<x>/<y>` | GET | 天地图瓦片代理 + 磁盘缓存（服务端 key，受登录保护） |
+| `/api/aprs/export` `/api/aprs/cleanup` | GET/POST | 导出 `txt`/`csv`/`json`、按天清理记录与瓦片缓存 |
 | `/api/intercom/push` `/api/intercom/push/stop` | POST | 网页实时对讲推流（自动 PTT） |
 | `/api/camera/*` | GET/POST | 采集/预览、循环与单次录像、分段回放、存储统计、容量清理 |
 | `/api/camera/status` | GET | 含 `loop_running` / `loop_autostart` / `loop_manual_stop` |
