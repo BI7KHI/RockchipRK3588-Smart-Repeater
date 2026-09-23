@@ -31,6 +31,28 @@ LANGUAGE = os.environ.get('RELAY_ASR_LANG', 'auto')       # auto / zh / en / yue
 USE_ITN = os.environ.get('RELAY_ASR_ITN', '1') not in ('0', 'false', 'False')
 TARGET_SR = 16000
 
+# 运行时可覆盖语言（settings 表的 asr_language）。
+# 注意：SenseVoice 用 auto 判断中文无线电语音时很容易判成英文（实测把中文通联识别成
+# "Yeah."），中继台站建议固定 zh。
+_LANG_GETTER = None
+
+
+def set_language_getter(fn):
+    """注册一个返回当前语言的回调（通常读 settings.asr_language）。"""
+    global _LANG_GETTER
+    _LANG_GETTER = fn
+
+
+def current_language():
+    if _LANG_GETTER is not None:
+        try:
+            v = (_LANG_GETTER() or '').strip()
+            if v:
+                return v
+        except Exception:
+            pass
+    return LANGUAGE
+
 
 def _model_files(model_dir):
     """返回 (model.onnx, tokens.txt)；兼容 int8 / fp32 命名。"""
@@ -90,12 +112,20 @@ class AsrEngine:
         self._lock = threading.Lock()
         self._decode_lock = threading.Lock()
         self._load_error = ''
+        self._loaded_lang = ''
         self.model_dir = DEFAULT_MODEL_DIR
         self.version = ''
         self.last = {}
 
     def ensure(self):
         with self._lock:
+            want_lang = current_language()
+            if self._rec is not None and want_lang != self._loaded_lang:
+                # 语言变了：丢掉旧识别器按新语言重建
+                print('%s 语言由 %s 切换为 %s，重载模型' % (LOG, self._loaded_lang, want_lang),
+                      flush=True)
+                self._rec = None
+                self._load_error = ''
             if self._rec is not None:
                 return True
             if self._load_error:
@@ -112,10 +142,11 @@ class AsrEngine:
                 self.version = getattr(sherpa_onnx, '__version__', '')
                 self._rec = sherpa_onnx.OfflineRecognizer.from_sense_voice(
                     model=model, tokens=tokens, num_threads=NUM_THREADS,
-                    use_itn=USE_ITN, language=LANGUAGE, debug=False)
+                    use_itn=USE_ITN, language=want_lang, debug=False)
+                self._loaded_lang = want_lang
                 print('%s 模型加载完成 %.1fs：%s（sherpa-onnx %s, threads=%d, lang=%s）'
                       % (LOG, time.time() - t0, Path(model).name, self.version,
-                         NUM_THREADS, LANGUAGE), flush=True)
+                         NUM_THREADS, want_lang), flush=True)
                 self._load_error = ''
                 return True
             except Exception as e:
@@ -134,7 +165,8 @@ class AsrEngine:
             'tokens': Path(tokens).name if tokens else '',
             'sherpa_onnx': self.version,
             'threads': NUM_THREADS,
-            'language': LANGUAGE,
+            'language': self._loaded_lang or current_language(),
+            'language_wanted': current_language(),
             'use_itn': USE_ITN,
             'error': self._load_error,
             'last': self.last,

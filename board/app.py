@@ -482,6 +482,7 @@ def _set_default_settings(db):
         'asr_language': 'auto',
         # 中继语音日志（BUSY/PTT 触发录音 + 异步 ASR + 每日总结）
         'vlog_enabled': '1',
+        'vlog_enhance': '1',
         'vlog_dir': '/opt/ai/relay_voice',
         'vlog_channel': 'left',
         'vlog_pre_roll': '3.0',
@@ -1061,7 +1062,7 @@ def api_settings_get():
         'agent_enabled', 'agent_max_iters', 'agent_tools',
         'vlog_enabled', 'vlog_dir', 'vlog_channel', 'vlog_pre_roll', 'vlog_post_roll',
         'vlog_min_seconds', 'vlog_max_seconds', 'vlog_silence_dbfs',
-        'vlog_asr_enabled', 'vlog_vad_enabled', 'vlog_keep_transient',
+        'vlog_asr_enabled', 'vlog_vad_enabled', 'vlog_enhance', 'vlog_keep_transient',
         'vlog_retention_days', 'vlog_retention_mb',
         'vlog_summary_enabled', 'vlog_summary_time', 'vlog_summary_provider',
         'vlog_llm_on_demand', 'vlog_llm_idle_unload',
@@ -1121,6 +1122,7 @@ def api_settings_set():
         'vlog_enabled': _bool_caster,
         'vlog_asr_enabled': _bool_caster,
         'vlog_vad_enabled': _bool_caster,
+        'vlog_enhance': _bool_caster,
         'vlog_keep_transient': _bool_caster,
         'vlog_summary_enabled': _bool_caster,
         'vlog_llm_on_demand': _bool_caster,
@@ -1871,6 +1873,8 @@ voice_service_instance.configure(
     provider_config=lambda p=None: provider_config(p),
     setting_getter=_vlog_settings_direct,
 )
+# 让 ASR 语言跟随设置项（SenseVoice 的 auto 对中文无线电语音容易判成英文）
+asr_service.set_language_getter(lambda: _setting_direct('asr_language', 'auto'))
 voice_service_instance.start()
 threading.Thread(target=_vlog_capture_guard, daemon=True, name='vlog-capture').start()
 

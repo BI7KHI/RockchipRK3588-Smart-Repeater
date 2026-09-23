@@ -164,3 +164,7 @@
   .vlog-item { grid-template-columns: 56px 1fr; }
   .vlog-item-right { display: none; }
 }
+
+.vlog-warn { color: #fdba74; }
+#vlog-st-level { font-variant-numeric: tabular-nums; }
+.tag.cs { background: #0f3f5c; color: #7dd3fc; font-weight: 600; }

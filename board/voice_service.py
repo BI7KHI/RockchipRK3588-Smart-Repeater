@@ -61,6 +61,7 @@ DEFAULTS = {
     'vlog_silence_dbfs': '-48',
     'vlog_asr_enabled': '1',
     'vlog_vad_enabled': '1',
+    'vlog_enhance': '1',             # 识别前去直流+高通+峰值归一化（不改存档音频）
     'vlog_keep_transient': '0',      # 1=抖动/噪声片段也保留文件
     'vlog_retention_days': '30',
     'vlog_retention_mb': '20480',
@@ -82,6 +83,90 @@ CATEGORY_LABEL = {
 }
 
 KIND_LABEL = {'rx': '接收', 'tx': '本机发射', 'both': '收发同时'}
+
+# ICAO / 北约字母解释法 → 字母。中继通联里呼号普遍用字母解释法念，
+# SenseVoice 会输出 "Bravo Italy number 7 Hotel India" 这种文本，
+# 需要还原成 BI7HI 才能检索、统计和做日报。
+ICAO_ALPHABET = {
+    'alpha': 'A', 'alfa': 'A', 'bravo': 'B', 'charlie': 'C', 'delta': 'D', 'echo': 'E',
+    'foxtrot': 'F', 'golf': 'G', 'hotel': 'H', 'india': 'I', 'italy': 'I', 'italia': 'I',
+    'juliet': 'J', 'juliett': 'J', 'juliette': 'J', 'kilo': 'K', 'lima': 'L', 'mike': 'M',
+    'november': 'N', 'oscar': 'O', 'papa': 'P', 'quebec': 'Q', 'romeo': 'R', 'sierra': 'S',
+    'tango': 'T', 'uniform': 'U', 'victor': 'V', 'whiskey': 'W', 'whisky': 'W',
+    'xray': 'X', 'yankee': 'Y', 'zulu': 'Z',
+}
+CALLSIGN_RE = re.compile(r'\b([A-Z]{1,2}\d[A-Z]{1,4})\b')
+ICAO_SEQ_RE = re.compile(
+    r'\b((?:' + '|'.join(sorted(ICAO_ALPHABET, key=len, reverse=True)) + r')(?:[\s,\-]+'
+    r'(?:number|digit|numba)?[\s,]*(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|zero))?'
+    r'(?:[\s,\-]+(?:' + '|'.join(sorted(ICAO_ALPHABET, key=len, reverse=True)) + r')){0,5})\b',
+    re.IGNORECASE)
+NUM_WORD = {'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4',
+            'five': '5', 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9'}
+
+
+def extract_callsigns(text):
+    """从识别文本里还原呼号（含 ICAO 字母解释法展开）。
+
+    例：'Bravo Italy number 7, below Hotel India radio test' → ['BI7HI']
+    （严格模式按连续序列匹配，宽松模式把全文所有 ICAO 词/数字按出现顺序抽出来拼接，
+      用来对付字母之间夹了识别噪声词的情况。）
+    """
+    if not text:
+        return []
+    out = []
+
+    def _add(cand):
+        if cand and cand not in out:
+            out.append(cand)
+
+    # 1) 直接写出的呼号
+    for m in CALLSIGN_RE.findall(text.upper()):
+        _add(m)
+
+    # 2) 严格模式：连续的 ICAO 词（可夹 number/digit + 数字），展开后再找呼号
+    def expand(m):
+        s = re.sub(r'\b(number|digit|numba)\b', ' ', m.group(0), flags=re.I)
+        buf = []
+        for p in re.split(r'[\s,\-]+', s.strip()):
+            pl = p.lower()
+            if pl in ICAO_ALPHABET:
+                buf.append(ICAO_ALPHABET[pl])
+            elif pl in NUM_WORD:
+                buf.append(NUM_WORD[pl])
+            elif p.isdigit():
+                buf.append(p)
+        return ''.join(buf)
+
+    for m in CALLSIGN_RE.findall(ICAO_SEQ_RE.sub(lambda x: ' ' + expand(x) + ' ', text).upper()):
+        _add(m)
+
+    # 3) 宽松模式：全文所有 ICAO 词/数字按顺序拼接（忽略中间的普通词）
+    letters = []
+    for tok in re.findall(r"[A-Za-z]+|\d+", text):
+        tl = tok.lower()
+        if tl in ICAO_ALPHABET:
+            letters.append(ICAO_ALPHABET[tl])
+        elif tl in NUM_WORD:
+            letters.append(NUM_WORD[tl])
+        elif tok.isdigit():
+            letters.append(tok)
+    joined = ''.join(letters)
+    for m in re.findall(r'[A-Z]{1,2}\d[A-Z]{1,4}', joined):
+        _add(m)
+    return out[:5]
+
+
+def normalize_icao(text):
+    """把字母解释法展开成紧凑串，便于搜索（保留原文另存）。"""
+    if not text:
+        return ''
+    def expand(m):
+        return ' ' + ''.join(
+            ICAO_ALPHABET.get(p.lower(), NUM_WORD.get(p.lower(), ''))
+            for p in re.split(r'[\s,\-]+', re.sub(r'\b(number|digit)\b', ' ', m.group(0),
+                                                 flags=re.I).strip()))
+    return ICAO_SEQ_RE.sub(expand, text).strip()
 
 LLM_SERVICE = 'rkllm-server'
 LLM_HEALTH_URL = 'http://127.0.0.1:8001/v1/models'
@@ -155,6 +240,11 @@ class Store:
             c = self._conn()
             try:
                 c.executescript(SCHEMA)
+                for col in ('callsigns',):
+                    try:
+                        c.execute('ALTER TABLE voice_logs ADD COLUMN %s TEXT' % col)
+                    except Exception:
+                        pass
                 c.commit()
             finally:
                 c.close()
@@ -299,6 +389,29 @@ class Vad:
         except Exception as e:
             print('%s VAD 分割失败：%s' % (LOG, e), flush=True)
             return []
+
+
+def enhance_for_asr(x, sr=SAMPLE_RATE, hp_hz=250.0, target_peak=0.72):
+    """识别前的软件预处理：去直流 + 高通 + 峰值归一化。
+
+    只用于 VAD/ASR，不改动存档 WAV。中继音频的两大干扰是：
+    ① 低频轰鸣/工频（实测未接信号时 peak_hz 落在 42~513 Hz）；
+    ② 电台音量飘忽导致忽大忽小。
+    用 FFT 斜坡高通（避免依赖 scipy）+ 峰值归一化一次性解决。
+    """
+    if x is None or x.size < 256:
+        return x
+    x = (x - float(x.mean())).astype(np.float32)
+    n = x.size
+    spec = np.fft.rfft(x)
+    freq = np.fft.rfftfreq(n, 1.0 / sr)
+    lo = max(1.0, hp_hz * 0.32)
+    gain = np.clip((freq - lo) / max(1.0, hp_hz - lo), 0.0, 1.0)
+    y = np.fft.irfft(spec * gain, n=n).astype(np.float32)
+    pk = float(np.abs(y).max())
+    if pk > 1e-6:
+        y = y * (target_peak / pk)          # 太响压下来、太轻推上去
+    return np.clip(y, -1.0, 1.0).astype(np.float32)
 
 
 def merge_segments(segs, gap=0.45, pad=0.15, max_len=12.0):
@@ -855,27 +968,31 @@ class VoiceService:
         self.store.exec("UPDATE voice_logs SET asr_status='running' WHERE id=?", (rid,))
         import asr_service
         x, sr = read_wav_mono(path)
-        feat = analyze(x, sr)
+        feat = analyze(x, sr)          # 特征/电平按原始录音算，保证 dBFS 反映实际存档
+        xa = enhance_for_asr(x, sr) if _flag(st.get('vlog_enhance'), True) else x
         min_s = max(0.0, _f(st.get('vlog_min_seconds'), 1.0))
         silence_db = _f(st.get('vlog_silence_dbfs'), -48.0)
         segs = []
         if _flag(st.get('vlog_vad_enabled'), True) and row.get('seconds', 0) >= min_s:
-            segs = self.vad.split(x, sr)
+            segs = self.vad.split(xa, sr)
         texts = []
         asr_ms = 0
         rtf = 0.0
         if segs and _flag(st.get('vlog_asr_enabled'), True):
             for (a, b) in merge_segments(segs):
                 i0 = max(0, int(a * sr))
-                i1 = min(len(x), int(b * sr))
+                i1 = min(len(xa), int(b * sr))
                 if i1 - i0 < int(0.3 * sr):
                     continue
-                res = asr_service.transcribe_samples(x[i0:i1], sr)
+                res = asr_service.transcribe_samples(xa[i0:i1], sr)
                 asr_ms += int(res.get('ms') or 0)
                 if res.get('ok') and (res.get('text') or '').strip():
                     texts.append({'start': round(a, 2), 'end': round(b, 2),
                                   'text': res['text'].strip()})
         text = ' '.join(t['text'] for t in texts)
+        calls = extract_callsigns(text) if text else []
+        if calls:
+            print('%s #%s 还原呼号：%s' % (LOG, rid, ','.join(calls)), flush=True)
         if asr_ms and x.size:
             rtf = round(asr_ms / 1000.0 / (len(x) / float(sr)), 3)
         category = row.get('category') or ''
@@ -897,10 +1014,10 @@ class VoiceService:
             status = 'skip'
         self.store.exec(
             'UPDATE voice_logs SET category=?, asr_status=?, asr_text=?, asr_json=?, '
-            'asr_ms=?, rtf=?, feature_json=?, rms=?, peak=?, dbfs=? WHERE id=?',
+            'asr_ms=?, rtf=?, feature_json=?, rms=?, peak=?, dbfs=?, callsigns=? WHERE id=?',
             (category, status, text or '', json.dumps(texts, ensure_ascii=False) if texts else '',
              asr_ms, rtf, json.dumps(feat, ensure_ascii=False),
-             feat['rms'], feat['peak'], feat['dbfs'], rid))
+             feat['rms'], feat['peak'], feat['dbfs'], ','.join(calls), rid))
         self.counters['asr_done'] = int(self.counters.get('asr_done', 0)) + 1
         self.asr_last = {'id': rid, 'category': category, 'seconds': feat['seconds'],
                          'ms': asr_ms, 'rtf': rtf, 'text': text[:80],
@@ -1186,7 +1303,8 @@ class VoiceService:
     # -- 查询接口 ----------------------------------------------------------
     def list_logs(self, day=None, category=None, kind=None, q=None, limit=200, offset=0):
         sql = 'SELECT id,ts,ts_epoch,seconds,kind,category,rms,peak,dbfs,filename,path,' \
-              'bytes,asr_status,asr_text,asr_json,asr_ms,rtf,session_id,seq,feature_json FROM voice_logs WHERE 1=1'
+              'bytes,asr_status,asr_text,asr_json,asr_ms,rtf,session_id,seq,feature_json,' \
+              'callsigns FROM voice_logs WHERE 1=1'
         args = []
         if day:
             sql += ' AND substr(ts,1,10)=?'
@@ -1203,8 +1321,8 @@ class VoiceService:
             sql += ' AND kind=?'
             args.append(kind)
         if q:
-            sql += ' AND (asr_text LIKE ? OR filename LIKE ?)'
-            args += ['%%%s%%' % q, '%%%s%%' % q]
+            sql += ' AND (asr_text LIKE ? OR filename LIKE ? OR callsigns LIKE ?)'
+            args += ['%%%s%%' % q, '%%%s%%' % q, '%%%s%%' % q]
         sql += ' ORDER BY ts_epoch DESC LIMIT ? OFFSET ?'
         args += [int(limit), int(offset)]
         rows = self.store.query(sql, args)
@@ -1226,6 +1344,7 @@ class VoiceService:
                 'asr_status': r['asr_status'], 'text': r['asr_text'] or '',
                 'segments': segs, 'ms': r['asr_ms'], 'rtf': r['rtf'],
                 'session_id': r['session_id'], 'seq': r['seq'],
+                'callsigns': (r.get('callsigns') or '').split(',') if r.get('callsigns') else [],
             })
         return out
 
@@ -1284,6 +1403,11 @@ class VoiceService:
             pass
         rec = self.recorder
         today = datetime.now().strftime('%Y-%m-%d')
+        recent = self.store.query(
+            'SELECT id,ts,seconds,category,rms,peak,dbfs FROM voice_logs '
+            'ORDER BY id DESC LIMIT 8')
+        clipped = [r for r in recent if int(r.get('peak') or 0) >= 32000]
+        too_loud = [r for r in recent if _f(r.get('dbfs'), -99) > -12]
         return {
             'enabled': self.enabled(),
             'dir': str(base),
@@ -1313,6 +1437,16 @@ class VoiceService:
             'counters': dict(self.counters),
             'stats': dict(rec.stats),
             'today': self.day_stats(today),
+            'recent': recent,
+            'level': {
+                'clipped': len(clipped),
+                'too_loud': len(too_loud),
+                'recent_peak': int(recent[0]['peak']) if recent else 0,
+                'recent_dbfs': recent[0]['dbfs'] if recent else -120,
+                'hint': ('检测到 %d 条录音削顶：请降低麦克风 PGA 增益（设置页「麦克风输入源与增益」），'
+                         '健康电平应让语音 rms 落在 -30~-20 dBFS、峰值不超过 -6 dBFS。'
+                         % len(clipped)) if clipped else '',
+            },
             'retention': {'days': int(_f(st.get('vlog_retention_days'), 30)),
                           'mb': int(_f(st.get('vlog_retention_mb'), 20480))},
             'summary': dict(self.summary_state),

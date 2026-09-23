@@ -79,7 +79,7 @@ RK3588 负责全部"智能"部分：网页控制台、端侧大模型（LLM）�
 | **气象雨量** | RS485 Modbus：风速变送器 + 翻斗式雨量计 + **温湿度变送器（从站 03）**，小时/日统计 | ✅ |
 | **摄像头** | V4L2 MJPEG 采集、**开机自动循环录像（掉线自愈）**、单次录像、回放/时间轴、容量清理、OSD/RTMP；实时预览与回放合并为同一控制台（模式切换） | ✅ |
 | **BUSY 检测** | **GPIO3_A5（全局 GPIO 101）光耦输入**，总览实时显示接收状态、发射期自激告警、极性与电平沿诊断 | ✅ |
-| **中继语音日志** | **BUSY/PTT 触发录音**（3 s 前滚 + 2 s 尾音）、**异步 ASR 段级时间戳**、非语音自动分类（APRS/单音/噪声/静音/抖动，**不出幻觉文字**）、独立日志页（全天时间轴 + 波形 + 文字高亮 + 搜索 + txt/srt/csv 导出）、**每日 23:30 分块 map-reduce 总结**（本地 rkllm / 外部 DeepSeek） | ✅ |
+| **中继语音日志** | **BUSY/PTT 触发录音**（3 s 前滚 + 2 s 尾音）、**异步 ASR 段级时间戳**、非语音自动分类（APRS/单音/噪声/静音/抖动，**不出幻觉文字**）、**ICAO 字母解释法呼号自动还原**、独立日志页（全天时间轴 + 波形 + 文字高亮 + 搜索 + txt/srt/csv 导出）、**每日 23:30 分块 map-reduce 总结**（本地 rkllm / 外部 DeepSeek） | ✅ |
 | **Web 控制台** | 账号/角色、CSRF、审计日志、HTTPS 反向代理、系统监控 | ✅ |
 | **硬件板卡** | IO 隔离/驱动板、ADC 分压采集板 | 🔶 原理图完成，PCB 联调中 |
 
@@ -297,13 +297,34 @@ _ptt_release() ──► HOLD_COUNT-1 ──(→0)───► 0.8s 定时 ─�
 必须用 **HTTP `/v1/models` 探活**；跨进程使用 **文件租约** `/tmp/elf2-llm-lease` 防止日报生成
 到一半被其它进程的空闲卸载停掉。
 
+**呼号还原**：中继通联普遍用字母解释法念呼号，ASR 直接输出的是
+`Bravo Italy number 7, below Hotel India radio test.` 这类文本。`extract_callsigns()`
+用「严格连续序列 + 宽松全文抽取」两级策略把 ICAO 单词还原成字母并匹配
+`[A-Z]{1,2}\d[A-Z]{1,4}`，写入 `voice_logs.callsigns`，列表/详情显示「呼号 xxx」标签，
+搜索框一并匹配（实测 `Bravo Golf Seven Kilo Hotel India` → `BG7KHI`）。
+
+**输入电平（实测必须校准）**：电台音频接近线路电平，接 3.5mm MIC 输入时若沿用默认
+`PGA 60% + PGA Boost(+20dB)`（≈36 dB）会**严重削顶**——实测 peak 打满 32768、rms -8.3 dBFS，
+VAD 与 ASR 全部失效（16-bit 削顶不可逆，软件救不回来）。实测收敛到
+**`PGA 20%` + `PGA Boost` 关闭** 后 rms **-24 dBFS**、peak 48%，识别正常。
+健康判据：语音 rms **-30~-20 dBFS**、峰值不超过 **-6 dBFS**；语音日志页状态卡有「输入电平」
+实时显示与**削顶告警**。识别前还会做**去直流 + 250 Hz 高通 + 峰值归一化**（只用于 ASR，不动存档）。
+
+**ASR 语言用 auto**：实际通联常是「中文 + ICU/ICAO 字母解释法」混说，强制 `zh` 反而最差
+（同一段音频 `zh` → `prolnumber seven…`，`auto`/`en` → `Bravo Italy number 7…`），
+因此保留 `auto` 并在设置页做可配项。
+
 > **EN** — The voice log reuses the single shared capture stream (the codec allows only one opener),
 > gates recording on BUSY/PTT with pre-roll and post-roll, and stores 16 kHz mono WAV on NVMe.
 > silero VAD splits speech first, so SenseVoice only runs on real utterances and returns
 > segment-level timestamps; non-speech is classified (APRS / tone / noise / silence / jitter) and
-> deliberately left untranscribed. A daily map-reduce summary runs at 23:30 on the local NPU model
-> or an external OpenAI-compatible API. The local model is started on demand and unloaded when idle,
-> coordinated across processes by an HTTP readiness probe plus a file lease.
+> deliberately left untranscribed. **ICAO spelling-alphabet callsigns are expanded back to letters**
+> (`Bravo Golf Seven Kilo Hotel India` → `BG7KHI`). Input gain must be calibrated: radio audio is
+> near line level, so the default mic gain clips hard and destroys both VAD and ASR — measured
+> optimum is **PGA 20% with the +20 dB boost off** (rms −24 dBFS, peak 48 %). ASR language stays
+> `auto` because real traffic mixes Chinese with ICAO spelling. A daily map-reduce summary runs at
+> 23:30 on the local NPU model or an external OpenAI-compatible API; the local model is started on
+> demand and unloaded when idle, coordinated by an HTTP readiness probe plus a file lease.
 
 ---
 

@@ -105,6 +105,15 @@
       $('#vlog-st-cats').textContent = Object.keys(cats).length
         ? Object.keys(cats).map(k => k + ' ' + cats[k].n).join(' / ')
         : '--';
+      const lv = d.level || {};
+      const lvEl = $('#vlog-st-level');
+      if (lvEl) {
+        lvEl.textContent = '最近峰值 ' + (lv.recent_peak || 0) + ' / rms '
+          + (lv.recent_dbfs === undefined ? '--' : lv.recent_dbfs) + ' dBFS'
+          + (lv.clipped ? ('　⚠ ' + lv.clipped + ' 条削顶，请降低 PGA') : '');
+        lvEl.className = lv.clipped ? 'vlog-warn' : '';
+        lvEl.title = lv.hint || '';
+      }
       const status = d.status || {};
       $('#vlog-st-ret').textContent = '保留 ' + ((d.retention && d.retention.days) || 30) + ' 天 / '
         + ((d.retention && d.retention.mb) || 20480) + ' MB · 当前 '
@@ -200,6 +209,7 @@
       tags.className = 'vlog-item-tags';
       tags.appendChild(tag('k-' + it.kind, it.kind_label));
       tags.appendChild(tag('c-' + (it.category || 'pending'), it.category_label));
+      (it.callsigns || []).forEach(cs => tags.appendChild(tag('cs', '呼号 ' + cs)));
       if (it.asr_status === 'pending' || it.asr_status === 'running') {
         tags.appendChild(tag('asr-' + it.asr_status, it.asr_status === 'running' ? '识别中' : '待识别'));
       } else if (it.asr_status === 'error') {
@@ -282,7 +292,8 @@
     $('#vlog-d-info').textContent = it.seconds.toFixed(1) + 's · rms '
       + (it.rms || 0).toFixed(0) + ' · 峰值 ' + (it.peak || 0) + ' · '
       + ((it.bytes || 0) / 1024).toFixed(0) + ' KB'
-      + (it.rtf ? (' · RTF ' + it.rtf) : '');
+      + (it.rtf ? (' · RTF ' + it.rtf) : '')
+      + ((it.callsigns || []).length ? (' · 呼号 ' + it.callsigns.join('/')) : '');
     $('#vlog-d-download').href = '/api/voice/' + id + '/download';
 
     const audio = $('#vlog-audio');
