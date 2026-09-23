@@ -48,7 +48,7 @@ RK3588 负责全部"智能"部分：网页控制台、端侧大模型（LLM）�
 | 层 Layer | 组成 Components | 职责 Responsibility |
 |---|---|---|
 | ① 接入层 Clients | 手机/PC 浏览器 | HTTPS 控制台、实时对讲、LLM 对话 |
-| ② 端侧主控 Edge | RK3588（ELF2）+ Flask/nginx | 业务逻辑、AI 推理、IO 与遥测 |
+| ② 端侧主控 Edge | RK3588（ELF2）+ Flask/nginx | 业务逻辑、AI 推理、IO 与遥测、**APRS 收发** |
 | ③ 隔离驱动 Isolation | 自研 IO 隔离/驱动板 | 光耦隔离 PC0–PC3、PTT 隔离驱动、音频隔离衰减、隔离 12V/RS485 |
 | ④ 中继控制 Controller | 第三方控制板 | PTT 输入、收发互斥切换、音频路由 |
 | ⑤ 电台天线 Radios | 2× GM3188 + 双天线 | 接收（→RK3588 MIC）/ 发射（RK3588 AUX→） |
@@ -58,7 +58,11 @@ RK3588 负责全部"智能"部分：网页控制台、端侧大模型（LLM）�
 - **接收链 RX**：天线 → RX 电台 → 控制板音频 → 隔离衰减 → RK3588 MIC → 网页实时播放 / 转写
 - **发射链 TX**：LLM 回复或网页语音 → 端侧 TTS → 3.5mm AUX → 隔离 → 控制板 → TX 电台（**PTT 同步拉高**）
 - **控制链 Control**：RK3588 `GPIO3_A1`（全局 GPIO 97）→ 隔离驱动 → 控制板 PTT（GM3188 为**低有效**）
-- **遥测链 Telemetry**：电池/光伏分压 → SARADC；风速/雨量 → RS485 Modbus RTU
+- **APRS 接收 RX**：天线 → RX 电台 → 控制板音频 → 隔离 → RK3588 MIC → **自研 Bell 202 软件 TNC**
+  （常驻采集中枢，不依赖 BUSY 触发）→ NRZI/HDLC/AX.25 → **CRC 定帧** → 入库 → `/aprs` 地图与列表
+- **APRS 发射 TX**：网页手动或定时器 → 组帧 → Bell 202 调制 → **载波侦听**（BUSY/PTT 忙则顺延）
+  → `GPIO3_A1` 拉 PTT → AUX → 隔离 → 控制板 → TX 电台
+- **遥测链 Telemetry**：电池/光伏分压 → SARADC；风速/雨量/温湿度 → RS485 Modbus RTU
 - **链路 Link**：eth0 强制 100 Mbps/Full（禁用自协商以规避链路抖动）
 
 ---
@@ -82,7 +86,7 @@ RK3588 负责全部"智能"部分：网页控制台、端侧大模型（LLM）�
 | **中继语音日志** | **BUSY/PTT 触发录音**（3 s 前滚 + 2 s 尾音）、**异步 ASR 段级时间戳**、非语音自动分类（APRS/单音/噪声/静音/抖动，**不出幻觉文字**）、**ICAO 字母解释法呼号自动还原**、独立日志页（全天时间轴 + 波形 + 文字高亮 + 搜索 + txt/srt/csv 导出）、**每日 23:30 分块 map-reduce 总结**（本地 rkllm / 外部 DeepSeek） | ✅ |
 | **APRS 收发** | **自研纯 Python 1200 bps Bell 202 软件 TNC**：常驻采集中枢连续解码（不依赖 BUSY 分段与尾音长度，因采集设备独占而不能跑 Direwolf）、**CRC 校验定帧**、相位×极性搜索；解析位置/气象/状态/遥测/消息/对象（**未知类型也原样入库**）；发射气象 `_WX`／遥测 `T#`／位置信标／状态／文本消息；**载波侦听仲裁**（BUSY/PTT 忙则顺延并在静默后随机延迟，避免语音与 AFSK 叠加导致两边都解不出）；独立 `/aprs` 页（**天地图**底图 + 瓦片代理与磁盘缓存，断网可看已浏览区域） | ✅ |
 | **Web 控制台** | 账号/角色、CSRF、审计日志、HTTPS 反向代理、系统监控 | ✅ |
-| **硬件板卡** | IO 隔离/驱动板、ADC 分压采集板 | 🔶 原理图完成，PCB 联调中 |
+| **硬件板卡** | IO 隔离/驱动板、ADC 分压采集板 | ✅ 硬件完成（软件调试中） |
 
 > **EN** — Feature set: on-device LLM (RKNPU Qwen2.5-1.5B) with **agent skills + prompt injection +
 > real-time token-rate metrics**; on-device **Piper TTS** (zh/en/ICAO) with streaming read-out;
@@ -512,7 +516,12 @@ printf 'vm.swappiness=10\nvm.vfs_cache_pressure=50\nvm.min_free_kbytes=65536\n' 
 
 换算链路：`引脚电压 = (raw − 零点) × 0.43945 mV`，`实际电压 = 引脚电压 × 倍率`。
 
-### 8.3 PTT 接口
+### 8.3 硬件完成状态
+
+自研两块板卡（IO 隔离/驱动板、ADC 分压采集板）**已硬件完成**。当前剩余的
+主要是**软件调试**：音质细调、解码灵敏度、长稳运行与现场覆盖测试。
+
+### 8.4 PTT 接口
 
 `RK3588 GPIO3_A1（Linux 全局 GPIO 97，gpiochip3 line1）→ 隔离/驱动 → 中继控制板 PTT`；
 控制板到 GM3188 的 PTT 为**低有效**（拉低发射）。详见
@@ -541,19 +550,42 @@ printf 'vm.swappiness=10\nvm.vfs_cache_pressure=50\nvm.min_free_kbytes=65536\n' 
 | 9 | **端侧语音识别（ASR）+ BUSY 语音输入 + 总览 PTT/BUSY 同步** | ✅ 完成 |
 | 9b | **BUSY 引脚（GPIO3_A5）接收状态实时显示 + 极性/电平诊断** | ✅ 完成（待电台实测确认极性） |
 | 9c | **温湿度传感器（Modbus RTU 从站 03）采集/存储/页面** | ✅ 功能完成（传感器未接线） |
-| 10 | IO 隔离/驱动板：原理图 → PCB 布线 → 打样 | 🔶 进行中（原理图完成） |
-| 11 | ADC 分压采集板：接入实机并校准 | 🔶 进行中（设计/验算完成） |
-| 12 | 音频链路：RPT MIC 与 ELF2 MIC 共节点方案 | 🔶 进行中（需隔直/限幅/增益重设） |
-| 13 | 端侧模型工具选择稳定性（关键词→技能强制映射） | 🔶 进行中 |
-| 14 | 整机联调、现场覆盖测试、OTA 远程升级 | ⏳ 待开始 |
+| 9d | **中继语音日志（BUSY/PTT 触发录音 + 异步 ASR + 每日 LLM 总结）** | ✅ 完成 |
+| 9e | **APRS 收发（自研 Bell 202 软件 TNC + 天地图地图页）** | ✅ 完成（待空口实测验收） |
+| 10 | IO 隔离/驱动板：原理图 → PCB 布线 → 打样 | ✅ 硬件完成 |
+| 11 | ADC 分压采集板：接入实机并校准 | ✅ 硬件完成 |
+| 12 | 音频链路：RPT MIC 与 ELF2 MIC 共节点方案 | ✅ 硬件完成（软件侧增益已校准） |
+| 13 | 端侧模型工具选择稳定性（关键词→技能强制映射） | 🔶 软件调试中 |
+| 14 | 整机联调、现场覆盖测试、OTA 远程升级 | 🔶 软件调试中（真实通联已跑通） |
 
-> **EN** — Completed: on-device LLM/TTS, web console, PTT control, web intercom, camera,
-> telemetry, and the **agent/tool-calling + prompt injection + rate monitoring** stack, plus
-> **auto-start loop recording**, the merged camera preview/playback console, the **BUSY input**
-> and the **temperature/humidity** sensor pipeline.
-> In progress: isolation board PCB, divider-board bring-up, RX/TX audio node sharing,
-> stabilising tool selection of the 1.5 B model, and field verification of the BUSY polarity.
-> Planned: system-level integration test, field coverage test and OTA update.
+### 9.1 当前进度总结 / Status summary
+
+**硬件：基本完成。** 自研 IO 隔离/驱动板与 ADC 分压采集板已完成，PTT / BUSY / 音频 /
+遥测 / RS485 各链路均已在真实通联中跑通；3.5mm 音频输入通路经实测校准（PGA 60% +
+Boost off，语音 rms −20.7…−24.0 dBFS，无削顶）。
+
+**软件：功能全部落地，进入调试打磨阶段。**
+
+| 维度 Dimension | 状态 Status |
+|---|---|
+| 端侧 AI | ✅ LLM（RKNPU）/ TTS（Piper）/ ASR（SenseVoice）全部本地化可用 |
+| 语音链路 | ✅ 网页实时对讲、语音日志、每日 LLM 总结全通（实测 RTF≈0.02） |
+| 数据链路 | ✅ 电压遥测、RS485 气象、摄像头录像、**APRS 收发**全通 |
+| 控制链路 | ✅ PTT 状态机（引用计数/防抖/事件追踪）、BUSY 实时状态与自激告警 |
+| Web 控制台 | ✅ 账号/角色/CSRF/审计、HTTPS、独立语音日志页与 APRS 页 |
+| 剩余工作 | 🔶 空口实测验收、现场覆盖测试、长稳运行、音质与解码灵敏度细调、OTA |
+
+> **EN** — **Hardware is essentially complete.** Both custom boards (IO isolation/driver and
+> ADC divider) are done, and the PTT / BUSY / audio / telemetry / RS485 paths have all been
+> exercised with real over-the-air traffic; the 3.5 mm audio-input path was calibrated by
+> measurement (PGA 60 % with the +20 dB boost **off** → rms −20.7…−24.0 dBFS, no clipping).
+>
+> **Software is feature-complete and now in the debugging/polish phase.** On-device
+> LLM/TTS/ASR, the web console, PTT state machine, web intercom, voice log with daily LLM
+> summaries, voltage/RS485 telemetry, camera recording and the new **APRS transceiver**
+> (from-scratch Bell 202 software TNC + Tianditu map page) are all working.
+> **Remaining:** on-air acceptance of APRS, field coverage testing, long-run stability,
+> fine-tuning of audio quality and decoder sensitivity, and OTA update.
 
 ---
 
