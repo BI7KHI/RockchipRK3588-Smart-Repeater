@@ -46,8 +46,14 @@
 .vlog-tl-block.cat-voice { background: var(--vlog-voice); }
 .vlog-tl-block.cat-tx, .vlog-tl-block.kind-tx { background: var(--vlog-tx); }
 .vlog-tl-block.cat-aprs { background: var(--vlog-aprs); }
-.vlog-tl-block.cat-tone { background: #06b6d4; }
+/* 非语音非 APRS 的一律归入「噪声」灰，与页面图例的 5 类保持一致。
+   （单音/信标、静音、静噪抖动在列表里仍有各自的文字标签，只是颜色统一。） */
+.vlog-tl-block.cat-tone,
+.vlog-tl-block.cat-silence,
+.vlog-tl-block.cat-jitter,
+.vlog-tl-block.cat-pending,
 .vlog-tl-block.cat-noise { background: var(--vlog-noise); }
+/* 本机发射：橙；与语音同时（both）用红以示自激风险 */
 .vlog-tl-block.kind-both { background: #ef4444; }
 .vlog-tl-now {
   position: absolute; top: 0; bottom: 0; width: 1px; background: #f87171; z-index: 4;
