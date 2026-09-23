@@ -500,6 +500,8 @@ def _set_default_settings(db):
         'vlog_summary_provider': 'auto',
         'vlog_llm_on_demand': '1',
         'vlog_llm_idle_unload': '300',
+        'vlog_callsign_whitelist': 'BI7KHI',
+        'vlog_callsign_max_dist': '0',
         # 全局音频
         'audio_volume_percent': '80',
         'audio_muted': '0',
@@ -1066,6 +1068,7 @@ def api_settings_get():
         'vlog_retention_days', 'vlog_retention_mb',
         'vlog_summary_enabled', 'vlog_summary_time', 'vlog_summary_provider',
         'vlog_llm_on_demand', 'vlog_llm_idle_unload',
+        'vlog_callsign_whitelist', 'vlog_callsign_max_dist',
     ]
     out = {k: get_setting(k) for k in keys}
     out['local_api_key_set'] = bool(out.get('local_api_key'))
@@ -1119,6 +1122,9 @@ def api_settings_set():
             if re.fullmatch(r'\d{1,2}:\d{2}', str(v).strip()) else '23:30'),
         'vlog_summary_provider': lambda v: v if v in ('auto', 'local', 'external') else 'auto',
         'vlog_llm_idle_unload': lambda v: str(max(60, min(3600, int(float(v))))),
+        'vlog_callsign_whitelist': lambda v: ','.join(
+            [x.strip().upper() for x in re.split(r'[,;\s]+', str(v)) if x.strip()][:50])[:400],
+        'vlog_callsign_max_dist': lambda v: str(max(0, min(3, int(float(v))))),
         'vlog_enabled': _bool_caster,
         'vlog_asr_enabled': _bool_caster,
         'vlog_vad_enabled': _bool_caster,

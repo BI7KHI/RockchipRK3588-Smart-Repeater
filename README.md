@@ -306,7 +306,8 @@ _ptt_release() ──► HOLD_COUNT-1 ──(→0)───► 0.8s 定时 ─�
 **输入电平（实测必须校准）**：电台音频接近线路电平，接 3.5mm MIC 输入时若沿用默认
 `PGA 60% + PGA Boost(+20dB)`（≈36 dB）会**严重削顶**——实测 peak 打满 32768、rms -8.3 dBFS，
 VAD 与 ASR 全部失效（16-bit 削顶不可逆，软件救不回来）。实测收敛到
-**`PGA 20%` + `PGA Boost` 关闭** 后 rms **-24 dBFS**、peak 48%，识别正常。
+**`PGA 60%` + `PGA Boost` 关闭** 后 rms **-24 dBFS**、peak 48%，识别正常
+（注意别再调低：实测 PGA 20% 只有 -41 dBFS，音量不足同样识别失败）。
 健康判据：语音 rms **-30~-20 dBFS**、峰值不超过 **-6 dBFS**；语音日志页状态卡有「输入电平」
 实时显示与**削顶告警**。识别前还会做**去直流 + 250 Hz 高通 + 峰值归一化**（只用于 ASR，不动存档）。
 
@@ -321,7 +322,8 @@ VAD 与 ASR 全部失效（16-bit 削顶不可逆，软件救不回来）。实�
 > deliberately left untranscribed. **ICAO spelling-alphabet callsigns are expanded back to letters**
 > (`Bravo Golf Seven Kilo Hotel India` → `BG7KHI`). Input gain must be calibrated: radio audio is
 > near line level, so the default mic gain clips hard and destroys both VAD and ASR — measured
-> optimum is **PGA 20% with the +20 dB boost off** (rms −24 dBFS, peak 48 %). ASR language stays
+> optimum is **PGA 60% with the +20 dB boost off** (rms −24 dBFS, peak 48 %); dropping to 20 %
+> is *too quiet* (−41 dBFS) and fails just as badly. ASR language stays
 > `auto` because real traffic mixes Chinese with ICAO spelling. A daily map-reduce summary runs at
 > 23:30 on the local NPU model or an external OpenAI-compatible API; the local model is started on
 > demand and unloaded when idle, coordinated by an HTTP readiness probe plus a file lease.

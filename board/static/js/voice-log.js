@@ -209,7 +209,12 @@
       tags.className = 'vlog-item-tags';
       tags.appendChild(tag('k-' + it.kind, it.kind_label));
       tags.appendChild(tag('c-' + (it.category || 'pending'), it.category_label));
-      (it.callsigns || []).forEach(cs => tags.appendChild(tag('cs', '呼号 ' + cs)));
+      (it.callsigns || []).forEach(cs => {
+        const raw = (it.callsigns_raw || []).filter(x => x && x !== cs);
+        const t = tag('cs', '呼号 ' + cs);
+        if (raw.length) t.title = '识别原文为 ' + raw.join('/') + '，已按白名单纠错';
+        tags.appendChild(t);
+      });
       if (it.asr_status === 'pending' || it.asr_status === 'running') {
         tags.appendChild(tag('asr-' + it.asr_status, it.asr_status === 'running' ? '识别中' : '待识别'));
       } else if (it.asr_status === 'error') {
@@ -457,6 +462,28 @@
     }, 4000);
   }
 
+  async function loadCsWhitelist() {
+    try {
+      const d = await api('/api/settings');
+      const s = d.settings || {};
+      const el = $('#vlog-cs-whitelist');
+      if (el) el.value = s.vlog_callsign_whitelist || '';
+    } catch (e) { /* 非管理员读取失败可忽略 */ }
+  }
+
+  async function saveCsWhitelist() {
+    const el = $('#vlog-cs-whitelist');
+    if (!el) return;
+    try {
+      await api('/api/settings', {
+        method: 'POST',
+        body: JSON.stringify({ vlog_callsign_whitelist: el.value }),
+      });
+      toast('呼号白名单已保存（对之后的新录音生效）', 'success');
+      el.value = (el.value || '').toUpperCase();
+    } catch (e) { toast('保存失败：' + e.message, 'error'); }
+  }
+
   // ---------------- 事件 ----------------
   function bind() {
     $('#btn-vlog-refresh').addEventListener('click', () => { loadDays(); loadList(); loadSummary(); loadStatus(); });
@@ -516,6 +543,7 @@
     });
 
     $('#btn-vlog-summary-run').addEventListener('click', runSummary);
+    $('#btn-vlog-cs-save').addEventListener('click', saveCsWhitelist);
   }
 
   // ---------------- 启动 ----------------
@@ -525,6 +553,7 @@
     await loadStatus();
     await loadList();
     await loadSummary();
+    await loadCsWhitelist();
     loadStatus();
     setInterval(loadStatus, 3000);
     setInterval(() => {

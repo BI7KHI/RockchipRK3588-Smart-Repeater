@@ -70,6 +70,10 @@ DEFAULTS = {
     'vlog_summary_provider': 'auto',  # auto / local / external
     'vlog_llm_on_demand': '1',
     'vlog_llm_idle_unload': '300',
+    # 常用呼号白名单（逗号分隔）。字母解释法逐字识别会丢字（实测 BI7KHI → BI7HI），
+    # 用编辑距离把它纠回白名单里的呼号。
+    'vlog_callsign_whitelist': 'BI7KHI',
+    'vlog_callsign_max_dist': '0',   # 0=只做「丢字」纠错；1/2 才启用编辑距离纠错（有误纠风险）
 }
 
 CATEGORY_LABEL = {
@@ -161,12 +165,88 @@ def normalize_icao(text):
     """把字母解释法展开成紧凑串，便于搜索（保留原文另存）。"""
     if not text:
         return ''
+
     def expand(m):
         return ' ' + ''.join(
             ICAO_ALPHABET.get(p.lower(), NUM_WORD.get(p.lower(), ''))
             for p in re.split(r'[\s,\-]+', re.sub(r'\b(number|digit)\b', ' ', m.group(0),
                                                  flags=re.I).strip()))
     return ICAO_SEQ_RE.sub(expand, text).strip()
+
+
+def levenshtein(a, b):
+    """编辑距离（呼号纠错用，字符串很短，直接 DP）。"""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def is_subsequence(a, b):
+    """a 是否为 b 的子序列（用于判断"丢字"）。"""
+    it = iter(b)
+    return all(ch in it for ch in a)
+
+
+def correct_callsigns(cands, whitelist, max_dist=0):
+    """把还原出的呼号向白名单纠错。
+
+    实测：真实录音里 BI7KHI 被识别成 "Bravo Italy number 7, below Hotel India"，
+    只还原出 BI7HI（丢了 1 个字母 K）。
+
+    **默认只做"丢字"纠错（候选是白名单呼号的子序列）**：
+    因为替换型纠错很危险 —— BG7KHI 与 BI7KHI 的编辑距离只有 1，而 BG7 是国内
+    极常见前缀，按编辑距离纠错会把别的电台的呼号改错。把 max_dist 显式设为
+    1/2 才会额外启用编辑距离纠错。
+
+    返回 (corrected, fixes)。
+    """
+    wl = [str(x).strip().upper() for x in (whitelist or []) if str(x).strip()]
+    out = []
+    fixes = []
+    for c in cands:
+        c = str(c).upper()
+        if not wl:
+            out.append(c)
+            continue
+        if c in wl:
+            out.append(c)
+            continue
+        # ① 丢字纠错：候选是某个白名单呼号的真子序列，且唯一命中
+        subs = [w for w in wl if len(c) < len(w) and is_subsequence(c, w)]
+        if len(subs) == 1:
+            out.append(subs[0])
+            fixes.append({'from': c, 'to': subs[0], 'dist': len(subs[0]) - len(c),
+                          'mode': 'subsequence'})
+            continue
+        # ② 可选：编辑距离纠错（默认关闭，需显式调大 max_dist）
+        if max_dist > 0:
+            best, best_d = None, 999
+            for w in wl:
+                d = levenshtein(c, w)
+                if d < best_d:
+                    best, best_d = w, d
+            if best and best_d <= max_dist and abs(len(best) - len(c)) <= 1 and len(c) >= 4:
+                out.append(best)
+                fixes.append({'from': c, 'to': best, 'dist': best_d, 'mode': 'edit'})
+                continue
+        out.append(c)
+    seen = set()
+    uniq = []
+    for x in out:
+        if x not in seen:
+            seen.add(x)
+            uniq.append(x)
+    return uniq, fixes
 
 LLM_SERVICE = 'rkllm-server'
 LLM_HEALTH_URL = 'http://127.0.0.1:8001/v1/models'
@@ -240,7 +320,7 @@ class Store:
             c = self._conn()
             try:
                 c.executescript(SCHEMA)
-                for col in ('callsigns',):
+                for col in ('callsigns', 'callsigns_raw'):
                     try:
                         c.execute('ALTER TABLE voice_logs ADD COLUMN %s TEXT' % col)
                     except Exception:
@@ -295,6 +375,32 @@ def read_wav_mono(path):
     return a, sr
 
 
+def active_span(x, sr=SAMPLE_RATE, frame_ms=100.0, rel=0.15):
+    """返回信号"活跃段" (i0, i1)；找不到返回 None。
+
+    频谱特征必须在活跃段上算：整段含前后静音（pre-roll/尾音常占 4~5 秒）会把频谱
+    稀释得很平，实测把静噪噪声误判成"单音/信标"。
+    """
+    n = len(x)
+    step = max(1, int(sr * frame_ms / 1000.0))
+    if n < step * 2:
+        return None
+    k = n // step
+    e = np.abs(x[:k * step]).reshape(k, step)
+    rms = np.sqrt((e.astype(np.float64) ** 2).mean(axis=1))
+    pk = float(rms.max())
+    if pk <= 0:
+        return None
+    idx = np.where(rms >= pk * rel)[0]
+    if idx.size == 0:
+        return None
+    i0 = int(idx[0]) * step
+    i1 = min(n, (int(idx[-1]) + 1) * step)
+    if i1 - i0 < int(0.2 * sr):
+        return None
+    return i0, i1
+
+
 def analyze(x, sr=SAMPLE_RATE):
     """时域 + 频域特征，供分类使用。"""
     n = len(x)
@@ -312,11 +418,20 @@ def analyze(x, sr=SAMPLE_RATE):
         out['zcr'] = round(float((np.diff(np.sign(x)) != 0).mean()), 4)
     if n < 256:
         return out
-    win = x * np.hanning(n)
+
+    span = active_span(x, sr)
+    seg = x[span[0]:span[1]] if span else x
+    out['active_seconds'] = round(len(seg) / float(sr), 2)
+    if len(seg) > int(8 * sr):                      # 最长取 8 秒，避免 FFT 过大
+        seg = seg[:int(8 * sr)]
+    if seg.size < 256:
+        return out
+    win = seg * np.hanning(len(seg))
     spec = np.abs(np.fft.rfft(win)) + 1e-9
-    freq = np.fft.rfftfreq(n, 1.0 / sr)
+    freq = np.fft.rfftfreq(len(seg), 1.0 / sr)
     total = float(spec.sum())
     out['peak_hz'] = int(freq[int(np.argmax(spec))])
+    out['active_zcr'] = round(float((np.diff(np.sign(seg)) != 0).mean()), 4)
 
     def band(lo, hi):
         m = (freq >= lo) & (freq < hi)
@@ -990,9 +1105,16 @@ class VoiceService:
                     texts.append({'start': round(a, 2), 'end': round(b, 2),
                                   'text': res['text'].strip()})
         text = ' '.join(t['text'] for t in texts)
-        calls = extract_callsigns(text) if text else []
+        raw_calls = extract_callsigns(text) if text else []
+        wl = [x for x in re.split(r'[,;\s]+', st.get('vlog_callsign_whitelist') or '') if x]
+        calls, fixes = correct_callsigns(
+            raw_calls, wl, int(_f(st.get('vlog_callsign_max_dist'), 0)))
         if calls:
-            print('%s #%s 还原呼号：%s' % (LOG, rid, ','.join(calls)), flush=True)
+            msg = '%s #%s 还原呼号：%s' % (LOG, rid, ','.join(calls))
+            if fixes:
+                msg += '（纠错 %s）' % '; '.join(
+                    '%s→%s(d=%d)' % (f['from'], f['to'], f['dist']) for f in fixes)
+            print(msg, flush=True)
         if asr_ms and x.size:
             rtf = round(asr_ms / 1000.0 / (len(x) / float(sr)), 3)
         category = row.get('category') or ''
@@ -1014,10 +1136,12 @@ class VoiceService:
             status = 'skip'
         self.store.exec(
             'UPDATE voice_logs SET category=?, asr_status=?, asr_text=?, asr_json=?, '
-            'asr_ms=?, rtf=?, feature_json=?, rms=?, peak=?, dbfs=?, callsigns=? WHERE id=?',
+            'asr_ms=?, rtf=?, feature_json=?, rms=?, peak=?, dbfs=?, '
+            'callsigns=?, callsigns_raw=? WHERE id=?',
             (category, status, text or '', json.dumps(texts, ensure_ascii=False) if texts else '',
              asr_ms, rtf, json.dumps(feat, ensure_ascii=False),
-             feat['rms'], feat['peak'], feat['dbfs'], ','.join(calls), rid))
+             feat['rms'], feat['peak'], feat['dbfs'], ','.join(calls),
+             ','.join(raw_calls), rid))
         self.counters['asr_done'] = int(self.counters.get('asr_done', 0)) + 1
         self.asr_last = {'id': rid, 'category': category, 'seconds': feat['seconds'],
                          'ms': asr_ms, 'rtf': rtf, 'text': text[:80],
@@ -1304,7 +1428,7 @@ class VoiceService:
     def list_logs(self, day=None, category=None, kind=None, q=None, limit=200, offset=0):
         sql = 'SELECT id,ts,ts_epoch,seconds,kind,category,rms,peak,dbfs,filename,path,' \
               'bytes,asr_status,asr_text,asr_json,asr_ms,rtf,session_id,seq,feature_json,' \
-              'callsigns FROM voice_logs WHERE 1=1'
+              'callsigns,callsigns_raw FROM voice_logs WHERE 1=1'
         args = []
         if day:
             sql += ' AND substr(ts,1,10)=?'
@@ -1345,6 +1469,8 @@ class VoiceService:
                 'segments': segs, 'ms': r['asr_ms'], 'rtf': r['rtf'],
                 'session_id': r['session_id'], 'seq': r['seq'],
                 'callsigns': (r.get('callsigns') or '').split(',') if r.get('callsigns') else [],
+                'callsigns_raw': (r.get('callsigns_raw') or '').split(',')
+                                 if r.get('callsigns_raw') else [],
             })
         return out
 
