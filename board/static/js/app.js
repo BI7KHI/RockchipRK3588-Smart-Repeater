@@ -1244,6 +1244,7 @@
     if ($('#camera-loop-max-files')) $('#camera-loop-max-files').value = s.loop_max_files ?? 100;
     if ($('#camera-storage-max-mb')) $('#camera-storage-max-mb').value = s.storage_max_mb ?? 8192;
     if ($('#camera-rtmp-url')) $('#camera-rtmp-url').value = s.rtmp_url || '';
+    if ($('#camera-loop-autostart')) $('#camera-loop-autostart').checked = !!s.loop_autostart;
     if ($('#camera-osd-enabled')) $('#camera-osd-enabled').checked = !!osd.enabled;
     if ($('#camera-osd-text')) $('#camera-osd-text').value = osd.text || '';
     if ($('#camera-osd-show-time')) $('#camera-osd-show-time').checked = !!osd.show_time;
@@ -1275,13 +1276,24 @@
       if ($('#camera-device-info')) $('#camera-device-info').textContent = (data.settings && data.settings.device) || '--';
       const st = data.service || {};
       const badge = $('#camera-status-badge');
-      if (badge) badge.textContent = st.running ? '预览运行中' : '未启动';
+      if (badge) {
+        badge.textContent = st.running
+          ? (st.recording ? `采集中 · ${st.recording_label === 'loop' ? '循环录像' : '录像中'}` : '采集中')
+          : '未启动';
+      }
+      const autoBadge = $('#cam-loop-auto-badge');
+      if (autoBadge) {
+        autoBadge.textContent = data.loop_autostart
+          ? (data.loop_manual_stop ? '自动（已手动暂停）' : (data.loop_running ? '自动 · 运行中' : '自动 · 待启动'))
+          : '手动';
+      }
       const box = $('#camera-service-status');
       if (box) {
         box.innerHTML = `
           <div><span>采集</span><b>${st.running ? '运行' : '停止'}</b></div>
           <div><span>预览客户端</span><b>${st.clients ?? 0}</b></div>
-          <div><span>录像</span><b>${st.recording ? (st.recording_label || '运行') : '停止'}</b></div>
+          <div><span>循环录像</span><b>${data.loop_running ? '运行中' : (data.loop_manual_stop ? '手动暂停' : '未运行')}</b></div>
+          <div><span>录像任务</span><b>${st.recording ? (st.recording_label || '运行') : '停止'}</b></div>
           <div><span>RTMP</span><b>${st.rtmp ? '推流中' : '停止'}</b></div>
           ${st.last_error ? `<div><span>最近错误</span><b class="muted">${escapeHtml(String(st.last_error).slice(0,120))}</b></div>` : ''}`;
       }
@@ -1312,21 +1324,41 @@
   }
 
   async function cameraStart() {
+    // 启动预览：确保采集进程在跑，然后挂上 MJPEG 画面（后台循环录像不受影响）
     try {
       await apiFetch('/api/camera/start', { method: 'POST', body: '{}' });
       const img = $('#camera-preview');
-      if (img) img.src = '/api/camera/stream?t=' + Date.now();
-      showToast('摄像头预览已启动', 'success');
+      if (img) { img.dataset.liveSrc = '1'; img.src = '/api/camera/stream?t=' + Date.now(); }
+      window.dispatchEvent(new CustomEvent('elf2:camera-preview-start'));
+      showToast('实时预览已启动', 'success');
       loadCameraStatus();
     } catch (e) { showToast(e.message, 'error'); }
   }
 
   async function cameraStop() {
+    // 只断开网页画面：循环录像仍在后台运行（要停采集请用「高级设置 → 停止采集服务」）
+    const img = $('#camera-preview');
+    if (img) { delete img.dataset.liveSrc; img.src = ''; }
+    window.dispatchEvent(new CustomEvent('elf2:camera-preview-stop'));
+    showToast('已断开实时预览（后台循环录像不受影响）', 'success');
+  }
+
+  async function cameraServiceStart() {
+    try {
+      await apiFetch('/api/camera/start', { method: 'POST', body: '{}' });
+      showToast('摄像头采集服务已启动', 'success');
+      loadCameraStatus();
+    } catch (e) { showToast(e.message, 'error'); }
+  }
+
+  async function cameraServiceStop() {
+    if (!confirm('停止采集服务会同时停止循环录像与 RTMP 推流，是否继续？')) return;
     try {
       await apiFetch('/api/camera/stop', { method: 'POST', body: '{}' });
       const img = $('#camera-preview');
-      if (img) img.src = '';
-      showToast('摄像头已停止', 'success');
+      if (img) { delete img.dataset.liveSrc; img.src = ''; }
+      window.dispatchEvent(new CustomEvent('elf2:camera-preview-stop'));
+      showToast('摄像头采集服务已停止', 'success');
       loadCameraStatus();
     } catch (e) { showToast(e.message, 'error'); }
   }
@@ -1402,6 +1434,7 @@
       loop_max_mb: parseInt($('#camera-loop-max-mb')?.value || '2048', 10),
       loop_max_files: parseInt($('#camera-loop-max-files')?.value || '100', 10),
       storage_max_mb: parseInt($('#camera-storage-max-mb')?.value || '8192', 10),
+      loop_autostart: !!$('#camera-loop-autostart')?.checked,
       rtmp_url: $('#camera-rtmp-url')?.value || '',
       osd: {
         enabled: !!$('#camera-osd-enabled')?.checked,
@@ -1470,8 +1503,41 @@
     } catch (e) { /* ignore */ }
   }
 
+  async function loadThRealtime() {
+    try {
+      const d = await apiFetch('/api/weather/th');
+      const r = d.realtime || {};
+      const s = d.today || {};
+      if ($('#th-temperature')) {
+        $('#th-temperature').innerHTML = `${r.th_temperature ?? '--'} <span style="font-size:16px">°C</span>`;
+      }
+      if ($('#th-humidity')) {
+        $('#th-humidity').textContent = `湿度 ${r.th_humidity ?? '--'} %RH · 更新 ${r.th_last_ts || '--'}`;
+      }
+      if ($('#th-status')) {
+        let text;
+        if (!r.th_enabled) text = '未启用（在「设置与电压校准 → 温湿度变送器」中启用）';
+        else if (r.th_last_error) text = `采集异常：${r.th_last_error}`;
+        else if (r.th_last_ok) text = `采集正常 · 错误 ${r.th_error_count || 0} 次`;
+        else text = '等待数据（传感器未接线时正常）';
+        $('#th-status').textContent = text;
+        $('#th-status').className = 'sub ' + (r.th_last_error ? 'text-error' : 'muted');
+      }
+      const fmt = (v) => (v == null || v === '') ? '--' : `${v}`;
+      if ($('#th-temp-range')) $('#th-temp-range').textContent = `${fmt(s.temp_min)} ~ ${fmt(s.temp_max)} °C`;
+      if ($('#th-temp-avg')) $('#th-temp-avg').textContent = `${fmt(s.temp_avg)} °C`;
+      if ($('#th-humi-range')) $('#th-humi-range').textContent = `${fmt(s.humi_min)} ~ ${fmt(s.humi_max)} %RH`;
+      if ($('#th-humi-avg')) $('#th-humi-avg').textContent = `${fmt(s.humi_avg)} %RH`;
+      if ($('#th-count')) $('#th-count').textContent = s.count ?? '--';
+      if ($('#th-date-label')) $('#th-date-label').textContent = weatherDate();
+    } catch (e) {
+      if ($('#th-status')) $('#th-status').textContent = '温湿度接口异常：' + e.message;
+    }
+  }
+
   async function loadWeather() {
-    await Promise.all([loadWeatherRealtime(), loadWeatherDaily(), loadRainRealtime(), loadRainHourly()]);
+    await Promise.all([loadWeatherRealtime(), loadWeatherDaily(), loadRainRealtime(),
+                       loadRainHourly(), loadThRealtime()]);
   }
 
   async function queryWeatherHistory() {
@@ -1694,6 +1760,76 @@
   }
 
   // 传感器卡片实时状态（设置页友好显示：是否采集 / 当前值 / 最后成功 / 错误）
+  // ---------------- BUSY 接收诊断（设置/校准页） ----------------
+  async function pollBusyDiag() {
+    if (role !== 'admin') return;
+    const card = $('#busy-diag-card');
+    if (!card) return;
+    if (document.getElementById('tab-settings')?.classList.contains('active') === false) return;
+    try {
+      const d = await apiFetch('/api/busy/diag');
+      const b = d.busy || {};
+      const raw = b.sysfs_value;
+      if ($('#busy-polarity')) $('#busy-polarity').value = b.active_low ? '1' : '0';
+      if ($('#busy-diag-state')) {
+        const readable = !(raw === '' || raw == null || String(raw).startsWith('ERR'));
+        let txt;
+        if (!readable) txt = '引脚不可读：' + (b.error || 'GPIO 未导出');
+        else if (b.active) txt = `触发中（${b.on_for || 0}s）`;
+        else txt = '空闲（未收到信号）';
+        if (readable && b.active && (b.on_for || 0) > 120) {
+          txt += ' · 持续 >2 分钟，请核对极性或检查静噪是否常开';
+        }
+        $('#busy-diag-state').textContent = txt;
+      }
+      if ($('#busy-diag-live')) {
+        const dir = d.busy?.direction || '--';
+        $('#busy-diag-live').innerHTML = `
+          <div><span>GPIO</span><b>${b.gpio ?? 101}（${d.chip} line ${d.line}）</b></div>
+          <div><span>原始电平</span><b>${raw === '' || raw == null ? '--' : raw}</b></div>
+          <div><span>方向</span><b>${dir || '--'}</b></div>
+          <div><span>有效极性</span><b>${b.active_low ? '低有效' : '高有效'}</b></div>
+          <div><span>当前判定</span><b>${b.active ? '接收中' : '空闲'}</b></div>
+          <div><span>电平变化次数</span><b>${b.edges ?? 0}</b></div>
+          <div><span>累计触发</span><b>${b.count ?? 0} 次 / ${b.total ?? 0}s</b></div>
+          <div><span>最近变化</span><b>${b.idle_for ? Math.round(b.idle_for) + 's 前' : '--'}</b></div>
+          ${b.tx_conflict ? '<div><span>告警</span><b class="on">发射期间仍 BUSY，注意自激</b></div>' : ''}
+          ${b.error ? `<div><span>错误</span><b class="muted">${escapeHtml(String(b.error))}</b></div>` : ''}`;
+      }
+      if ($('#busy-diag-events')) {
+        const evs = (d.events || []).slice(-12).reverse();
+        $('#busy-diag-events').innerHTML = evs.length
+          ? evs.map((e) => `<span class="muted small">${escapeHtml(e.t)}.${String(e.ms ?? 0).padStart(3, '0')} ${escapeHtml(e.action)}${e.level == null ? '' : ' @' + e.level}</span>`).join('<br>')
+          : '<span class="muted small">暂无 BUSY 事件</span>';
+      }
+    } catch (e) { /* 静默 */ }
+  }
+
+  async function saveBusyPolarity() {
+    try {
+      const activeLow = ($('#busy-polarity')?.value || '1') === '1';
+      await apiFetch('/api/busy/polarity', {
+        method: 'POST', body: JSON.stringify({ active_low: activeLow }),
+      });
+      showToast('BUSY 极性已保存并立即生效', 'success');
+      pollBusyDiag();
+      updateRelayState();
+    } catch (e) { showToast(e.message, 'error'); }
+  }
+
+  async function readThNow() {
+    try {
+      const d = await apiFetch('/api/weather/th/read', { method: 'POST', body: '{}' });
+      const r = d.result || {};
+      showToast(`读取成功：${r.temperature ?? '--'} °C / ${r.humidity ?? '--'} %RH`, 'success');
+      loadThRealtime();
+      loadSensorStatus();
+    } catch (e) {
+      showToast('读取失败：' + e.message, 'error');
+      loadSensorStatus();
+    }
+  }
+
   async function loadSensorStatus() {
     if (role !== 'admin') return;
     try {
@@ -1729,6 +1865,30 @@
           : '状态：已停用';
       }
     } catch (e) { /* 忽略 */ }
+    try {
+      const t = await apiFetch('/api/weather/th');
+      const rt = t.realtime || {};
+      const el = $('#th-sensor-status');
+      const badge = $('#th-conn-badge');
+      const ok = rt.th_last_ok ? new Date(rt.th_last_ok * 1000).toLocaleTimeString('zh-CN') : '--';
+      if (el) {
+        if (!rt.th_enabled) {
+          el.textContent = '状态：未启用（保存设置并启用后开始轮询）';
+        } else {
+          el.textContent = `状态：已启用　温度 ${rt.th_temperature ?? '--'} °C　湿度 ${rt.th_humidity ?? '--'} %RH　` +
+            `最后成功 ${ok}　错误 ${rt.th_error_count || 0}` + (rt.th_last_error ? `（${rt.th_last_error}）` : '');
+        }
+      }
+      if (badge) {
+        if (!rt.th_enabled) {
+          badge.textContent = '未启用';
+        } else if (rt.th_last_ok) {
+          badge.textContent = '在线';
+        } else {
+          badge.textContent = rt.th_last_error ? '未接线/无响应' : '等待首次采集';
+        }
+      }
+    } catch (e) { /* 忽略 */ }
   }
 
   async function loadWeatherSettings() {
@@ -1750,6 +1910,14 @@
       if ($('#rain-register')) $('#rain-register').value = s.rain_register ?? 0;
       if ($('#rain-quantity')) $('#rain-quantity').value = s.rain_quantity ?? 1;
       if ($('#rain-scale')) $('#rain-scale').value = s.rain_scale ?? 0.1;
+      if ($('#th-enabled')) $('#th-enabled').value = s.th_enabled ? '1' : '0';
+      if ($('#th-slave')) $('#th-slave').value = s.th_slave ?? 3;
+      if ($('#th-function')) $('#th-function').value = String(s.th_function ?? 4);
+      if ($('#th-register')) $('#th-register').value = s.th_register ?? 1;
+      if ($('#th-quantity')) $('#th-quantity').value = s.th_quantity ?? 2;
+      if ($('#th-scale')) $('#th-scale').value = s.th_scale ?? 0.1;
+      if ($('#th-humi-scale')) $('#th-humi-scale').value = s.th_humi_scale ?? 0.1;
+      if ($('#th-temp-offset')) $('#th-temp-offset').value = s.th_temp_offset ?? 0;
     } catch (e) { /* ignore */ }
   }
 
@@ -1773,6 +1941,14 @@
       rain_quantity: parseInt($('#rain-quantity')?.value || '1', 10),
       rain_scale: parseFloat($('#rain-scale')?.value || '0.1'),
       rain_cumulative: true,
+      th_enabled: ($('#th-enabled')?.value || '1') === '1',
+      th_slave: parseInt($('#th-slave')?.value || '3', 10),
+      th_function: parseInt($('#th-function')?.value || '4', 10),
+      th_register: parseInt($('#th-register')?.value || '1', 10),
+      th_quantity: parseInt($('#th-quantity')?.value || '2', 10),
+      th_scale: parseFloat($('#th-scale')?.value || '0.1'),
+      th_humi_scale: parseFloat($('#th-humi-scale')?.value || '0.1'),
+      th_temp_offset: parseFloat($('#th-temp-offset')?.value || '0'),
     };
     try {
       await apiFetch('/api/weather/settings', { method: 'POST', body: JSON.stringify(body) });
@@ -2259,20 +2435,41 @@
           el.classList.add('muted');
         }
       }
+      // BUSY：控制板 BUSY 经光耦输入 GPIO3_A5（全局 GPIO 101），低有效
+      const bz = d.busy || {};
       const b = $('#relay-busy');
       if (b) {
         b.classList.remove('on', 'rec');
-        if (voiceActive) {
-          b.textContent = '本地录音中（语音输入）';
-          b.classList.add('rec');
-          b.classList.remove('muted');
-        } else if (p.high) {
-          b.textContent = '发射占用';
+        const raw = bz.sysfs_value;
+        if (raw === '' || raw == null || String(raw).startsWith('ERR')) {
+          b.textContent = bz.exported === false ? '引脚不可读' : '未接入';
+          b.classList.add('muted');
+        } else if (bz.active) {
+          b.textContent = bz.tx_conflict
+            ? `BUSY 接收中（${bz.on_for || 0}s，发射期间仍 BUSY，注意自激）`
+            : `BUSY 接收中（${bz.on_for || 0}s）`;
           b.classList.add('on');
           b.classList.remove('muted');
         } else {
-          b.textContent = '空闲';
+          b.textContent = `BUSY 空闲（GPIO${bz.gpio ?? 101} 电平 ${raw}${bz.count ? '，累计触发 ' + bz.count + ' 次' : ''}）`;
           b.classList.add('muted');
+        }
+      }
+      // 本地录音 / 发射占用（与 GPIO BUSY 无关的本机状态）
+      const lb = $('#relay-busy-local');
+      if (lb) {
+        lb.classList.remove('on', 'rec');
+        if (voiceActive) {
+          lb.textContent = '本地录音中（语音输入）';
+          lb.classList.add('rec');
+          lb.classList.remove('muted');
+        } else if (p.high) {
+          lb.textContent = '发射占用';
+          lb.classList.add('on');
+          lb.classList.remove('muted');
+        } else {
+          lb.textContent = '空闲';
+          lb.classList.add('muted');
         }
       }
     } catch (e) { /* 忽略 */ }
@@ -2356,6 +2553,12 @@
     $('#btn-weather-export')?.addEventListener('click', exportWeatherCsv);
     $('#weather-sample-interval')?.addEventListener('change', loadWeatherDaily);
     $('#btn-weather-settings-save')?.addEventListener('click', saveWeatherSettings);
+    $('#btn-th-settings-save')?.addEventListener('click', saveWeatherSettings);
+    $('#btn-th-read-now')?.addEventListener('click', readThNow);
+    $('#btn-busy-polarity-save')?.addEventListener('click', saveBusyPolarity);
+    $('#btn-busy-refresh')?.addEventListener('click', pollBusyDiag);
+    $('#btn-camera-service-start')?.addEventListener('click', cameraServiceStart);
+    $('#btn-camera-service-stop')?.addEventListener('click', cameraServiceStop);
     $('#btn-wind-settings-save')?.addEventListener('click', saveWeatherSettings);
     $('#btn-rain-settings-save')?.addEventListener('click', saveWeatherSettings);
     $('#weather-date')?.addEventListener('change', loadWeatherDaily);
@@ -2488,6 +2691,8 @@
     setInterval(loadWeatherRealtime, 2000);
     setInterval(loadWeatherDaily, 10000);
     setInterval(loadRainRealtime, 2000);
+    setInterval(loadThRealtime, 5000);
+    setInterval(pollBusyDiag, 2000);
     setInterval(loadRainHourly, 10000);
   });
 })();

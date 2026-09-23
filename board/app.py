@@ -184,6 +184,196 @@ def _ptt_event(action, reason=''):
     except Exception:
         pass
 
+
+# ---------------------------------------------------------------------------
+# BUSY 输入检测：GPIO3_A5 -> Linux 全局 GPIO 101（gpiochip3 base 96 + A5=5）
+# 控制板 BUSY 经光耦/分压后输入 ELF2（本模块只读不写）。极性由设置项
+# busy_active_low 决定（默认 0=高有效，与 2026-09-23 实测空闲电平 0 一致），
+# 可在「设置与电压校准 → BUSY 接收状态」里一键切换。功能：
+#   1) 总览页「中继状态」实时显示 BUSY 接收状态；
+#   2) 与 PTT 组合判断「自己正在发射却仍然 BUSY」的自激/串音风险；
+#   3) 记录电平沿与触发时长，便于硬件排查（/api/busy/diag）。
+# 注意：3.3V 数字输入判据为 VIL≈0.99V / VIH≈2.31V。触发时若电平停在
+#       1.0~2.3V 之间属于「不确定区」，sysfs 读数不可靠；/api/busy/status
+#       的 edges（电平变化次数）与 sysfs_value（原始电平）用来判断接线是否有效。
+# ---------------------------------------------------------------------------
+BUSY_GPIO_NUM = int(os.environ.get('RELAY_BUSY_GPIO', '101') or 101)
+BUSY_ACTIVE_LOW = os.environ.get('RELAY_BUSY_ACTIVE_LOW', '0') not in ('0', 'false', 'False', 'no', 'off')
+BUSY_GPIO_DIR = Path(f'/sys/class/gpio/gpio{BUSY_GPIO_NUM}')
+BUSY_POLL = float(os.environ.get('RELAY_BUSY_POLL', '0.25') or 0.25)
+BUSY_EVENTS = deque(maxlen=300)
+BUSY_LOCK = threading.Lock()
+BUSY_STATE = {
+    'level': None,        # sysfs 原始电平 0/1，None = 尚未读到
+    'active': False,      # 是否处于「BUSY 触发（收到信号）」
+    'since': 0.0,         # 本次触发开始时间
+    'last_change': 0.0,   # 最近一次电平变化时间
+    'edges': 0,           # 原始电平变化次数（判断引脚有没有真的动）
+    'count': 0,           # 触发次数（未触发 -> 触发）
+    'total': 0.0,         # 累计触发时长（秒）
+    'exported': False,    # GPIO 是否已导出为输入
+    'tx_conflict': False,  # 发射期间仍 BUSY
+    'error': '',
+}
+
+
+def _busy_sysfs_read(name):
+    try:
+        p = BUSY_GPIO_DIR / name
+        return p.read_text(encoding='utf-8').strip() if p.exists() else ''
+    except Exception as e:
+        return f'ERR:{type(e).__name__}'
+
+
+def _busy_export():
+    '''确保 BUSY GPIO 已导出为输入。
+
+    正常由 elf2-ptt-gpio.service 开机完成（root 导出 + chown elf），
+    这里只是兜底：进程若以 root 运行也能自愈。
+    '''
+    try:
+        if not BUSY_GPIO_DIR.exists():
+            with open('/sys/class/gpio/export', 'w') as f:
+                f.write(str(BUSY_GPIO_NUM))
+            time.sleep(0.2)
+        ok = BUSY_GPIO_DIR.exists()
+        if ok:
+            try:
+                (BUSY_GPIO_DIR / 'direction').write_text('in', encoding='utf-8')
+            except Exception:
+                pass
+        with BUSY_LOCK:
+            BUSY_STATE['exported'] = bool(ok)
+            if ok:
+                BUSY_STATE['error'] = ''
+            else:
+                BUSY_STATE['error'] = f'GPIO {BUSY_GPIO_NUM} 未导出（可能是权限或引脚被占用）'
+        return bool(ok)
+    except Exception as e:
+        with BUSY_LOCK:
+            BUSY_STATE['exported'] = False
+            BUSY_STATE['error'] = f'导出失败: {type(e).__name__}: {e}'
+        return False
+
+
+def _busy_read_level():
+    try:
+        return int((BUSY_GPIO_DIR / 'value').read_text(encoding='utf-8').strip())
+    except Exception as e:
+        with BUSY_LOCK:
+            BUSY_STATE['error'] = f'读取失败: {type(e).__name__}'
+        return None
+
+
+def _busy_active_low():
+    '''BUSY 有效极性：环境变量优先，其次读设置项（默认低有效）。'''
+    env = os.environ.get('RELAY_BUSY_ACTIVE_LOW')
+    if env is not None:
+        return env not in ('0', 'false', 'False', 'no', 'off')
+    try:
+        return _setting_direct('busy_active_low', '0') not in ('0', 'false', 'False', 'no', 'off')
+    except Exception:
+        return True
+
+
+def _busy_active_from_level(level):
+    if level is None:
+        return False
+    return (level == 0) if _busy_active_low() else (level == 1)
+
+
+def _busy_event(action, level=None, extra=''):
+    try:
+        BUSY_EVENTS.append({
+            't': time.strftime('%H:%M:%S'),
+            'ms': int((time.time() % 1) * 1000),
+            'action': action,
+            'level': level,
+            'extra': str(extra)[:60],
+        })
+    except Exception:
+        pass
+
+
+def _busy_watchdog():
+    '''常驻线程：轮询 BUSY 引脚，记录触发沿、时长与事件。'''
+    _busy_export()
+    while True:
+        try:
+            level = _busy_read_level()
+            if level is None:
+                _busy_export()
+            else:
+                now = time.time()
+                active = _busy_active_from_level(level)
+                with BUSY_LOCK:
+                    prev = BUSY_STATE['level']
+                    if prev != level:
+                        BUSY_STATE['edges'] = int(BUSY_STATE.get('edges') or 0) + 1
+                        BUSY_STATE['last_change'] = now
+                        BUSY_STATE['level'] = level
+                        if prev is not None:
+                            _busy_event('level-change', level)
+                    was_active = bool(BUSY_STATE['active'])
+                    BUSY_STATE['active'] = active
+                    if active and not was_active:
+                        BUSY_STATE['since'] = now
+                        BUSY_STATE['count'] = int(BUSY_STATE.get('count') or 0) + 1
+                        _busy_event('busy-on', level)
+                    elif was_active and not active:
+                        if BUSY_STATE.get('since'):
+                            BUSY_STATE['total'] = float(BUSY_STATE.get('total') or 0.0) + (now - float(BUSY_STATE['since']))
+                        BUSY_STATE['since'] = 0.0
+                        _busy_event('busy-off', level)
+                    BUSY_STATE['tx_conflict'] = bool(active and PTT_LEVEL)
+                    BUSY_STATE['error'] = ''
+        except Exception as e:
+            with BUSY_LOCK:
+                BUSY_STATE['error'] = f'{type(e).__name__}: {e}'
+        time.sleep(max(0.05, BUSY_POLL))
+
+
+def busy_status():
+    '''总览页「BUSY 接收状态」数据源。'''
+    with BUSY_LOCK:
+        st = dict(BUSY_STATE)
+    now = time.time()
+    st.update({
+        'gpio': BUSY_GPIO_NUM,
+        'chip': 'gpiochip3',
+        'line': 5,
+        'active_low': _busy_active_low(),
+        'sysfs': str(BUSY_GPIO_DIR),
+        'sysfs_value': _busy_sysfs_read('value'),
+        'direction': _busy_sysfs_read('direction'),
+        'on_for': round(now - float(st['since']), 1) if st.get('since') else 0,
+        'idle_for': round(now - float(st['last_change']), 1) if st.get('last_change') else 0,
+        'total': round(float(st.get('total') or 0.0), 1),
+        'tx_conflict': bool(st.get('tx_conflict')),
+    })
+    return st
+
+
+def busy_diag():
+    '''BUSY 链路自检（硬件排查：引脚有没有电平变化、光耦是否真的拉低）。'''
+    st = busy_status()
+    level = _busy_read_level()
+    return {
+        'busy': st,
+        'gpio_num': BUSY_GPIO_NUM,
+        'chip': 'gpiochip3',
+        'line': 5,
+        'active_low': _busy_active_low(),
+        'poll': BUSY_POLL,
+        'raw_level': level,
+        'hint': ('引脚电平始终为 1 且 edges=0：要么 BUSY 没触发，要么光耦未把电平拉到数字低门限'
+                 '（3.3V 系统 VIL≈0.99V）。可加对地下拉/提高光耦驱动电流后重测。'),
+        'events': list(BUSY_EVENTS)[-60:],
+    }
+
+
+threading.Thread(target=_busy_watchdog, daemon=True).start()
+
 # ---------------------------------------------------------------------------
 # Flask 应用
 # ---------------------------------------------------------------------------
@@ -315,6 +505,7 @@ def _set_default_settings(db):
         'camera_loop_max_mb': '2048',
         'camera_loop_max_files': '100',
         'camera_storage_max_mb': '8192',
+        'camera_loop_autostart': '1',
         'camera_rtmp_url': '',
         # 气象 RS485 / Modbus RTU
         'weather_enabled': '1',
@@ -337,6 +528,20 @@ def _set_default_settings(db):
         'rain_quantity': '1',
         'rain_scale': '0.1',
         'rain_cumulative': '1',
+        # 温湿度变送器（Modbus RTU 9600 8N1，从站地址 03；2026-09 起预留，未接线）
+        'th_enabled': '0',
+        'th_slave': '3',
+        'th_function': '4',
+        'th_register': '1',
+        'th_quantity': '2',
+        'th_scale': '0.1',
+        'th_humi_scale': '0.1',
+        'th_temp_offset': '0.0',
+        # BUSY 输入极性：1=低有效（触发时引脚被拉低），0=高有效（触发时引脚被拉高）
+        # 2026-09-23 实测：未触发时引脚电平为 0（3.3V 数字输入判为低），
+        # 因此默认按「高有效」判定，即触发时引脚被拉到约 2.7V（>VIH 2.31V）判为接收中。
+        # 若实际是「触发拉低」的接法，在 设置与电压校准 → BUSY 接收状态 里一键切换。
+        'busy_active_low': '0',
         # TTS（仅本地 Piper 离线模型，外部 OpenAI 兼容 TTS 已下线）
         'tts_provider': 'local',
         'tts_local_voice': 'zh_CN-huayan-medium',
@@ -781,6 +986,7 @@ def api_status():
         voltages=voltage_payload(),
         llm={'provider': get_setting('llm_provider', 'local')},
         ptt=ptt_status(),
+        busy=busy_status(),
         voice={'asr_enabled': _setting_direct('asr_enabled', '1') in ('1', 'true', 'True', 'on')},
     )
 
@@ -1040,6 +1246,12 @@ def _prompt_vars():
     try:
         day = datetime.now().strftime('%Y-%m-%d')
         v['rain_today'] = weather_service_instance.rain_stats(day).get('total_mm')
+    except Exception:
+        pass
+    try:
+        _wst = weather_service_instance.realtime()
+        v['temperature'] = _wst.get('th_temperature')
+        v['humidity'] = _wst.get('th_humidity')
     except Exception:
         pass
     return v
@@ -2387,7 +2599,7 @@ def api_intercom_status():
 @app.route('/api/ptt/status')
 @login_required
 def api_ptt_status():
-    return api_ok(ptt=ptt_status())
+    return api_ok(ptt=ptt_status(), busy=busy_status())
 
 
 @app.route('/api/ptt/diag')
@@ -2395,6 +2607,37 @@ def api_ptt_status():
 def api_ptt_diag():
     """PTT 全链路自检信息（设置/校准页展示，硬件排查用）。"""
     return api_ok(**ptt_diag())
+
+
+@app.route('/api/busy/status')
+@login_required
+def api_busy_status():
+    """BUSY 接收状态（GPIO3_A5 / 全局 GPIO 101，低有效）。"""
+    return api_ok(busy=busy_status())
+
+
+@app.route('/api/busy/diag')
+@login_required
+def api_busy_diag():
+    """BUSY 链路自检：原始电平、电平沿计数、触发事件。"""
+    return api_ok(**busy_diag())
+
+
+@app.route('/api/busy/polarity', methods=['POST'])
+@login_required
+@admin_required
+def api_busy_polarity():
+    """设置 BUSY 有效极性（1=低有效 / 0=高有效），立即生效并重新判定当前状态。"""
+    data = request.get_json(silent=True) or {}
+    if 'active_low' not in data:
+        return api_err('缺少 active_low 参数')
+    val = '1' if data['active_low'] in (True, '1', 1, 'true', 'on') else '0'
+    set_setting('busy_active_low', val)
+    with BUSY_LOCK:
+        BUSY_STATE['active'] = _busy_active_from_level(BUSY_STATE.get('level'))
+        BUSY_STATE['since'] = time.time() if BUSY_STATE['active'] else 0.0
+    audit('busy_polarity', f'active_low={val}')
+    return api_ok(busy=busy_status())
 
 
 @app.route('/api/ptt/manual', methods=['POST'])
@@ -3213,6 +3456,7 @@ def _camera_cfg():
         'loop_max_mb': int(float(get_setting('camera_loop_max_mb', '2048') or 2048)),
         'loop_max_files': int(float(get_setting('camera_loop_max_files', '100') or 100)),
         'storage_max_mb': int(float(get_setting('camera_storage_max_mb', '8192') or 8192)),
+        'loop_autostart': bool_setting('camera_loop_autostart', True),
         'rtmp_url': get_setting('camera_rtmp_url', ''),
     }
 
@@ -3232,6 +3476,86 @@ def _camera_record_dir():
     d = Path(_camera_cfg()['record_dir'])
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# ---------------------------------------------------------------------------
+# 循环录像：开机自动启用 + 意外退出自愈
+# 摄像头的核心业务是「常年循环录像」，实时预览只是旁路观察，因此：
+#   * 开机（relay-web 启动）后自动拉起 采集 + 循环分段录像 + 容量清理线程；
+#   * 每 30s 检查一次，录像进程意外退出会自动重新拉起；
+#   * 用户在页面上手动点「停止循环录像」后，本次运行内不再自动拉起（重启恢复）。
+# 环境变量：RELAY_CAM_AUTOSTART_DELAY 开机延迟秒数（默认 8s，等摄像头枚举完成）
+# ---------------------------------------------------------------------------
+CAM_LOOP_MANUAL_STOP = False
+CAM_LOOP_WATCH_LOCK = threading.Lock()
+
+
+def _cam_loop_running():
+    try:
+        st = camera_service.camera_service.status()
+    except Exception:
+        return False
+    return bool(st.get('recording')) and str(st.get('recording_label') or '') == 'loop'
+
+
+def _cam_loop_output(cfg):
+    d = _camera_record_dir()
+    seconds = max(5, int(cfg['loop_seconds']))
+    pattern = str(d / 'loop_%Y%m%d_%H%M%S.mp4')
+    out = ['-f', 'segment', '-segment_time', str(seconds), '-reset_timestamps', '1',
+           '-strftime', '1', pattern]
+    return out, seconds, d
+
+
+def _cam_loop_ensure(reason='autostart'):
+    '''确保采集进程 + 循环录像 + 清理线程都在运行。'''
+    global CAM_LOOP_MANUAL_STOP
+    with CAM_LOOP_WATCH_LOCK:
+        if CAM_LOOP_MANUAL_STOP:
+            return False, '用户已手动停止循环录像，跳过自愈'
+        cfg = _camera_cfg()
+        svc = camera_service.camera_service
+        if not svc.status().get('running'):
+            ok, msg = svc.start(cfg)
+            if not ok:
+                return False, msg
+        out, seconds, d = _cam_loop_output(cfg)
+        if not _cam_loop_running():
+            ok, msg = svc.start_recording(cfg, out, camera_service.osd_filter(_camera_osd_cfg()), 'loop')
+            if not ok:
+                return False, msg
+            print(f'[CAM] 循环录像已启动（{reason}，分段 {seconds}s）', flush=True)
+            try:
+                audit('camera_loop_start', f'{reason} segment={seconds}s')
+            except Exception:
+                pass
+        svc.start_loop_cleaner(str(d), cfg['loop_max_mb'], cfg['loop_max_files'], cfg['storage_max_mb'])
+        return True, 'running'
+
+
+def _camera_autostart_worker():
+    '''开机自动循环录像 + 掉线自愈。'''
+    try:
+        time.sleep(float(os.environ.get('RELAY_CAM_AUTOSTART_DELAY', '8') or 8))
+    except Exception:
+        time.sleep(8)
+    fails = 0
+    while True:
+        try:
+            if bool_setting('camera_loop_autostart', True):
+                ok, msg = _cam_loop_ensure('boot' if fails == 0 else 'heal')
+                if not ok:
+                    fails += 1
+                    if fails <= 3 or fails % 20 == 0:
+                        print(f'[CAM] 自动循环录像失败：{msg}', flush=True)
+                else:
+                    fails = 0
+        except Exception as e:
+            print(f'[CAM] 自动循环录像异常: {type(e).__name__}: {e}', flush=True)
+        time.sleep(30)
+
+
+threading.Thread(target=_camera_autostart_worker, daemon=True).start()
 
 
 def _camera_stream_generator(q):
@@ -3558,6 +3882,9 @@ def api_camera_status():
         recordings_dir=str(_camera_record_dir()),
         recordings=recs[:200],
         storage=_camera_storage_stats(recs),
+        loop_running=_cam_loop_running(),
+        loop_autostart=bool_setting('camera_loop_autostart', True),
+        loop_manual_stop=bool(CAM_LOOP_MANUAL_STOP),
     )
 
 
@@ -3577,6 +3904,8 @@ def api_camera_stop():
     camera_service.camera_service.stop_rtmp()
     camera_service.camera_service.stop_loop_cleaner()
     camera_service.camera_service.stop()
+    global CAM_LOOP_MANUAL_STOP
+    CAM_LOOP_MANUAL_STOP = True
     return api_ok(message='stopped')
 
 
@@ -3636,6 +3965,9 @@ def api_camera_settings_set():
     for k, sk in mapping.items():
         if k in data:
             set_setting(sk, data[k])
+    if 'loop_autostart' in data:
+        set_setting('camera_loop_autostart',
+                    '1' if data['loop_autostart'] in (True, '1', 'true', 'on', 1) else '0')
     osd = data.get('osd') or {}
     for k, sk in {
         'enabled': 'camera_osd_enabled',
@@ -3655,6 +3987,12 @@ def api_camera_settings_set():
         svc.stop_loop_cleaner()
         svc.stop()
         camera_service.camera_service.start(_camera_cfg())
+    # 改完参数后立刻恢复循环录像（原来要等 30s 自愈线程，会丢一段录像）
+    if bool_setting('camera_loop_autostart', True):
+        try:
+            _cam_loop_ensure('settings-saved')
+        except Exception:
+            pass
     return api_ok(settings=_camera_cfg(), osd=_camera_osd_cfg())
 
 
@@ -3703,24 +4041,26 @@ def api_camera_manual_stop():
 @app.route('/api/camera/loop/start', methods=['POST'])
 @login_required
 def api_camera_loop_start():
+    global CAM_LOOP_MANUAL_STOP
+    CAM_LOOP_MANUAL_STOP = False
     cfg = _camera_cfg()
-    d = _camera_record_dir()
-    seconds = max(5, int(cfg['loop_seconds']))
-    pattern = str(d / 'loop_%Y%m%d_%H%M%S.mp4')
-    out = ['-f', 'segment', '-segment_time', str(seconds), '-reset_timestamps', '1',
-           '-strftime', '1', pattern]
+    out, seconds, d = _cam_loop_output(cfg)
     ok, msg = camera_service.camera_service.start_recording(
         cfg, out, camera_service.osd_filter(_camera_osd_cfg()), 'loop')
     if not ok:
         return api_err(msg, 500)
     camera_service.camera_service.start_loop_cleaner(
         str(d), cfg['loop_max_mb'], cfg['loop_max_files'], cfg['storage_max_mb'])
+    audit('camera_loop_start', f'manual segment={seconds}s')
     return api_ok(message='loop recording started', segment_seconds=seconds)
 
 
 @app.route('/api/camera/loop/stop', methods=['POST'])
 @login_required
 def api_camera_loop_stop():
+    global CAM_LOOP_MANUAL_STOP
+    CAM_LOOP_MANUAL_STOP = True
+    audit('camera_loop_stop', 'manual')
     ok, msg = camera_service.camera_service.stop_recording()
     camera_service.camera_service.stop_loop_cleaner()
     return api_ok(message=msg, recordings=_camera_list_recordings())
@@ -3937,7 +4277,53 @@ def _weather_settings():
         'rain_quantity': int(float(_setting_direct('rain_quantity', '1') or 1)),
         'rain_scale': float(_setting_direct('rain_scale', '0.1') or 0.1),
         'rain_cumulative': _setting_direct('rain_cumulative', '1') in ('1', 'true', 'True', 'on'),
+        'th_enabled': _setting_direct('th_enabled', '0') in ('1', 'true', 'True', 'on'),
+        'th_slave': int(float(_setting_direct('th_slave', '3') or 3)),
+        'th_function': int(float(_setting_direct('th_function', '4') or 4)),
+        'th_register': int(float(_setting_direct('th_register', '1') or 1)),
+        'th_quantity': int(float(_setting_direct('th_quantity', '2') or 2)),
+        'th_scale': float(_setting_direct('th_scale', '0.1') or 0.1),
+        'th_humi_scale': float(_setting_direct('th_humi_scale', '0.1') or 0.1),
+        'th_temp_offset': float(_setting_direct('th_temp_offset', '0.0') or 0.0),
     }
+
+
+@app.route('/api/weather/th')
+@login_required
+def api_weather_th():
+    '''温湿度变送器实时值 + 当日统计（从站 03，暂未接线时返回错误信息）。'''
+    st = weather_service_instance.realtime()
+    day = datetime.now().strftime('%Y-%m-%d')
+    try:
+        stats = weather_service_instance.th_stats(day)
+    except Exception as e:
+        stats = {'error': str(e)}
+    return api_ok(realtime=st, settings=_weather_settings(), today=stats,
+                  key='th_temperature')
+
+
+@app.route('/api/weather/th/history')
+@login_required
+def api_weather_th_history():
+    date_str = request.args.get('date') or datetime.now().strftime('%Y-%m-%d')
+    try:
+        points = weather_service_instance.th_history(date_str)
+        stats = weather_service_instance.th_stats(date_str)
+    except Exception as e:
+        return api_err(f'查询失败: {e}', 500)
+    return api_ok(date=date_str, points=points, stats=stats)
+
+
+@app.route('/api/weather/th/read', methods=['POST'])
+@login_required
+@admin_required
+def api_weather_th_read():
+    '''立即读取一次温湿度（调试用，未接线时会报 Modbus 超时）。'''
+    try:
+        result = weather_service_instance.read_th_once(_weather_settings())
+    except Exception as e:
+        return api_err(str(e), 502)
+    return api_ok(result=result, realtime=weather_service_instance.realtime())
 
 
 @app.route('/api/weather/realtime')
@@ -4089,6 +4475,14 @@ def api_weather_settings_set():
         'rain_quantity': ('rain_quantity', str),
         'rain_scale': ('rain_scale', str),
         'rain_cumulative': ('rain_cumulative', lambda v: '1' if v in (True, '1', 'true', 'on') else '0'),
+        'th_enabled': ('th_enabled', lambda v: '1' if v in (True, '1', 'true', 'on') else '0'),
+        'th_slave': ('th_slave', str),
+        'th_function': ('th_function', str),
+        'th_register': ('th_register', str),
+        'th_quantity': ('th_quantity', str),
+        'th_scale': ('th_scale', str),
+        'th_humi_scale': ('th_humi_scale', str),
+        'th_temp_offset': ('th_temp_offset', str),
     }
     for k, (sk, caster) in mapping.items():
         if k in data:
@@ -4103,6 +4497,10 @@ def api_weather_settings_set():
         'rain_function': cfg['rain_function'], 'rain_register': cfg['rain_register'],
         'rain_quantity': cfg['rain_quantity'], 'rain_scale': cfg['rain_scale'],
         'rain_cumulative': cfg['rain_cumulative'],
+        'th_enabled': cfg['th_enabled'], 'th_slave': cfg['th_slave'],
+        'th_function': cfg['th_function'], 'th_register': cfg['th_register'],
+        'th_quantity': cfg['th_quantity'], 'th_scale': cfg['th_scale'],
+        'th_humi_scale': cfg['th_humi_scale'], 'th_temp_offset': cfg['th_temp_offset'],
     })
     if cfg['enabled']:
         if not weather_service_instance.realtime().get('running'):
@@ -4172,5 +4570,6 @@ if __name__ == '__main__':
             weather_service_instance.start(cfg)
     except Exception:
         pass
+    # 循环录像守护线程已在模块加载时启动（见 _camera_autostart_worker）
     app.run(host='0.0.0.0', port=int(os.environ.get('RELAY_WEB_PORT', '8080')),
             debug=False, threaded=True)

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ site_title or 'ELF2 智能中继控制中心' }}{% endblock %}
 {% block head_extra %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/camera-modern.css', v='20260915g') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/camera-modern.css', v='20260923a') }}">
 <style>
   .msg.tool { font-size: 12px; color: var(--muted); border-left: 3px solid #4a6cf7;
               padding: 4px 0 4px 8px; margin: 4px 0; white-space: pre-wrap; word-break: break-all; }
@@ -58,7 +58,8 @@
       <div class="kv-list">
         <div><span>频段/信道</span><b>预留</b></div>
         <div><span>PTT</span><b class="muted" id="relay-ptt" title="GPIO3_A1（全局 GPIO 97）拉高即 PTT 使能">--</b></div>
-        <div><span>BUSY</span><b class="muted" id="relay-busy" title="本地录音 / 发射占用">--</b></div>
+        <div><span>BUSY</span><b class="muted" id="relay-busy" title="GPIO3_A5（全局 GPIO 101）：控制板 BUSY 经光耦输入，触发时引脚被拉低（低有效）">--</b></div>
+        <div><span>本地录音</span><b class="muted" id="relay-busy-local" title="网页语音输入 / 对讲录音状态">--</b></div>
         <div><span>运行时间</span><b id="uptime">--</b></div>
       </div>
     </div>
@@ -234,45 +235,34 @@
   </div>
 
   <div class="cam-top-grid">
-    <div class="card cam-preview-card">
-      <div class="camera-view">
-        <img id="camera-preview" alt="摄像头预览" src="">
-        <div id="camera-osd" class="camera-osd"></div>
+    <div class="card">
+      <div class="card-title">录像控制 <span class="cam-chip" id="cam-loop-auto-badge" title="开机自动循环录像开关">自动 --</span></div>
+      <div class="cam-btn-row">
+        <span class="cam-tag">循环</span>
+        <button class="btn primary" id="btn-camera-loop-start" title="开始循环录像">开始</button>
+        <button class="btn ghost" id="btn-camera-loop-stop" title="暂停循环录像（本次运行内不再自动拉起，重启后恢复）">停止</button>
       </div>
-      <div class="cam-actions">
-        <button class="btn primary" id="btn-camera-start">开始预览</button>
-        <button class="btn ghost" id="btn-camera-stop">停止预览</button>
-        <button class="btn ghost" id="btn-camera-snapshot">抓拍</button>
+      <div class="cam-btn-row">
+        <span class="cam-tag">单次</span>
+        <button class="btn primary" id="btn-camera-manual-start" title="开始单独录像">开始</button>
+        <button class="btn ghost" id="btn-camera-manual-stop" title="停止单独录像并保存">停止并保存</button>
       </div>
+      <p class="muted small">循环录像<strong>开机自动启用</strong>，按分段时长滚动、超容量自动覆盖最早分片；手动「停止」仅本次运行生效，重启后恢复自动。参数在下方「高级设置」中调整。</p>
     </div>
-
-    <div class="cam-top-side">
-      <div class="card">
-        <div class="card-title">录像</div>
-        <div class="cam-btn-row">
-          <span class="cam-tag">循环</span>
-          <button class="btn primary" id="btn-camera-loop-start" title="开始循环录像">开始</button>
-          <button class="btn ghost" id="btn-camera-loop-stop" title="停止循环录像">停止</button>
-        </div>
-        <div class="cam-btn-row">
-          <span class="cam-tag">单次</span>
-          <button class="btn primary" id="btn-camera-manual-start" title="开始单独录像">开始</button>
-          <button class="btn ghost" id="btn-camera-manual-stop" title="停止单独录像并保存">停止并保存</button>
-        </div>
-        <p class="muted small">循环录像按分段时长滚动，超过容量上限自动覆盖最早分片；参数在下方「高级设置」中调整。</p>
-      </div>
-      <div class="card">
-        <div class="card-title">运行状态</div>
-        <div class="kv-list" id="camera-service-status"><span class="muted">--</span></div>
-      </div>
+    <div class="card">
+      <div class="card-title">运行状态</div>
+      <div class="kv-list" id="camera-service-status"><span class="muted">--</span></div>
     </div>
   </div>
 
   <div class="cam-console" id="cam-console">
     <div class="cam-console-head">
-      <div>
-        <h3>录像回放 / 分片管理</h3>
-        <p class="muted small">现代化 Hikvision 风格时间轴：拖动定位、分片续播、倍速回放、批量管理。</p>
+      <div class="row gap">
+        <h3>预览 / 回放 / 分片管理</h3>
+        <div class="cam-mode-switch" id="cam-mode-switch">
+          <button class="cam-mode-btn active" id="cam-mode-live" type="button" title="实时预览（MJPEG），不影响后台循环录像">实时预览</button>
+          <button class="cam-mode-btn" id="cam-mode-play" type="button" title="回放已录分片 / 时间轴定位">录像回放</button>
+        </div>
       </div>
       <div class="row gap">
         <span class="cam-chip" id="cam-console-date-badge">--</span>
@@ -285,6 +275,9 @@
       <div class="cam-player-panel">
         <div class="cam-player-wrap" id="cam-player-wrap">
           <video id="cam-modern-video" playsinline preload="metadata"></video>
+          <img id="camera-preview" class="cam-live-img" alt="实时预览" src="">
+          <div class="cam-live-badge" id="cam-live-badge"><span class="cam-live-dot" id="cam-live-dot"></span><span id="cam-live-text">实时预览未启动</span></div>
+          <div class="cam-live-busy" id="cam-live-busy" title="控制板 BUSY 接收状态（GPIO3_A5）">BUSY --</div>
           <div class="cam-player-empty" id="cam-player-empty">选择时间轴上的录像分片开始回放</div>
           <div class="cam-player-loading" id="cam-player-loading"><span></span><span></span><span></span></div>
           <div class="cam-player-osd" id="cam-player-osd">
@@ -292,7 +285,7 @@
             <div id="cam-player-state">已停止</div>
           </div>
         </div>
-        <div class="cam-controlbar">
+        <div class="cam-controlbar" id="cam-play-bar">
           <button class="cam-ctl" id="cam-btn-prev" title="上一分片">⏮</button>
           <button class="cam-ctl primary" id="cam-btn-play" title="播放 / 暂停">▶</button>
           <button class="cam-ctl" id="cam-btn-stop" title="停止">■</button>
@@ -314,6 +307,13 @@
           <button class="cam-ctl" id="cam-btn-download" title="下载当前分片">⬇</button>
           <button class="cam-ctl" id="cam-btn-fullscreen" title="全屏">⛶</button>
           <label class="checkline cam-check"><input type="checkbox" id="cam-auto-next" checked> 自动续播</label>
+        </div>
+        <div class="cam-controlbar cam-live-bar" id="cam-live-bar">
+          <button class="btn primary" id="btn-camera-start">启动预览</button>
+          <button class="btn ghost" id="btn-camera-stop">停止预览</button>
+          <button class="btn ghost" id="btn-camera-snapshot">抓拍</button>
+          <button class="btn ghost" id="cam-btn-live-fullscreen">全屏</button>
+          <span class="muted small" id="cam-live-hint">「停止预览」只断开网页画面，后台循环录像照常运行</span>
         </div>
       </div>
 
@@ -500,6 +500,10 @@
       <div><label>循环分段（秒）</label><input id="camera-loop-seconds" type="number" min="5"></div>
     </div>
     <div class="row gap mt">
+      <label class="checkline"><input type="checkbox" id="camera-loop-autostart"> 开机自动循环录像</label>
+      <span class="muted small">关闭后不自动拉起；页面手动「停止循环录像」也会暂停自愈，重启后按此开关恢复</span>
+    </div>
+    <div class="row gap mt">
       <label class="checkline"><input type="checkbox" id="camera-osd-enabled"> OSD 烧录到录像/推流</label>
       <label class="checkline"><input type="checkbox" id="camera-osd-show-time"> OSD 显示时间</label>
     </div>
@@ -524,6 +528,13 @@
     <div class="row gap">
       <button class="btn primary" id="btn-camera-rtmp-start">开始 RTMP 推流</button>
       <button class="btn ghost" id="btn-camera-rtmp-stop">停止推流</button>
+    </div>
+    <hr class="sep">
+    <div class="card-title">采集服务（维护用）</div>
+    <div class="row gap">
+      <button class="btn primary" id="btn-camera-service-start">启动采集服务</button>
+      <button class="btn ghost" id="btn-camera-service-stop">停止采集服务（含循环录像）</button>
+      <span class="muted small">停止后若「开机自动循环录像」为开，30 秒内会被自愈线程重新拉起</span>
     </div>
     <button class="btn primary mt" id="btn-camera-settings-save">保存摄像头设置</button>
     </div>
@@ -599,6 +610,25 @@
         <div><span>CSV 目录</span><b>/www/weather_csv/</b></div>
       </div>
       <p class="muted small">翻斗式雨量计与风力变送器共用 RS485 总线；采集成功后按日写入 rain_YYYY-MM-DD.csv，并同步 SQLite。</p>
+    </div>
+  </div>
+  <div class="grid grid-2 mt">
+    <div class="card">
+      <div class="card-title">实时温湿度（自动刷新）</div>
+      <div class="metric" id="th-temperature">-- <span style="font-size:16px">°C</span></div>
+      <div class="sub" id="th-humidity">湿度 -- %RH</div>
+      <div class="sub" id="th-status">等待数据</div>
+    </div>
+    <div class="card">
+      <div class="card-title">今日温湿度统计 <span class="muted small" id="th-date-label"></span></div>
+      <div class="kv-list">
+        <div><span>温度范围</span><b id="th-temp-range">--</b></div>
+        <div><span>平均温度</span><b id="th-temp-avg">--</b></div>
+        <div><span>湿度范围</span><b id="th-humi-range">--</b></div>
+        <div><span>平均湿度</span><b id="th-humi-avg">--</b></div>
+        <div><span>采样点数</span><b id="th-count">--</b></div>
+      </div>
+      <p class="muted small">温湿度变送器挂在同一条 RS485 总线（从站 03，9600 8N1，功能码 04）；采集按日写入 th_YYYY-MM-DD.csv 并同步 SQLite。</p>
     </div>
   </div>
   <div class="card mt">
@@ -725,6 +755,23 @@
       <div class="kv-list mt" id="ptt-diag-live"><span class="muted">--</span></div>
       <div class="mt" id="ptt-diag-events"><span class="muted small">暂无 PTT 事件</span></div>
       <p class="muted small">按住发射、松开即释放；3 秒无心跳或超过 30 秒自动松开。</p>
+    </div>
+    <div class="card" id="busy-diag-card">
+      <div class="card-title">BUSY 接收状态（GPIO3_A5 · 全局 GPIO 101 · 输入）</div>
+      <div class="row gap" style="align-items:center">
+        <select id="busy-polarity" class="cam-mini-select" title="BUSY 触发时的引脚电平">
+          <option value="1">低有效（触发时引脚拉低）</option>
+          <option value="0">高有效（触发时引脚拉高）</option>
+        </select>
+        <button class="btn ghost" id="btn-busy-polarity-save">保存极性</button>
+        <button class="btn ghost" id="btn-busy-refresh">刷新</button>
+        <span class="muted small" id="busy-diag-state">--</span>
+      </div>
+      <div class="kv-list mt" id="busy-diag-live"><span class="muted">--</span></div>
+      <div class="mt" id="busy-diag-events"><span class="muted small">暂无 BUSY 事件</span></div>
+      <p class="muted small">控制板 BUSY 经光耦输入；GPIO 侧建议 10k 上拉到 3.3V，触发时被光耦拉低。
+        注意 3.3V 数字输入的低电平判据 VIL≈0.99V，若触发时只能拉到约 2.7V 会被读成高电平，
+        需要加大光耦驱动电流或在 GPIO 侧加对地下拉。下方「原始电平 / 电平变化次数」可直接判断接线是否有效。</p>
     </div>
     <div class="card">
       <div class="card-title">系统全局音量</div>
@@ -878,6 +925,28 @@
       <div class="muted small mt" id="rain-sensor-status">状态：--</div>
     </div>
   </div>
+
+  <div class="card mt">
+    <div class="card-title">温湿度变送器（Modbus RTU · 9600 8N1 · 从站地址 03）<span class="cam-chip" id="th-conn-badge">未接线</span></div>
+    <div class="cal-row">
+      <div><label>启用</label><select id="th-enabled"><option value="0">停用</option><option value="1">启用</option></select></div>
+      <div><label>从站地址</label><input id="th-slave" type="number" value="3"></div>
+      <div><label>功能码</label><select id="th-function"><option value="4">04 输入寄存器</option><option value="3">03 保持寄存器</option></select></div>
+      <div><label>起始寄存器</label><input id="th-register" type="number" value="1"></div>
+    </div>
+    <div class="cal-row">
+      <div><label>读取数量</label><input id="th-quantity" type="number" value="2"></div>
+      <div><label>温度倍率 (°C/raw)</label><input id="th-scale" type="number" step="0.01" value="0.1"></div>
+      <div><label>湿度倍率 (%RH/raw)</label><input id="th-humi-scale" type="number" step="0.01" value="0.1"></div>
+      <div><label>温度偏移 (°C)</label><input id="th-temp-offset" type="number" step="0.1" value="0"></div>
+    </div>
+    <div class="row gap">
+      <button class="btn primary" id="btn-th-settings-save">保存温湿度设置</button>
+      <button class="btn ghost" id="btn-th-read-now">立即读取一次</button>
+    </div>
+    <p class="muted small">寄存器约定：起始寄存器为温度 raw（int16 有符号），下一个寄存器为湿度 raw（uint16），默认倍率 0.1。当前传感器暂未接线，启用后读取会返回 Modbus 超时，属正常现象。</p>
+    <div class="muted small mt" id="th-sensor-status">状态：--</div>
+  </div>
   <div class="card mt">
     <div class="card-title">修改当前用户密码</div>
     <div class="row gap">
@@ -891,5 +960,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/camera-modern.js', v='20260915h') }}"></script>
+<script src="{{ url_for('static', filename='js/camera-modern.js', v='20260923a') }}"></script>
 {% endblock %}

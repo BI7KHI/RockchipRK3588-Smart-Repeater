@@ -53,6 +53,13 @@
     els.laneManual = $('#cam-lane-manual');
     els.playhead = $('#cam-timeline-playhead');
     els.tooltip = $('#cam-timeline-tooltip');
+    els.consoleRoot = $('#cam-console');
+    els.modeLiveBtn = $('#cam-mode-live');
+    els.modePlayBtn = $('#cam-mode-play');
+    els.liveImg = $('#camera-preview');
+    els.liveBadge = $('#cam-live-badge');
+    els.liveText = $('#cam-live-text');
+    els.liveBusy = $('#cam-live-busy');
     els.video = $('#cam-modern-video');
     els.playerWrap = $('#cam-player-wrap');
     els.playerEmpty = $('#cam-player-empty');
@@ -634,6 +641,8 @@
 
   function loadSegment(seg, options = {}) {
     if (!seg || !els.video) return;
+    // 点时间轴/分片列表播放时自动从「实时预览」切到「录像回放」
+    if (isLiveMode()) setMode('play');
     const video = els.video;
     const same = state.current && state.current.filename === seg.filename;
     state.current = seg;
@@ -950,6 +959,104 @@
   // ------------------------------------------------------------------
   // 事件绑定
   // ------------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // 实时预览 / 录像回放 模式切换
+  // 实时预览不再单独占一张卡片，而是复用回放控制台的播放区：同一块区域，
+  // 由头部开关切换「实时画面（MJPEG）」与「录像分片回放」，减少页面冗余。
+  // 循环录像在后台始终运行，预览只是旁路观看，因此「停止预览」只断开画面。
+  // ------------------------------------------------------------------
+  const liveState = { mode: 'live', timer: null, retryTimer: null };
+
+  function isLiveMode() {
+    return liveState.mode === 'live';
+  }
+
+  function syncModeButtons() {
+    const root = els.consoleRoot || $('#cam-console');
+    const live = isLiveMode();
+    root?.classList.toggle('cam-mode-live', live);
+    els.modeLiveBtn?.classList.toggle('active', live);
+    els.modePlayBtn?.classList.toggle('active', !live);
+  }
+
+  function setMode(mode, options = {}) {
+    liveState.mode = mode === 'play' ? 'play' : 'live';
+    syncModeButtons();
+    if (isLiveMode()) {
+      if (!options.noAttach) startLivePreview();
+      pollBusy();
+    } else {
+      detachLivePreview();
+      updatePlayerState();
+    }
+  }
+
+  async function startLivePreview() {
+    const img = els.liveImg;
+    if (!img) return;
+    if (!img.dataset.liveSrc) {
+      try {
+        await api('/api/camera/start', { method: 'POST', body: '{}' });
+      } catch (e) {
+        // 采集进程多半已在运行（后台循环录像），继续尝试取流
+      }
+    }
+    if (!isLiveMode()) return;
+    img.dataset.liveSrc = '1';
+    img.src = '/api/camera/stream?t=' + Date.now();
+    els.liveBadge?.classList.add('on');
+    if (els.liveText) els.liveText.textContent = '实时预览中（MJPEG）';
+    pollBusy();
+    if (!liveState.timer) {
+      liveState.timer = setInterval(() => {
+        if (isCameraTabActive() && isLiveMode()) pollBusy();
+      }, 2000);
+    }
+  }
+
+  function detachLivePreview() {
+    const img = els.liveImg;
+    if (img) {
+      delete img.dataset.liveSrc;
+      img.src = '';
+    }
+    els.liveBadge?.classList.remove('on');
+    if (els.liveText) els.liveText.textContent = '实时预览未启动';
+  }
+
+  // 摄像头 Tab 可见 + 实时预览模式 + 还没取流 -> 自动挂上预览
+  function maybeAutoPreview() {
+    if (!isCameraTabActive() || !isLiveMode()) return;
+    if (els.liveImg && !els.liveImg.dataset.liveSrc) startLivePreview();
+    pollBusy();
+  }
+
+  async function pollBusy() {
+    if (!els.liveBusy) return;
+    try {
+      const data = await api('/api/busy/status');
+      renderLiveBusy(data.busy || {});
+    } catch (e) { /* 静默 */ }
+  }
+
+  function renderLiveBusy(busy) {
+    const el = els.liveBusy;
+    if (!el) return;
+    const raw = busy.sysfs_value;
+    if (raw === '' || raw == null || String(raw).startsWith('ERR')) {
+      el.textContent = 'BUSY 未接入';
+      el.classList.remove('on');
+      el.title = `GPIO3_A5（全局 GPIO ${busy.gpio ?? 101}）不可读：${busy.error || '未导出'}`;
+      return;
+    }
+    el.classList.toggle('on', !!busy.active);
+    el.textContent = busy.active
+      ? `BUSY 接收中${busy.on_for ? ' ' + busy.on_for + 's' : ''}`
+      : 'BUSY 空闲';
+    el.title = `GPIO3_A5（全局 GPIO ${busy.gpio ?? 101}）· 原始电平 ${raw} · 累计触发 ${busy.count || 0} 次` +
+      (busy.tx_conflict ? ' · 发射期间仍 BUSY，注意自激' : '');
+  }
+
   function bindEvents() {
     $('#btn-cam-open-console-top')?.addEventListener('click', openConsole);
     $('#btn-cam-open-console-2')?.addEventListener('click', openConsole);
@@ -958,6 +1065,40 @@
       openConsole();
     });
     $('#btn-cam-refresh')?.addEventListener('click', () => loadAll());
+
+    // 实时预览 / 录像回放 模式切换
+    els.modeLiveBtn?.addEventListener('click', () => setMode('live'));
+    els.modePlayBtn?.addEventListener('click', () => setMode('play'));
+    $('#cam-btn-live-fullscreen')?.addEventListener('click', () => {
+      const wrap = els.playerWrap || $('#cam-player-wrap');
+      if (!wrap) return;
+      if (document.fullscreenElement) document.exitFullscreen?.();
+      else wrap.requestFullscreen?.();
+    });
+    els.liveImg?.addEventListener('error', () => {
+      if (!isLiveMode()) return;
+      if (els.liveText) els.liveText.textContent = '预览中断，3 秒后重连…';
+      clearTimeout(liveState.retryTimer);
+      liveState.retryTimer = setTimeout(() => {
+        if (isLiveMode() && els.liveImg?.dataset.liveSrc) {
+          els.liveImg.src = '/api/camera/stream?t=' + Date.now();
+        }
+      }, 3000);
+    });
+    // app.js 的「启动预览 / 停止预览」按钮通过事件通知本模块同步 UI
+    window.addEventListener('elf2:camera-preview-start', () => {
+      liveState.mode = 'live';
+      syncModeButtons();
+      if (els.liveImg) els.liveImg.dataset.liveSrc = '1';
+      els.liveBadge?.classList.add('on');
+      if (els.liveText) els.liveText.textContent = '实时预览中（MJPEG）';
+      pollBusy();
+    });
+    window.addEventListener('elf2:camera-preview-stop', () => {
+      if (els.liveImg) delete els.liveImg.dataset.liveSrc;
+      els.liveBadge?.classList.remove('on');
+      if (els.liveText) els.liveText.textContent = '实时预览未启动';
+    });
     $('#btn-camera-recordings-refresh')?.addEventListener('click', () => loadAll());
     $('#btn-camera-cleanup')?.addEventListener('click', async () => {
       if (!confirm('将按循环容量和存储上限清理最旧录像，是否继续？')) return;
@@ -1177,6 +1318,9 @@
       if (isCameraTabActive()) loadStorageOnly();
     }, 8000);
     setInterval(() => {
+      maybeAutoPreview();
+    }, 3000);
+    setInterval(() => {
       if (isCameraTabActive() && !state.dragging && !state.batchBusy) {
         loadAll({ silent: true, keepPage: true });
       }
@@ -1194,13 +1338,16 @@
     if (els.datePicker) els.datePicker.value = state.date;
     state.playheadMs = dateStartMs() + 8 * 3600 * 1000;
     bindEvents();
+    setMode('live', { noAttach: true });
     renderTimeline();
+    maybeAutoPreview();
     if (isCameraTabActive()) loadAll({ silent: true });
   }
 
   function activate() {
     if (!state.initialized) init();
     loadAll({ silent: true });
+    maybeAutoPreview();
   }
 
   document.addEventListener('DOMContentLoaded', () => {

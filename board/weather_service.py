@@ -27,6 +27,14 @@ def _truthy(value, default=True):
     return str(value).strip().lower() in ('1', 'true', 'on', 'yes', 'y')
 
 
+def _to_int16(value):
+    '''把 16bit 无符号寄存器值解释成有符号（温度可能为负）。'''
+    if value is None:
+        return None
+    v = int(value) & 0xFFFF
+    return v - 0x10000 if v >= 0x8000 else v
+
+
 def _modbus_request(addr, func, register, quantity):
     body = bytes([
         addr & 0xFF, func & 0xFF,
@@ -68,6 +76,19 @@ class WeatherService:
             'rain_last_rx_hex': '',
             'rain_poll_count': 0,
             'rain_error_count': 0,
+            # 温湿度变送器（Modbus RTU 从站 03，与风速/雨量共用 RS485 总线）
+            'th_enabled': False,
+            'th_last_ok': 0,
+            'th_last_error': '',
+            'th_last_raw_temp': None,
+            'th_last_raw_humi': None,
+            'th_temperature': None,
+            'th_humidity': None,
+            'th_last_ts': '',
+            'th_last_tx_hex': '',
+            'th_last_rx_hex': '',
+            'th_poll_count': 0,
+            'th_error_count': 0,
         }
         try:
             self.ensure_schema()
@@ -147,6 +168,19 @@ class WeatherService:
         except Exception:
             pass
 
+    def _append_th_csv(self, ts, ts_epoch, temperature, humidity, raw_t, raw_h):
+        '''按日生成/追加温湿度 CSV。'''
+        try:
+            day = ts[:10]
+            path = self.csv_dir / f'th_{day}.csv'
+            new = not path.exists()
+            with open(path, 'a', encoding='utf-8-sig', newline='') as f:
+                if new:
+                    f.write('时间,时间戳,温度(°C),湿度(%RH),温度raw,湿度raw\n')
+                f.write(f'{ts},{ts_epoch},{temperature},{humidity},{raw_t},{raw_h}\n')
+        except Exception:
+            pass
+
     def history_range(self, days=7, interval_minutes=10):
         """查询最近 N 天并按 interval_minutes 分钟聚合。"""
         days = max(1, int(days))
@@ -198,11 +232,28 @@ class WeatherService:
             );
             CREATE INDEX IF NOT EXISTS idx_rain_ts_epoch ON rain_readings(ts_epoch);
             CREATE INDEX IF NOT EXISTS idx_rain_ts ON rain_readings(ts);
+
+            CREATE TABLE IF NOT EXISTS th_readings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                ts_epoch INTEGER NOT NULL,
+                temperature REAL,
+                humidity REAL,
+                raw_temp INTEGER,
+                raw_humi INTEGER,
+                unit TEXT DEFAULT 'C/%RH',
+                error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_th_ts_epoch ON th_readings(ts_epoch);
+            CREATE INDEX IF NOT EXISTS idx_th_ts ON th_readings(ts);
             ''')
 
     def update_settings(self, settings):
         with self.lock:
             self.settings = dict(settings or {})
+            # 状态里同步当前开关，便于前端直接判断「已启用/未启用」
+            self.status['th_enabled'] = _truthy(self.settings.get('th_enabled', '0'), False)
+            self.status['rain_enabled'] = _truthy(self.settings.get('rain_enabled', '1'), True)
 
     def start(self, settings=None):
         if settings:
@@ -365,8 +416,134 @@ class WeatherService:
             except Exception:
                 pass
 
+    # ---------------------------------------------------------------
+    # 温湿度变送器（Modbus RTU，从站 03，9600 8N1，与风速/雨量共用 RS485）
+    #   寄存器约定（常见国产 RS485 温湿度变送器，可在设置页改写）：
+    #     register+N   : 温度 raw（int16 有符号），默认倍率 0.1 -> °C
+    #     register+N+1 : 湿度 raw（uint16），默认倍率 0.1 -> %RH
+    # ---------------------------------------------------------------
+    def _modbus_read(self, s, addr, func, register, quantity):
+        '''单次 Modbus RTU 读寄存器，返回 (请求hex, 接收hex, 解析结果)。'''
+        import serial
+        port = s.get('port', '/dev/ttyS9')
+        timeout = float(s.get('timeout', 1.0) or 1.0)
+        ser = serial.Serial(port=port,
+                            baudrate=int(float(s.get('baud', 9600) or 9600)),
+                            bytesize=8,
+                            parity=str(s.get('parity', 'N') or 'N'),
+                            stopbits=int(float(s.get('stopbits', 1) or 1)),
+                            timeout=timeout)
+        try:
+            req = _modbus_request(addr, func, register, quantity)
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            ser.write(req)
+            ser.flush()
+            rx = b''
+            parsed = None
+            deadline = time.time() + max(0.4, timeout)
+            while time.time() < deadline:
+                chunk = ser.read(256)
+                if chunk:
+                    rx += chunk
+                parsed = self._parse_modbus_response(rx, addr, func)
+                if parsed:
+                    break
+                if rx and len(rx) > 512:
+                    break
+            return req.hex(), rx.hex(), parsed
+        finally:
+            try:
+                ser.close()
+            except Exception:
+                pass
+
+    def read_th_once(self, settings=None):
+        '''读取温湿度变送器：温度 + 湿度两个寄存器。'''
+        s = dict(self.settings)
+        if settings:
+            s.update(settings)
+        addr = int(float(s.get('th_slave', 3) or 3))
+        func = int(float(s.get('th_function', 4) or 4))
+        register = int(float(s.get('th_register', 1) or 1))
+        quantity = max(2, int(float(s.get('th_quantity', 2) or 2)))
+        scale = float(s.get('th_scale', 0.1) or 0.1)
+        humi_scale = float(s.get('th_humi_scale', 0.1) or 0.1)
+        offset = float(s.get('th_temp_offset', 0.0) or 0.0)
+
+        req_hex, rx_hex, parsed = self._modbus_read(s, addr, func, register, quantity)
+        with self.lock:
+            self.status['th_last_tx_hex'] = req_hex
+            self.status['th_last_rx_hex'] = rx_hex
+        if not parsed:
+            if not rx_hex:
+                raise TimeoutError('未收到 Modbus 响应')
+            raise ValueError(f'未解析到有效 Modbus 帧: TX={req_hex} RX={rx_hex}')
+        if parsed.get('exception'):
+            raise ValueError(f'Modbus 异常响应，异常码 {parsed["exception"]}')
+        values = parsed.get('values') or []
+        raw_t = values[0] if len(values) > 0 else None
+        raw_h = values[1] if len(values) > 1 else None
+        temperature = round(_to_int16(raw_t) * scale + offset, 2) if raw_t is not None else None
+        humidity = round((raw_h & 0xFFFF) * humi_scale, 2) if raw_h is not None else None
+        now = datetime.now()
+        ts = now.strftime('%Y-%m-%d %H:%M:%S')
+        ts_epoch = int(now.timestamp())
+        with self.lock:
+            self.status.update(th_last_ok=time.time(), th_last_error='',
+                               th_last_raw_temp=raw_t, th_last_raw_humi=raw_h,
+                               th_temperature=temperature, th_humidity=humidity,
+                               th_last_ts=ts,
+                               th_poll_count=int(self.status.get('th_poll_count') or 0) + 1)
+        with self._conn() as c:
+            c.execute('INSERT INTO th_readings(ts,ts_epoch,temperature,humidity,raw_temp,raw_humi,unit) '
+                      'VALUES(?,?,?,?,?,?,?)',
+                      (ts, ts_epoch, temperature, humidity, raw_t, raw_h, 'C/%RH'))
+        self._append_th_csv(ts, ts_epoch, temperature, humidity, raw_t, raw_h)
+        return {'ok': True, 'temperature': temperature, 'humidity': humidity,
+                'raw_temp': raw_t, 'raw_humi': raw_h, 'values': values,
+                'ts': ts, 'ts_epoch': ts_epoch}
+
+    def th_history(self, date_str, limit=5000):
+        with self._conn() as c:
+            rows = c.execute(
+                'SELECT ts,ts_epoch,temperature,humidity,raw_temp,raw_humi FROM th_readings '
+                'WHERE ts LIKE ? ORDER BY ts_epoch ASC LIMIT ?',
+                (date_str + '%', limit)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def th_stats(self, date_str):
+        with self._conn() as c:
+            row = c.execute(
+                'SELECT COUNT(*) AS count, MAX(temperature) AS t_max, MIN(temperature) AS t_min, '
+                'AVG(temperature) AS t_avg, MAX(humidity) AS h_max, MIN(humidity) AS h_min, '
+                'AVG(humidity) AS h_avg FROM th_readings WHERE ts LIKE ?',
+                (date_str + '%',)
+            ).fetchone()
+            last = c.execute(
+                'SELECT ts,temperature,humidity FROM th_readings WHERE ts LIKE ? '
+                'ORDER BY ts_epoch DESC LIMIT 1', (date_str + '%',)
+            ).fetchone()
+        def r(v):
+            return round(v, 2) if v is not None else None
+        return {
+            'count': row['count'] if row else 0,
+            'temp_max': r(row['t_max']) if row else None,
+            'temp_min': r(row['t_min']) if row else None,
+            'temp_avg': r(row['t_avg']) if row else None,
+            'humi_max': r(row['h_max']) if row else None,
+            'humi_min': r(row['h_min']) if row else None,
+            'humi_avg': r(row['h_avg']) if row else None,
+            'last_ts': last['ts'] if last else '',
+            'last_temperature': r(last['temperature']) if last else None,
+            'last_humidity': r(last['humidity']) if last else None,
+        }
+
     def _loop(self):
         self.ensure_schema()
+        with self.lock:
+            self.status['th_enabled'] = _truthy(self.settings.get('th_enabled', '0'), False)
         while not self.stop_event.is_set():
             try:
                 self.read_once()
@@ -385,6 +562,15 @@ class WeatherService:
                 with self.lock:
                     self.status['rain_last_error'] = str(e)
                     self.status['rain_error_count'] = self.status.get('rain_error_count', 0) + 1
+            if _truthy(self.settings.get('th_enabled', '0'), False):
+                try:
+                    self.read_th_once()
+                    with self.lock:
+                        self.status['th_last_error'] = ''
+                except Exception as e:
+                    with self.lock:
+                        self.status['th_last_error'] = str(e)
+                        self.status['th_error_count'] = int(self.status.get('th_error_count') or 0) + 1
             interval = float(self.settings.get('poll_interval', 2) or 2)
             self.stop_event.wait(max(1, interval))
 
@@ -542,3 +728,4 @@ class WeatherService:
         with self._conn() as c:
             c.execute('DELETE FROM weather_readings WHERE ts_epoch < ?', (cutoff,))
             c.execute('DELETE FROM rain_readings WHERE ts_epoch < ?', (cutoff,))
+            c.execute('DELETE FROM th_readings WHERE ts_epoch < ?', (cutoff,))

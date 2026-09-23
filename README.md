@@ -76,8 +76,9 @@ RK3588 负责全部"智能"部分：网页控制台、端侧大模型（LLM）�
 | **网页对讲** | 麦克风 → 板端 AUX（按住说话，自动 PTT，看门狗释放） | ✅ |
 | **PTT 控制** | 引用计数、0.8 s 桥接、最短压发防抖、手动发射自检、事件追踪 | ✅ |
 | **电压遥测** | SARADC 12 bit 双路分压（电池/光伏）+ 零点/倍率校准 | ✅ |
-| **气象雨量** | RS485 Modbus：风速变送器 + 翻斗式雨量计（小时/日统计） | ✅ |
-| **摄像头** | V4L2 MJPEG 预览、循环/单次录像、回放、容量清理、OSD/RTMP | ✅ |
+| **气象雨量** | RS485 Modbus：风速变送器 + 翻斗式雨量计 + **温湿度变送器（从站 03）**，小时/日统计 | ✅ |
+| **摄像头** | V4L2 MJPEG 采集、**开机自动循环录像（掉线自愈）**、单次录像、回放/时间轴、容量清理、OSD/RTMP；实时预览与回放合并为同一控制台（模式切换） | ✅ |
+| **BUSY 检测** | **GPIO3_A5（全局 GPIO 101）光耦输入**，总览实时显示接收状态、发射期自激告警、极性与电平沿诊断 | ✅ |
 | **Web 控制台** | 账号/角色、CSRF、审计日志、HTTPS 反向代理、系统监控 | ✅ |
 | **硬件板卡** | IO 隔离/驱动板、ADC 分压采集板 | 🔶 原理图完成，PCB 联调中 |
 
@@ -85,7 +86,9 @@ RK3588 负责全部"智能"部分：网页控制台、端侧大模型（LLM）�
 > real-time token-rate metrics**; on-device **Piper TTS** (zh/en/ICAO) with streaming read-out;
 > **web intercom** (hold-to-talk with auto-PTT); **PTT state machine** (refcount, debounce,
 > manual self-test, event tracing); **dual-channel SARADC** voltage telemetry with calibration;
-> **RS485 Modbus** wind & rain; **V4L2 camera** preview/recording/playback; secured **web console**.
+> **RS485 Modbus** wind, rain and a **temperature/humidity transmitter**; **V4L2 camera** with
+> **auto-start loop recording (self-healing)** and a merged preview/playback console; a
+> **BUSY input on GPIO3_A5** mirrored live in the overview; secured **web console**.
 
 ---
 
@@ -192,12 +195,17 @@ _ptt_release() ──► HOLD_COUNT-1 ──(→0)───► 0.8s 定时 ─�
 
 - **SARADC**：12 bit、0–1.8 V（`0.43945 mV/LSB`），通过 sysfs IIO 读取
   `in_voltage{4,6}_raw`；分压网络 → 倍率校准（电池 **10.11 V/V**、光伏 **17.01 V/V**）。
-- **Modbus RTU**：`/dev/ttyS9` 9600 8N1，站号 1（风速）、23（雨量），
+- **Modbus RTU**：`/dev/ttyS9` 9600 8N1，站号 1（风速）、23（雨量）、**03（温湿度）**，
   自实现 CRC16 与帧解析，数据入 SQLite 供图表与统计。
+- **温湿度变送器**（从站 03）：功能码 04 读输入寄存器，起始寄存器 = 温度 `int16`（有符号）、
+  下一个 = 湿度 `uint16`，默认倍率 0.1（→ °C / %RH），倍率与温度偏移均可在页面调整；
+  采集按日写入 `th_YYYY-MM-DD.csv` 并同步 SQLite。**传感器暂未接线**，启用后读取会返回
+  Modbus 超时，属预期现象（风速已 `采集正常`，说明总线与 TTL-RS485 链路可用）。
 
 > **EN** — Battery/PV rails are scaled by resistor dividers into the RK3588 12-bit SARADC
-> (0–1.8 V); voltage = ADC pin voltage × calibrated multiplier. Wind and rain sensors are polled
-> over RS485 Modbus RTU with a hand-rolled CRC16 stack; samples are stored in SQLite.
+> (0–1.8 V); voltage = ADC pin voltage × calibrated multiplier. Wind, rain and
+> temperature/humidity sensors are polled over RS485 Modbus RTU (slaves 1 / 23 / 03) with a
+> hand-rolled CRC16 stack; samples are stored in SQLite and per-day CSV.
 
 ### 5.5 音视频 / Audio & Video
 
@@ -205,6 +213,12 @@ _ptt_release() ──► HOLD_COUNT-1 ──(→0)───► 0.8s 定时 ─�
   TTS/对讲走 `aplay`，采集走 `arecord`；全局音量与静音由 `amixer` 控制。
 - **视频**：V4L2 MJPEG 采集 → ffmpeg 转封装为分段 MP4 / RTMP 推流；
   循环录像按容量/文件数/总配额自动清理。
+- **开机自动循环录像**：`relay-web` 启动后 8 s 由守护线程自动拉起「采集 + 分段录像 + 清理」，
+  之后每 30 s 自愈一次；页面手动「停止循环录像」只在本次运行内生效（重启恢复自动），
+  开关为设置项 `camera_loop_autostart`。
+- **页面合并**：实时预览不再单独占一张卡片，直接复用回放控制台的播放区，
+  由「实时预览 / 录像回放」模式开关切换；「停止预览」只断开网页画面，不影响后台录像，
+  只有「高级设置 → 停止采集服务」才会真正停采集。
 
 > **EN** — Audio uses ALSA (`plughw:CARD=rockchipnau8822`) with `aplay`/`arecord`; video uses
 > V4L2 MJPEG capture piped into ffmpeg for segmented MP4 recording, playback and RTMP streaming,
@@ -229,13 +243,16 @@ _ptt_release() ──► HOLD_COUNT-1 ──(→0)───► 0.8s 定时 ─�
 - 前端 **BUSY 虚拟按键**（LLM 对话页，按住说话）：网页麦克风采集 → 16 kHz PCM → 打包 WAV →
   `POST /api/asr/transcribe` → 文本回填输入框 →（可选）自动发送给端侧 LLM → 回复可由 TTS 朗读，
   形成"语音进 → 文字 → LLM → 语音出"的闭环；**录音同时留档**到 `/www/asr_recordings`。
-- 总览页「中继状态」实时同步 **PTT / BUSY**：GPIO3_A1 拉高即显示「PTT 使能（发射中）」。
+- 总览页「中继状态」实时同步 **PTT / BUSY**：GPIO3_A1 拉高即显示「PTT 使能（发射中）」；
+  **BUSY** 改为独立引脚 GPIO3_A5（全局 GPIO 101，光耦输入）实时判定，另有一行「本地录音」
+  表示网页语音输入/发射占用。BUSY 支持极性与电平沿诊断（设置页「BUSY 接收状态」卡片）。
 
 > **EN** — Chosen after comparing whisper.cpp / sherpa-onnx / Vosk / FunASR / RKNPU-Whisper:
 > **sherpa-onnx + SenseVoice int8** (155 MB, zh/en/ja/ko/yue) runs fully offline on the RK3588
 > CPU at **RTF≈0.05**. A **BUSY virtual button** in the LLM tab records from the browser mic,
 > sends 16 kHz WAV to `/api/asr/transcribe`, fills the chat input (optional auto-send) and keeps
-> the recording. The overview now mirrors **PTT/BUSY** state from GPIO3_A1 in real time.
+> the recording. The overview mirrors **PTT** from GPIO3_A1 and **BUSY** from the dedicated
+> GPIO3_A5 input (with polarity/edge diagnostics in the settings page).
 
 ### 5.7 Web 控制台与安全 / Web console & security
 
@@ -310,9 +327,16 @@ sudo systemctl daemon-reload && sudo systemctl restart relay-web nginx
 | `/api/tts/speak` `/api/tts/stream/*` | POST | 普通朗读 / 流式朗读会话 |
 | `/api/tts/voices` `/api/tts/voice/<id>` | GET/DELETE | 音色包管理 |
 | `/api/ptt/status` `/api/ptt/diag` `/api/ptt/manual` | GET/POST | PTT 状态、全链路自检信息、手动发射 |
+| `/api/busy/status` | GET | **BUSY 接收状态**（GPIO3_A5：原始电平、触发态、时长、电平沿计数） |
+| `/api/busy/diag` | GET | BUSY 链路自检（原始电平、事件、排查提示） |
+| `/api/busy/polarity` | POST | 设置 BUSY 有效极性（高有效/低有效），立即生效 |
 | `/api/intercom/push` `/api/intercom/push/stop` | POST | 网页实时对讲推流（自动 PTT） |
-| `/api/camera/*` | GET/POST | 预览、录像、分段、回放、存储统计 |
+| `/api/camera/*` | GET/POST | 采集/预览、循环与单次录像、分段回放、存储统计、容量清理 |
+| `/api/camera/status` | GET | 含 `loop_running` / `loop_autostart` / `loop_manual_stop` |
 | `/api/weather/*` `/api/rain/*` | GET | 风速/雨量实时与历史 |
+| `/api/weather/th` | GET | **温湿度实时值 + 当日统计**（从站 03） |
+| `/api/weather/th/history` | GET | 温湿度历史点（按日期） |
+| `/api/weather/th/read` | POST | 立即读取一次温湿度（调试，未接线时报 Modbus 超时） |
 
 完整参数与示例见 [`board/README.md`](board/README.md)。
 
@@ -359,10 +383,13 @@ sudo systemctl daemon-reload && sudo systemctl restart relay-web nginx
 | 3 | Web 控制中心（账号/审计/HTTPS/系统监控） | ✅ 完成 |
 | 4 | PTT 控制（引用计数/防抖/自检/事件追踪） | ✅ 完成 |
 | 5 | 网页实时对讲（按住说话 + 自动 PTT） | ✅ 完成 |
-| 6 | 摄像头预览 / 录像 / 回放 / 清理 | ✅ 完成 |
+| 6 | 摄像头：采集 / 录像 / 回放 / 清理 | ✅ 完成 |
+| 6b | **摄像头开机自动循环录像（掉线自愈）+ 预览/回放合并页面** | ✅ 完成 |
 | 7 | 遥测：SARADC 电压 + RS485 风速/雨量 | ✅ 完成 |
 | 8 | **Agent 技能/工具调用 + 提示词注入 + 速率监测** | ✅ 完成 |
 | 9 | **端侧语音识别（ASR）+ BUSY 语音输入 + 总览 PTT/BUSY 同步** | ✅ 完成 |
+| 9b | **BUSY 引脚（GPIO3_A5）接收状态实时显示 + 极性/电平诊断** | ✅ 完成（待电台实测确认极性） |
+| 9c | **温湿度传感器（Modbus RTU 从站 03）采集/存储/页面** | ✅ 功能完成（传感器未接线） |
 | 10 | IO 隔离/驱动板：原理图 → PCB 布线 → 打样 | 🔶 进行中（原理图完成） |
 | 11 | ADC 分压采集板：接入实机并校准 | 🔶 进行中（设计/验算完成） |
 | 12 | 音频链路：RPT MIC 与 ELF2 MIC 共节点方案 | 🔶 进行中（需隔直/限幅/增益重设） |
@@ -370,10 +397,12 @@ sudo systemctl daemon-reload && sudo systemctl restart relay-web nginx
 | 14 | 整机联调、现场覆盖测试、OTA 远程升级 | ⏳ 待开始 |
 
 > **EN** — Completed: on-device LLM/TTS, web console, PTT control, web intercom, camera,
-> telemetry, and the **agent/tool-calling + prompt injection + rate monitoring** stack.
-> In progress: isolation board PCB, divider-board bring-up, RX/TX audio node sharing, and
-> stabilising tool selection of the 1.5 B model. Planned: system-level integration test,
-> field coverage test and OTA update.
+> telemetry, and the **agent/tool-calling + prompt injection + rate monitoring** stack, plus
+> **auto-start loop recording**, the merged camera preview/playback console, the **BUSY input**
+> and the **temperature/humidity** sensor pipeline.
+> In progress: isolation board PCB, divider-board bring-up, RX/TX audio node sharing,
+> stabilising tool selection of the 1.5 B model, and field verification of the BUSY polarity.
+> Planned: system-level integration test, field coverage test and OTA update.
 
 ---
 
@@ -393,12 +422,18 @@ sudo systemctl daemon-reload && sudo systemctl restart relay-web nginx
 | 网页长连接偶发中断 | eth0 自协商抖动（1G↔100M） | 强制 `100M/Full` 且关闭自协商；前端分片投递加退避重试 |
 | sherpa-onnx 1.13 无 `read_wave`/`accept_wave_file` | Python API 未导出该便捷函数 | 用 `wave`+`numpy` 读样本，调 `accept_waveform(sr, samples)` |
 | 英文识别串词（"Video chat as he left…"） | 合成音色 `Rosmontis_en` 本身发音不清 | 换 `en_US-lessac-medium` 后明显改善；真人语音效果更好 |
+| BUSY 一直显示「接收中」/ 永远不动 | 引脚悬空或未加上拉，实测空闲电平为 0；也可能极性与实际接法相反 | BUSY 极性做成运行时可切（设置页一键切换）；用「原始电平 + 电平变化次数」判断接线是否有效；GPIO 侧按设计补 10k 上拉到 3.3V |
+| 触发时引脚只到 ~2.7 V 无法判低 | 3.3 V 数字输入 VIL≈0.99 V / VIH≈2.31 V，中间区不可靠 | 加大光耦驱动电流或对地下拉；或按「高有效」判定（2.7 V > VIH） |
+| 重启后循环录像没了 | 循环录像原来是页面手动触发的 | 新增开机自启守护线程（8 s 拉起、30 s 自愈）+ `camera_loop_autostart` 开关 |
+| 摄像头页有一模一样的两块预览画面 | 实时预览卡片与回放控制台重复 | 合并为一个播放区 + 「实时预览/录像回放」模式开关 |
 
 > **EN** — Hard-won lessons: the board-side RKLLM **ignores the `system` role** (inject the prompt
 > into the user message) and `usage` is always zero (estimate tokens locally); Qwen's
 > `<tool_call>` special token makes the server emit **empty output** (use a plain-text `READ`
 > protocol); prompts longer than ~400 characters also yield empty output (keep them compact);
 > Piper requires **single-codepoint** `phoneme_id_map` keys and `model.onnx(.json)` naming.
+> A floating (un-pulled) BUSY pin reads as a steady low, so BUSY polarity is a runtime setting
+> and the settings card exposes the raw level plus an edge counter to prove the wiring works.
 
 ---
 
@@ -410,7 +445,7 @@ sudo systemctl daemon-reload && sudo systemctl restart relay-web nginx
 | [`hardware/README.md`](hardware/README.md) | 隔离板/分压板设计说明与验算 |
 | [`tools/README.md`](tools/README.md) | Modbus/RS485 调试脚本用法 |
 | [`docs/多模态端侧智能无线电中继系统架构.md`](docs/多模态端侧智能无线电中继系统架构.md) | 系统架构设计长文 |
-| [`docs/部署记录-*.md`](docs/) | 各子系统部署实录（LLM / NPU / TTS / 摄像头 / 气象 / PTT） |
+| [`docs/部署记录-*.md`](docs/) | 各子系统部署实录（LLM / NPU / TTS / 摄像头 / 气象 / PTT / ASR / **摄像头自启+BUSY+温湿度**） |
 | [`docs/端侧TTS选型与音色训练方案.md`](docs/) | TTS 选型与音色训练（含 ICAO 适配） |
 
 ---

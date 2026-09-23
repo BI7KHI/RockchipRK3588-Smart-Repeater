@@ -1050,3 +1050,113 @@ details.cam-advanced[open] > summary { border-bottom: 1px solid var(--cam-border
 .cam-advanced-body .cal-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 10px; }
 .cam-advanced-body label { display: block; margin-bottom: 4px; }
 @media (max-width: 720px) { .cam-advanced-body .cal-row { grid-template-columns: 1fr; } }
+
+/* ===================================================================
+   预览 / 回放模式切换（2026-09-23 页面精简）
+   实时预览不再单独占一张卡片，复用回放控制台的播放区，
+   由顶部「实时预览 / 录像回放」开关切换，避免同一路画面出现两套 UI。
+   =================================================================== */
+.cam-mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 9px;
+  background: rgba(127, 127, 127, .16);
+}
+.cam-mode-btn {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1.2;
+  padding: 6px 14px;
+  border-radius: 7px;
+  cursor: pointer;
+  opacity: .72;
+  transition: background .15s, opacity .15s;
+}
+.cam-mode-btn:hover { opacity: 1; }
+.cam-mode-btn.active {
+  background: #2f80ed;
+  color: #fff;
+  opacity: 1;
+  font-weight: 600;
+}
+.cam-live-img {
+  display: none;
+  width: 100%;
+  height: 100%;
+  min-height: 330px;
+  max-height: 520px;
+  object-fit: contain;
+  background: #000;
+}
+.cam-live-badge {
+  display: none;
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  z-index: 7;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, .58);
+  color: #e5e7eb;
+  font-size: 12px;
+}
+.cam-live-badge.on { color: #fff; }
+.cam-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #8b949e;
+  display: inline-block;
+}
+.cam-live-badge.on .cam-live-dot {
+  background: #e74c3c;
+  animation: cam-live-pulse 1.4s ease-in-out infinite;
+}
+@keyframes cam-live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .25; }
+}
+.cam-live-busy {
+  display: none;
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  z-index: 7;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, .58);
+  color: #cbd5e1;
+  font-size: 12px;
+  font-weight: 600;
+}
+.cam-live-busy.on {
+  background: #f5a623;
+  color: #1b1b1b;
+}
+.cam-live-bar { display: none; align-items: center; }
+.cam-live-bar .muted { margin-left: auto; }
+
+/* 实时预览模式：只留实时画面 + 实时操作条 */
+.cam-console.cam-mode-live .cam-live-img { display: block; }
+.cam-console.cam-mode-live .cam-live-badge,
+.cam-console.cam-mode-live .cam-live-busy,
+.cam-console.cam-mode-live .cam-live-bar { display: flex; }
+.cam-console.cam-mode-live #cam-play-bar { display: none; }
+.cam-console.cam-mode-live #cam-modern-video,
+.cam-console.cam-mode-live #cam-player-empty,
+.cam-console.cam-mode-live #cam-player-osd,
+.cam-console.cam-mode-live #cam-player-loading,
+.cam-console.cam-mode-live #cam-timeline-playhead,
+.cam-console.cam-mode-live .cam-progress { display: none !important; }
+
+/* 回放模式：实时画面完全隐藏 */
+.cam-console:not(.cam-mode-live) .cam-live-img,
+.cam-console:not(.cam-mode-live) .cam-live-badge,
+.cam-console:not(.cam-mode-live) .cam-live-busy,
+.cam-console:not(.cam-mode-live) .cam-live-bar { display: none !important; }

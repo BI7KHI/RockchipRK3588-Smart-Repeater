@@ -181,14 +181,14 @@ http://192.168.101.206:8080
 | `/api/users/<id>` | DELETE | 删除用户 |
 | `/api/users/<id>/password` | POST | 重置密码 |
 | `/api/settings` | GET/POST | LLM/页面设置 |
-| `/api/camera/status` | GET | 摄像头状态、设置、录像列表、存储图形数据 |
+| `/api/camera/status` | GET | 摄像头状态、设置、录像列表、存储图形数据（含 `loop_running` / `loop_autostart` / `loop_manual_stop`） |
 | `/api/camera/stream` | GET | MJPEG 实时预览 |
 | `/api/camera/settings` | GET/POST | 摄像头 / OSD / 录像 / RTMP 设置（含 `storage_max_mb`） |
 | `/api/camera/snapshot` | POST | 抓拍一张 JPEG |
 | `/api/camera/record/manual/start` | POST | 开始单独录像 |
 | `/api/camera/record/manual/stop` | POST | 停止并保存单独录像 |
-| `/api/camera/loop/start` | POST | 开始循环录像 |
-| `/api/camera/loop/stop` | POST | 停止循环录像 |
+| `/api/camera/loop/start` | POST | 开始循环录像（同时清除「手动停止」标记，恢复自愈） |
+| `/api/camera/loop/stop` | POST | 停止循环录像（本次运行内不再自动拉起，重启恢复自动） |
 | `/api/camera/rtmp/start` | POST | 开始 RTMP 推流 |
 | `/api/camera/rtmp/stop` | POST | 停止 RTMP 推流 |
 | `/api/camera/recordings` | GET | 录像分片列表（含时长/起止时间），支持 `limit` |
@@ -203,7 +203,13 @@ http://192.168.101.206:8080
 | `/api/weather/history_range?days=N&interval=N` | GET | 最近 N 天按采样频率聚合数据 |
 | `/api/weather/stats?date=YYYY-MM-DD` | GET | 当日最大/最小/平均/计数 |
 | `/api/weather/export.csv?days=N&interval=N` | GET | 导出历史聚合数据 CSV |
-| `/api/weather/settings` | GET/POST | 风力/降水量 Modbus/串口/轮询设置 |
+| `/api/weather/settings` | GET/POST | 风力/降水量/温湿度 Modbus/串口/轮询设置 |
+| `/api/weather/th` | GET | **温湿度实时值 + 当日统计**（从站 03，功能码 04） |
+| `/api/weather/th/history` | GET | 温湿度历史点，按日期 |
+| `/api/weather/th/read` | POST | 立即读取一次温湿度（调试用，未接线返回 Modbus 超时） |
+| `/api/busy/status` | GET | **BUSY 接收状态**：原始电平、触发态/时长、电平沿计数、自激标志 |
+| `/api/busy/diag` | GET | BUSY 链路自检（原始电平 / 事件 / 排查提示） |
+| `/api/busy/polarity` | POST | 设置 BUSY 有效极性 `{"active_low":true|false}`，立即生效，管理员 |
 | `/api/rain/realtime` | GET | 实时降水量、今日累计、最近 1 小时 |
 | `/api/rain/hourly?date=YYYY-MM-DD` | GET | 指定日期 24 小时降水量 |
 | `/api/rain/history?date=YYYY-MM-DD` | GET | 指定日期累计降水量原始记录 |

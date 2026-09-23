@@ -1,1 +1,3 @@
+# ELF2 40Pin GPIO 权限：PTT 输出 GPIO3_A1（全局 97）、BUSY 输入 GPIO3_A5（全局 101）
 SUBSYSTEM=="gpio", KERNEL=="gpio97", RUN+="/bin/sh -c 'for f in direction value active_low edge; do chown elf:elf /sys/class/gpio/gpio97/$f 2>/dev/null; chmod ug+rw /sys/class/gpio/gpio97/$f 2>/dev/null; done'"
+SUBSYSTEM=="gpio", KERNEL=="gpio101", RUN+="/bin/sh -c 'for f in direction value active_low edge; do chown elf:elf /sys/class/gpio/gpio101/$f 2>/dev/null; chmod ug+rw /sys/class/gpio/gpio101/$f 2>/dev/null; done'"
