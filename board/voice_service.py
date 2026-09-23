@@ -1188,6 +1188,11 @@ class VoiceService:
                 category = 'jitter'
             elif text:
                 category = 'voice'
+            elif self._aprs_overlap(row.get('ts_epoch'), row.get('seconds'),
+                                    row.get('kind') or ''):
+                # APRS：优先用收发时间交叉判定。放在 text 之后，确保「人在说话」
+                # 的段永远归语音；放在其它启发式之前，避开削顶导致的误判。
+                category = 'aprs'
             elif feat['dbfs'] <= silence_db:
                 category = 'silence'
             elif feat.get('tone_ratio', 0) >= 0.45:
@@ -1214,6 +1219,33 @@ class VoiceService:
         print('%s #%s %s %.1fs → %s（%d字, %dms）' % (
             LOG, rid, CATEGORY_LABEL.get(category, category), feat['seconds'],
             CATEGORY_LABEL.get(category, category), len(text), asr_ms), flush=True)
+
+    def reclassify_aprs(self, day=None, dry=False):
+        """对历史记录重跑 APRS 时间交叉判定，修正被削顶带偏的分类。
+
+        只做「改成 aprs」或「从 aprs 改回启发式结果」，不重跑 ASR，代价极低。
+        """
+        base = self.store.query(
+            'SELECT id,category,kind,ts_epoch,seconds,asr_text,path,feature_json '
+            'FROM voice_logs WHERE substr(ts,1,10)=? OR ? IS NULL',
+            (day or '', day)) if day else self.store.query(
+            'SELECT id,category,kind,ts_epoch,seconds,asr_text,path,feature_json '
+            'FROM voice_logs')
+        changed = []
+        for r in base:
+            if (r.get('asr_text') or '').strip():
+                continue                       # 有识别文字的是语音，不动
+            hit = self._aprs_overlap(r.get('ts_epoch'), r.get('seconds'),
+                                     r.get('kind') or '')
+            old = r.get('category') or ''
+            if hit and old != 'aprs':
+                changed.append((r['id'], old, 'aprs'))
+            elif (not hit) and old == 'aprs':
+                changed.append((r['id'], old, 'tone'))
+        if not dry:
+            for rid, _old, new in changed:
+                self.store.exec('UPDATE voice_logs SET category=? WHERE id=?', (new, rid))
+        return changed
 
     def retranscribe(self, rid):
         self.store.exec("UPDATE voice_logs SET asr_status='pending', category='' WHERE id=?", (rid,))
@@ -1570,12 +1602,68 @@ class VoiceService:
         return out
 
     def day_peaks(self, day=None, n=1400):
-        """全天时间轴概览：返回 [(epoch, peak), ...] 按序。"""
+        """全天时间轴概览：返回按时间排序的段列表。
+
+        **必须带上 category / kind** —— 前端时间轴靠它们上色。
+        曾经只返回 id/epoch/seconds/peak，导致 'cat-' + undefined 全部落到
+        cat-empty，整条时间轴的色块全灰（图例里的 5 类形同虚设）。
+        """
         rows = self.store.query(
-            'SELECT id,ts_epoch,seconds,peak FROM voice_logs WHERE substr(ts,1,10)=? '
-            'ORDER BY ts_epoch ASC', (day or datetime.now().strftime('%Y-%m-%d'),))
-        return [{'id': r['id'], 'epoch': r['ts_epoch'], 'seconds': r['seconds'],
-                 'peak': r['peak']} for r in rows]
+            'SELECT id,ts,ts_epoch,seconds,peak,category,kind FROM voice_logs '
+            'WHERE substr(ts,1,10)=? ORDER BY ts_epoch ASC',
+            (day or datetime.now().strftime('%Y-%m-%d'),))
+        out = []
+        for r in rows:
+            cat = r.get('category') or ''
+            kind = r.get('kind') or ''
+            out.append({
+                'id': r['id'], 'epoch': r['ts_epoch'], 'seconds': r['seconds'],
+                'peak': r['peak'], 'ts': (r.get('ts') or '')[11:19],
+                'category': cat, 'kind': kind,
+                'category_label': CATEGORY_LABEL.get(cat, cat or '待识别'),
+                'kind_label': KIND_LABEL.get(kind, kind),
+            })
+        return out
+
+    # -- APRS 时间交叉判定 -------------------------------------------------
+    def _aprs_overlap(self, ts_epoch, seconds, kind=''):
+        """按时间窗与 APRS 收发记录交叉判定，返回 'tx' / 'rx' / ''。
+
+        为什么不用频谱分类：本机 APRS 发射电平高（发射期间 RMS 约 -4 dBFS），
+        自收听经采集 PGA +16.5 dB 后削顶；削顶把能量摊平，tone_ratio 从应有的
+        高值掉到 0.45 以下，于是一律被判成「单音/信标」而非「APRS」。
+        APRS 服务自己记录了每次解码（aprs_packets）与每次发射（aprs_tx）的
+        时间戳，直接比对准确得多。
+
+        收窄误判的两条约束：
+          * 本机发射（kind='tx'）只认 aprs_tx，且这是**我们主动发的**，可信；
+          * 接收（kind='rx'）只认 aprs_packets，且调用方保证该段没有识别文字
+            （有文字说明是人在说话，不该判成 APRS）。
+        """
+        try:
+            t0 = float(ts_epoch)
+        except Exception:
+            return ''
+        if not t0:
+            return ''
+        t1 = t0 + max(1.0, float(seconds or 0)) + 0.5
+        t0 -= 0.5
+        if kind == 'tx':
+            try:
+                if self.store.one(
+                        'SELECT id FROM aprs_tx WHERE ts_epoch BETWEEN ? AND ? '
+                        'AND IFNULL(ok,1)=1 LIMIT 1', (t0, t1)):
+                    return 'tx'
+            except Exception:
+                pass
+            return ''
+        try:
+            if self.store.one('SELECT id FROM aprs_packets WHERE ts_epoch BETWEEN ? AND ? '
+                              'LIMIT 1', (t0, t1)):
+                return 'rx'
+        except Exception:
+            pass
+        return ''
 
     def status(self):
         st = self.settings()
