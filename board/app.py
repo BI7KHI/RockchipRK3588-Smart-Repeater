@@ -2299,6 +2299,20 @@ def api_voice_summary_run():
     return api_ok(started=True, day=day)
 
 
+@app.route('/api/voice/reclassify', methods=['POST'])
+@login_required
+@admin_required
+def api_voice_reclassify():
+    """按 APRS 收发记录重跑时间交叉判定，修正被削顶带偏的分类（不重跑 ASR）。"""
+    data = request.get_json(silent=True) or {}
+    day = (data.get('day') or '').strip() or None
+    dry = bool(data.get('dry'))
+    changed = voice_service_instance.reclassify_aprs(day, dry=dry)
+    audit('voice_reclassify', '%s dry=%s n=%d' % (day or 'all', dry, len(changed)))
+    return api_ok(changed=len(changed), dry=dry,
+                  items=[{'id': i, 'from': o, 'to': n} for i, o, n in changed[:200]])
+
+
 @app.route('/api/voice/cleanup', methods=['POST'])
 @login_required
 @admin_required

@@ -249,11 +249,22 @@
         const left = Math.max(0, Math.min(100, ((it.epoch - dayStart) / span) * 100));
         const w = Math.max(0.25, ((it.seconds || 1) / span) * 100);
         const b = document.createElement('div');
-        b.className = 'vlog-tl-block cat-' + (it.category || it.kind || 'empty')
+        // 配色优先级：APRS（含本机 APRS 发射）> 本机发射 > 语音 > 其它
+        // 后端 day_peaks 必须返回 category/kind，否则这里全落到 empty 变灰。
+        const cat = it.category || '';
+        let cls;
+        if (cat === 'aprs') cls = 'cat-aprs';
+        else if (it.kind === 'tx' || it.kind === 'both') cls = 'cat-tx';
+        else if (cat === 'voice') cls = 'cat-voice';
+        else if (cat) cls = 'cat-' + cat;
+        else cls = 'cat-empty';
+        b.className = 'vlog-tl-block ' + cls
           + (it.kind === 'tx' ? ' kind-tx' : '') + (it.kind === 'both' ? ' kind-both' : '');
         b.style.left = left + '%';
         b.style.width = w + '%';
-        b.title = (it.ts || '') + ' · ' + (it.seconds || 0).toFixed(1) + 's';
+        b.title = (it.ts || '') + ' · ' + (it.kind_label || it.kind || '')
+          + ' · ' + (it.category_label || cat || '待识别')
+          + ' · ' + (it.seconds || 0).toFixed(1) + 's';
         b.dataset.id = it.id;
         b.addEventListener('click', () => selectItem(it.id));
         track.appendChild(b);
