@@ -253,6 +253,8 @@
       var wx = null, tel = null;
       try { wx = p.wx_json ? JSON.parse(p.wx_json) : null; } catch (e) { }
       try { tel = p.telemetry_json ? JSON.parse(p.telemetry_json) : null; } catch (e) { }
+      var mice = null;
+      try { mice = p.mice_json ? JSON.parse(p.mice_json) : null; } catch (e) { }
       var kv = [
         ['时间', p.ts], ['来源', p.src], ['目的', p.dst], ['路径', p.path],
         ['类型', (p.dtype_label || '') + ' (' + (p.dtype || '') + ')'],
@@ -268,6 +270,15 @@
       kv.push(['信息字段', p.info || '']);
       if (wx) kv.push(['气象(已换算SI)', JSON.stringify(wx)]);
       if (tel) kv.push(['遥测', JSON.stringify(tel)]);
+      if (mice) {
+        kv.push(['Mic-E 目的地址', (mice.mice_dest || '') +
+          '（Mic-E 把纬度编码在目的地址里，这是本包的纬度来源）']);
+        kv.push(['Mic-E 半球', (mice.mice_lat_ns || '') + (mice.mice_lon_ew || '') +
+          '，经度偏移 +' + (mice.mice_lon_offset || 0) + '00°']);
+        kv.push(['Mic-E 状态位', (mice.mice_status || '') +
+          '（标准集 ' + (mice.mice_std_msg || 0) + ' / 自定义集 ' + (mice.mice_cust_msg || 0) + '）']);
+        kv.push(['Mic-E 类型', mice.mice_msg_capable ? '` 支持消息' : "' 单向追踪器"]);
+      }
       kv.push(['收录时间', p.created || '']);
 
       var html = '<div class="aprs-detail-head"><strong>' + esc(p.src) + '</strong>  ' +
