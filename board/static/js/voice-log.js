@@ -742,12 +742,13 @@
     await loadList();
     await loadSummary();
     await loadCsWhitelist();
-    loadStatus();
-    setInterval(loadStatus, 3000);
-    setInterval(() => {
+    // 上一次 settle 之后再排下一次。原来用 setInterval 不等返回，
+    // /api/voice/status 一变慢就会重叠堆积，把板端 GIL 抢死（见 static/js/poll.js）。
+    ELF2Poll.loop(loadStatus, 3000, { immediate: true });
+    ELF2Poll.loop(() => {
       const a = $('#vlog-audio');
       if (a && !a.paused) return;
-      loadList();
+      return loadList();
     }, 15000);
   });
 })();

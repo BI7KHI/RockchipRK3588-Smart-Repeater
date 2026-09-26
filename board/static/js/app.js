@@ -926,7 +926,7 @@
       if ($('#mic-device')) $('#mic-device').textContent = l.device || '--';
       setBar('#mic-level-bar', level);
       if (!l.running && micPollTimer) {
-        clearInterval(micPollTimer);
+        micPollTimer.stop();
         micPollTimer = null;
       }
     } catch (e) { /* ignore polling errors */ }
@@ -968,8 +968,10 @@
     try {
       await apiFetch('/api/mic/capture/start', { method: 'POST', body: '{}' });
       showToast('开发板麦克风采集已启动', 'success');
-      if (!micPollTimer) micPollTimer = setInterval(loadMicLevel, 250);
-      loadMicLevel();
+      // 电平轮询 250ms：必须不重叠，否则板端一变慢就是 4 请求/秒的堆积源
+      if (!micPollTimer) {
+        micPollTimer = ELF2Poll.loop(loadMicLevel, 250, { immediate: true });
+      }
     } catch (e) { showToast(e.message, 'error'); }
   }
 
@@ -978,7 +980,7 @@
       stopMicListen();
       await apiFetch('/api/mic/capture/stop', { method: 'POST', body: '{}' });
       showToast('开发板麦克风采集已停止', 'success');
-      if (micPollTimer) { clearInterval(micPollTimer); micPollTimer = null; }
+      if (micPollTimer) { micPollTimer.stop(); micPollTimer = null; }
       loadMicLevel();
     } catch (e) { showToast(e.message, 'error'); }
   }
@@ -2748,7 +2750,7 @@
     loadCameraStatus();
     loadMicLevel();
     loadMicSettings();
-    cameraOsdTimer = setInterval(updateCameraOsd, 1000);
+    cameraOsdTimer = ELF2Poll.loop(updateCameraOsd, 1000);
     if (role === 'admin') {
       loadUsers();
       loadSettings();
@@ -2759,15 +2761,17 @@
       loadLlmStats();
     }
     loadCalibration();
-    setInterval(loadStatus, 3000);
-    updateRelayState();
-    setInterval(updateRelayState, 1500);
-    setInterval(pollPttDiag, 1200);
-    setInterval(loadWeatherRealtime, 2000);
-    setInterval(loadWeatherDaily, 10000);
-    setInterval(loadRainRealtime, 2000);
-    setInterval(loadThRealtime, 5000);
-    setInterval(pollBusyDiag, 2000);
-    setInterval(loadRainHourly, 10000);
+    // 全部改成 ELF2Poll.loop：上一次 settle 之后再排下一次，绝不并发叠加。
+    // 原来用 setInterval 时不接口变慢（板端单次可到 10~27s）就会重叠堆积，
+    // 把 Flask 的 GIL 抢死 —— 见 static/js/poll.js 顶部说明。
+    ELF2Poll.loop(loadStatus, 3000);
+    ELF2Poll.loop(updateRelayState, 1500, { immediate: true });
+    ELF2Poll.loop(pollPttDiag, 1200);
+    ELF2Poll.loop(loadWeatherRealtime, 2000);
+    ELF2Poll.loop(loadWeatherDaily, 10000);
+    ELF2Poll.loop(loadRainRealtime, 2000);
+    ELF2Poll.loop(loadThRealtime, 5000);
+    ELF2Poll.loop(pollBusyDiag, 2000);
+    ELF2Poll.loop(loadRainHourly, 10000);
   });
 })();

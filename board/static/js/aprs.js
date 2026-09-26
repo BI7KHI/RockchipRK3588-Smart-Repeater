@@ -623,12 +623,14 @@
     initMap();
     bind();
     loadStatus(); loadList(true); loadGeo(); loadTxLog();
-    setInterval(function () {
-      loadStatus();
-      if ($('#aprs-live').checked) loadList(false);
+    // 不重叠轮询：上一次返回之后才排下一次（见 static/js/poll.js）
+    ELF2Poll.loop(function () {
+      var p = loadStatus();
+      if ($('#aprs-live').checked) return Promise.all([p, loadList(false)]);
+      return p;
     }, 4000);
-    setInterval(function () {
-      if ($('#aprs-live').checked) loadGeo();
+    ELF2Poll.loop(function () {
+      if ($('#aprs-live').checked) return loadGeo();
     }, 15000);
     console.log('[APRS] ready');
   }

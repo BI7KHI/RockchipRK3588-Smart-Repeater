@@ -485,9 +485,9 @@
     });
 
     loadTurns();
-    poll();
-    pollTimer = setInterval(poll, 1500);
-    setInterval(loadTurns, 15000);
+    // 不重叠轮询：上一次返回之后才排下一次（见 static/js/poll.js）
+    pollTimer = ELF2Poll.loop(poll, 1500, { immediate: true });
+    ELF2Poll.loop(loadTurns, 15000);
 
     $('#btn-as-refresh').addEventListener('click', function () {
       poll(); loadTurns(); toast('已刷新');

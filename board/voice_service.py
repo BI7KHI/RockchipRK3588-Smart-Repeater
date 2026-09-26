@@ -1046,6 +1046,11 @@ class VoiceService:
         self.started_at = time.time()
         self._threads_started = False
         self.started = False
+        # 目录用量扫描是 O(文件数)，而 status() 被前端每 3s 轮询一次：
+        # 加一层短 TTL 缓存，避免反复遍历整个语音日志目录。
+        self._usage_lock = threading.Lock()
+        self._usage_cache = None
+        self._usage_ttl = 15.0
 
     # -- 配置/依赖注入 -----------------------------------------------------
     def configure(self, get_rx, get_tx, provider_config, setting_getter=None,
@@ -1665,9 +1670,18 @@ class VoiceService:
             pass
         return ''
 
-    def status(self):
-        st = self.settings()
-        base = Path(st.get('vlog_dir') or DEFAULTS['vlog_dir'])
+    def _dir_usage(self, base):
+        """统计目录下 .wav 的数量与总大小（带短 TTL 缓存）。
+
+        这是 O(文件数) 的递归遍历，而 status() 会被前端每 3s 轮询一次。
+        缓存 15s：对轮询来说足够新，又把重复扫描降一个数量级。
+        """
+        key = str(base)
+        now = time.time()
+        with self._usage_lock:
+            c = self._usage_cache
+            if c and c[0] == key and (now - c[1]) < self._usage_ttl:
+                return c[2], c[3]
         size_mb = 0.0
         files = 0
         try:
@@ -1680,6 +1694,14 @@ class VoiceService:
                         pass
         except Exception:
             pass
+        with self._usage_lock:
+            self._usage_cache = (key, now, size_mb, files)
+        return size_mb, files
+
+    def status(self):
+        st = self.settings()
+        base = Path(st.get('vlog_dir') or DEFAULTS['vlog_dir'])
+        size_mb, files = self._dir_usage(base)
         rec = self.recorder
         today = datetime.now().strftime('%Y-%m-%d')
         recent = self.store.query(

@@ -49,8 +49,11 @@
     window.APP_ROLE = {{ role|tojson }};
     window.APP_USER = {{ user|tojson }};
   </script>
+  {# poll.js 必须在 app_js 块之外：aprs/assistant/voice_log 页面会用
+     {% block app_js %}{% endblock %} 整个覆盖掉那个块 #}
+  <script src="{{ url_for('static', filename='js/poll.js', v='20260930b') }}"></script>
   {% block app_js %}
-  <script src="{{ url_for('static', filename='js/app.js', v='20260930a') }}"></script>
+  <script src="{{ url_for('static', filename='js/app.js', v='20260930b') }}"></script>
   {% endblock %}
   {% block scripts %}{% endblock %}
 </body>

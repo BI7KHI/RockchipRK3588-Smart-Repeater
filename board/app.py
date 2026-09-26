@@ -2050,15 +2050,24 @@ def api_agent_chat():
 # 中继语音日志：BUSY/PTT 触发录音 + 异步 ASR + 智能分类 + 每日总结
 # ---------------------------------------------------------------------------
 def _vlog_settings_direct():
-    """无 app context 读取全部 vlog_* 设置（供语音服务后台线程使用）。"""
+    """无 app context 读取全部 vlog_* 设置（供语音服务后台线程使用）。
+
+    连接必须在 finally 里关（原先 close() 在 try 体内，异常路径会漏连接/fd）。
+    """
     out = {}
+    db = None
     try:
         db = sqlite3.connect(str(DB_PATH), timeout=3)
         for k, v in db.execute("SELECT key,value FROM settings WHERE key LIKE 'vlog_%'"):
             out[k] = v
-        db.close()
     except Exception:
         pass
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
     return out
 
 
@@ -2926,14 +2935,24 @@ def api_asr_recordings():
 # 网页对讲 / 录音分段 / AUX 播放
 # ---------------------------------------------------------------------------
 def _setting_direct(key, default=''):
-    """不依赖 Flask app context 读取设置，供启动阶段/播放线程使用。"""
+    """不依赖 Flask app context 读取设置，供启动阶段/播放线程使用。
+
+    连接必须在 finally 里关：原先 db.close() 直接写在 try 体内，
+    execute 一抛异常就漏一个 SQLite 连接（连带 fd）——实测进程里积了 60 个。
+    """
+    db = None
     try:
         db = sqlite3.connect(str(DB_PATH), timeout=3)
         row = db.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
-        db.close()
         return row[0] if row else default
     except Exception:
         return default
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 def _amixer_sget(control):
@@ -5717,15 +5736,24 @@ def api_weather():
 # 中继语音助手：BUSY 语音唤醒 → ASR → LLM → TTS → 受控发射
 # ---------------------------------------------------------------------------
 def _assist_settings_direct():
-    """无 app context 读取全部 assist_* 设置（供助手后台线程使用）。"""
+    """无 app context 读取全部 assist_* 设置（供助手后台线程使用）。
+
+    连接必须在 finally 里关（原先 close() 在 try 体内，异常路径会漏连接/fd）。
+    """
     out = {}
+    db = None
     try:
         db = sqlite3.connect(str(DB_PATH), timeout=3)
         for k, v in db.execute("SELECT key,value FROM settings WHERE key LIKE 'assist_%'"):
             out[k] = v
-        db.close()
     except Exception:
         pass
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
     return out
 
 
@@ -6171,6 +6199,116 @@ def api_assist_clean():
     return api_ok(raw=text, cleaned=cleaned, raw_len=len(text), cleaned_len=len(cleaned))
 
 
+class _ReleaseOnClose:
+    """包住 WSGI 可迭代对象，在响应真正结束时才释放并发额度。
+
+    流式响应（MJPEG / PCM / SSE）的迭代体是在中间件的 __call__ 返回之后
+    才被消费的，所以在 __call__ 的 finally 里释放会让流式请求完全不占额度。
+    """
+
+    def __init__(self, iterable, sem):
+        self._it = iter(iterable)
+        self._sem = sem
+        self._done = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        try:
+            return next(self._it)
+        except StopIteration:
+            self._release()
+            raise
+
+    def close(self):
+        self._release()
+        closer = getattr(self._it, 'close', None)
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
+
+    def _release(self):
+        if not self._done:
+            self._done = True
+            self._sem.release()
+
+
+class _BoundedConcurrency:
+    """WSGI 中间件：限制**同时**进入 Flask 的请求数。
+
+    板端是单进程 Flask + GIL。Werkzeug 开发服务器是 thread-per-connection
+    且没有上限，前端一旦出现轮询重叠，积压就直接变成线程数：几百个线程抢
+    一把 GIL，接口从 40ms 劣化到 10~27 秒。这里把并发锁死，超载时是排队
+    （或明确 503），而不是无限起线程。
+    """
+
+    def __init__(self, inner, limit):
+        self.inner = inner
+        self.sem = threading.BoundedSemaphore(max(1, int(limit)))
+        try:
+            self.timeout = float(os.environ.get('RELAY_WEB_QUEUE_TIMEOUT', '30') or 30)
+        except Exception:
+            self.timeout = 30.0
+
+    def __call__(self, environ, start_response):
+        if not self.sem.acquire(timeout=self.timeout):
+            start_response('503 Service Unavailable',
+                           [('Content-Type', 'text/plain; charset=utf-8'),
+                            ('Retry-After', '5')])
+            return [b'busy: too many concurrent requests\n']
+        try:
+            iterable = self.inner(environ, start_response)
+        except Exception:
+            self.sem.release()
+            raise
+        return _ReleaseOnClose(iterable, self.sem)
+
+
+def _serve():
+    """启动 Web 服务（有界并发）。
+
+    优先用 waitress（真正的有界线程池）；没装就退回 Werkzeug，但套一层信号量
+    中间件把**同时执行**的请求数限住，保证「超载 = 排队」而不是
+    「超载 = 线程无限增长」。
+
+    环境变量：
+      RELAY_WEB_SERVER=werkzeug   强制回退（waitress 若在某场景有问题时的后路）
+      RELAY_WEB_SERVER=waitress   强制用 waitress（未安装则报错并回退）
+      RELAY_WEB_THREADS           并发上限，默认 16
+    """
+    port = int(os.environ.get('RELAY_WEB_PORT', '8080'))
+    try:
+        threads = max(2, int(os.environ.get('RELAY_WEB_THREADS', '16') or 16))
+    except Exception:
+        threads = 16
+
+    prefer = (os.environ.get('RELAY_WEB_SERVER') or 'auto').strip().lower()
+    waitress_serve = None
+    if prefer != 'werkzeug':
+        try:
+            from waitress import serve as waitress_serve
+        except ImportError:
+            waitress_serve = None
+            if prefer == 'waitress':
+                print('[WEB] 指定了 waitress 但未安装，回退 Werkzeug', flush=True)
+
+    if waitress_serve is None:
+        print('[WEB] Werkzeug + 并发信号量阀（同时请求上限 %d）；'
+              '安装 waitress 可换成真正的有界线程池' % threads, flush=True)
+        app.wsgi_app = _BoundedConcurrency(app.wsgi_app, threads)
+        app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+        return
+
+    print('[WEB] waitress 有界线程池启动：0.0.0.0:%d threads=%d' % (port, threads),
+          flush=True)
+    waitress_serve(app, host='0.0.0.0', port=port, threads=threads,
+                   connection_limit=max(threads * 4, 64),
+                   channel_timeout=900, ident='elf2-relay-web')
+
+
 if __name__ == '__main__':
     init_db()
     _ensure_audio_unmuted()
@@ -6187,5 +6325,4 @@ if __name__ == '__main__':
     except Exception:
         pass
     # 循环录像守护线程已在模块加载时启动（见 _camera_autostart_worker）
-    app.run(host='0.0.0.0', port=int(os.environ.get('RELAY_WEB_PORT', '8080')),
-            debug=False, threaded=True)
+    _serve()
