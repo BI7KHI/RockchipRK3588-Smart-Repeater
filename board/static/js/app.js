@@ -638,9 +638,31 @@
     } catch (e) { showToast(e.message, 'error'); }
   }
 
+  // 朗读策略落地：policy 是「行为开关」，必须最先应用。
+  // 原来这三行写在整个 try 的最末尾，前面「列音色包 / 渲染音色表」任何一步抛异常，
+  // 策略就被静默跳过、复选框保持 HTML 默认的未勾选 → 流式朗读一声不响地关掉。
+  function applySpeakPolicy(on) {
+    if ($('#tts-auto-speak')) $('#tts-auto-speak').checked = !!on;
+    if ($('#set-tts-auto-speak')) $('#set-tts-auto-speak').checked = !!on;
+    if (on && $('#chat-stream')) $('#chat-stream').checked = true;
+    const st = $('#tts-stream-status');
+    if (st && !ttsStreamSession) {
+      st.textContent = on ? '流式朗读：策略已开（发送即边出字边朗读）'
+                          : '流式朗读：策略关闭（勾选「自动朗读」开启）';
+    }
+  }
+
   async function loadTtsProviders() {
+    let data;
     try {
-      const data = await apiFetch('/api/tts/providers');
+      data = await apiFetch('/api/tts/providers');
+    } catch (e) {
+      showToast(e.message, 'error');
+      return;
+    }
+    // 先落地策略，再做下面这些纯装饰性的下拉/表格渲染
+    applySpeakPolicy(data.auto_speak);
+    try {
       ttsState.current = 'local';
       ttsState.voices = data.voices || [];
       const voiceOptions = ttsState.voices.map(v =>
@@ -678,10 +700,8 @@
         if (val && Array.from(el.options).some(o => o.value === val)) el.value = val;
       });
       renderVoiceTable();
-      if ($('#tts-auto-speak')) $('#tts-auto-speak').checked = !!data.auto_speak;
-      if ($('#set-tts-auto-speak')) $('#set-tts-auto-speak').checked = !!data.auto_speak;
-      if (data.auto_speak && $('#chat-stream')) $('#chat-stream').checked = true;
     } catch (e) {
+      // 只影响下拉/表格这类展示，策略已在上面落地，不会被这里连累
       showToast(e.message, 'error');
     }
   }
@@ -697,7 +717,6 @@
       body: JSON.stringify({ text, provider, voice, auto_play: autoPlay, en_voice: enVoice || '', icao: !!icao }),
     });
     showToast(`TTS 已合成：${data.voice}（${(data.size / 1024).toFixed(1)} KB）`, 'success');
-    loadRecordings();
     if (playInWeb) playTtsInWeb(data.filename);
     return data;
   }
@@ -1049,7 +1068,6 @@
       const data = await apiFetch('/api/intercom/upload', { method: 'POST', body: fd });
       showToast(`录音已上传：${data.duration_ms} ms，${(data.size / 1024).toFixed(1)} KB`, 'success');
       $('#record-status').textContent = '录音已上传';
-      loadRecordings();
     } catch (e) {
       showToast('录音上传失败：' + e.message, 'error');
       $('#record-status').textContent = '上传失败';
@@ -1190,25 +1208,6 @@
     setBar('#push-meter', 0);
     const info = $('#push-info');
     if (info) info.textContent = `本次推送 ${(pushBytes / 1024).toFixed(0)} KB；松开按钮或 5 秒无数据，板端会自动释放 PTT。`;
-  }
-
-  async function loadRecordings() {
-    try {
-      const data = await apiFetch('/api/intercom/recordings');
-      const tbody = $('#recordings-table tbody');
-      if (!data.recordings.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="muted">暂无录音</td></tr>';
-        return;
-      }
-      tbody.innerHTML = data.recordings.map(r => `
-        <tr>
-          <td>${escapeHtml(r.ts)}</td>
-          <td>${escapeHtml(r.username || '--')}</td>
-          <td>${r.duration_ms || 0} ms</td>
-          <td>${((r.size_bytes || 0) / 1024).toFixed(1)} KB</td>
-          <td><button class="btn ghost" data-play="${r.id}">重放</button></td>
-        </tr>`).join('');
-    } catch (e) { showToast(e.message, 'error'); }
   }
 
   async function playTestTone() {
@@ -2508,6 +2507,9 @@
     $('#btn-tts-stop')?.addEventListener('click', stopTtsStream);
     $('#tts-auto-speak')?.addEventListener('change', (e) => {
       if (e.target.checked && $('#chat-stream')) $('#chat-stream').checked = true;
+      // 同步设置页复选框 + 刷新策略提示，让「流式朗读是否常开」一眼可见
+      if ($('#set-tts-auto-speak')) $('#set-tts-auto-speak').checked = e.target.checked;
+      applySpeakPolicy(e.target.checked);
     });
     $('#chat-text')?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
@@ -2632,15 +2634,7 @@
       try {
         const data = await apiFetch('/api/intercom/upload', { method: 'POST', body: fd });
         showToast(`WAV 已上传并发送到 AUX：${data.duration_ms} ms`, 'success');
-        loadRecordings();
       } catch (e) { showToast(e.message, 'error'); }
-    });
-    $('#recordings-table')?.addEventListener('click', (e) => {
-      const id = e.target?.dataset?.play;
-      if (!id) return;
-      apiFetch(`/api/intercom/play/${id}`, { method: 'POST', body: '{}' })
-        .then(() => showToast('正在重放录音', 'success'))
-        .catch(err => showToast(err.message, 'error'));
     });
     $('#users-table')?.addEventListener('click', async (e) => {
       const delId = e.target?.dataset?.del;
@@ -2667,7 +2661,6 @@
     loadStatus();
     loadProviders();
     loadTtsProviders();
-    loadRecordings();
     loadReservedPages();
     loadCameraStatus();
     loadMicLevel();
@@ -2687,7 +2680,6 @@
     updateRelayState();
     setInterval(updateRelayState, 1500);
     setInterval(pollPttDiag, 1200);
-    setInterval(loadRecordings, 10000);
     setInterval(loadWeatherRealtime, 2000);
     setInterval(loadWeatherDaily, 10000);
     setInterval(loadRainRealtime, 2000);

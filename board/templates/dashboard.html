@@ -105,15 +105,6 @@
       <p class="muted small">录音完成后自动发送到开发板 3.5mm AUX 输出。通过局域网 HTTP 访问时可用“上传 WAV 测试”验证 AUX 输出。</p>
       <div class="meter"><span id="record-meter" style="width:0%"></span></div>
     </div>
-    <div class="card">
-      <div class="card-title">录音记录</div>
-      <div class="table-wrap">
-        <table class="data-table" id="recordings-table">
-          <thead><tr><th>时间</th><th>用户</th><th>时长</th><th>大小</th><th>操作</th></tr></thead>
-          <tbody><tr><td colspan="5" class="muted">暂无录音</td></tr></tbody>
-        </table>
-      </div>
-    </div>
   </div>
   <div class="card mt">
     <div class="card-title">开发板 3.5mm 耳机输入监听测试</div>
@@ -213,8 +204,8 @@
         <button class="btn ghost" id="btn-tts-test">测试朗读（板端 AUX）</button>
         <button class="btn primary" id="btn-tts-test-web">朗读到网页</button>
         <button class="btn ghost" id="btn-tts-stop">停止朗读</button>
-        <label class="checkline"><input type="checkbox" id="tts-auto-speak"> 自动朗读 LLM 回复</label>
-        <span id="tts-stream-status" class="muted small">流式朗读：未启动</span>
+        <label class="checkline" title="开启后：LLM 流式输出时每凑够一句就立即合成朗读（Piper），不必等整段回复结束"><input type="checkbox" id="tts-auto-speak"{% if tts_auto_speak %} checked{% endif %}> 自动朗读 LLM 回复（流式：边出字边朗读）</label>
+        <span id="tts-stream-status" class="muted small">流式朗读：{% if tts_auto_speak %}策略已开{% else %}策略关闭{% endif %}</span>
       </div>
       <div class="row gap mt">
         <audio id="tts-audio" controls preload="none" style="width:100%;max-width:520px"></audio>
@@ -846,7 +837,7 @@
       <label>ICAO 字母串专用音色（咬字清晰优先）</label>
       <select id="set-tts-icao-voice"></select>
       <label class="checkline"><input type="checkbox" id="set-tts-icao"> 呼号/单字母按 ICAO 字母解释法朗读（BG7XYZ → Bravo Golf Seven X-ray Yankee Zulu）</label>
-      <label class="checkline"><input type="checkbox" id="set-tts-auto-speak"> LLM 回复后自动朗读到 3.5mm AUX</label>
+      <label class="checkline" title="运行策略：LLM 流式输出时边出字边朗读（Piper），并保证朗读全程 PTT 使能"><input type="checkbox" id="set-tts-auto-speak"{% if tts_auto_speak %} checked{% endif %}> LLM 回复流式朗读到 3.5mm AUX（边生成边朗读）</label>
       <hr class="sep">
       <div class="card-title">音色包管理</div>
       <div class="table-wrap">

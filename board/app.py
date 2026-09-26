@@ -625,7 +625,9 @@ def _set_default_settings(db):
         'tts_en_voice': '',        # 英文片段使用的音色（空=自动挑 language 为 en 的音色）
         'tts_icao': '1',           # 呼号/单字母按 ICAO 字母解释法朗读
         'tts_icao_voice': '',      # ICAO 字母串专用音色（空=自动优先 lessac 等官方英文音色）
-        'tts_auto_speak': '0',
+        # 默认常开：LLM 流式输出时边出字边用 Piper 朗读。
+        # 这是「运行策略」而不是靠前端复选框——前端同步一旦失败就会静默关掉流式朗读。
+        'tts_auto_speak': '1',
     }
     for k, v in defaults.items():
         db.execute('INSERT OR IGNORE INTO settings(key, value) VALUES(?,?)', (k, v))
@@ -887,8 +889,10 @@ def logout():
 @app.route('/')
 @login_required
 def index():
+    # tts_auto_speak 一并在首屏渲染：策略状态不依赖前端 JS 同步成功
     return render_template('dashboard.html', user=session.get('username'),
-                           role=session.get('role'))
+                           role=session.get('role'),
+                           tts_auto_speak=bool_setting('tts_auto_speak', True))
 
 
 # ---------------------------------------------------------------------------
