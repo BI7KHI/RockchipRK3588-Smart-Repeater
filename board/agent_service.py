@@ -155,6 +155,71 @@ def wants_realtime(text):
     return any(k in t for k in DATA_KEYWORDS)
 
 
+# ---------------------------------------------------------------------------
+# 总结轮（拿到工具数据后那一次调用）——行为约束必须在这里重新出现
+# ---------------------------------------------------------------------------
+# 为什么要有这一节：**真正被朗读/展示的文本是总结轮产出的**。第一轮在
+# wants_realtime() 命中时会被明确要求「只输出一行读取指令，不要回答用户」，
+# 于是把行为约束（语音播报规范）只写进第一轮提示词，等于对最终答案完全没生效
+# ——页面上的「注入预览」看着一切正常，模型却当没看见。
+#
+# 实测（2026-09-26，provider=external / deepseek-chat）：assist_prompt_suffix
+# 里的「全中文单位（伏特/摄氏度）」「每句输出后加喵」全部未执行，回复仍是
+# 「当前电池电压为 10.8006 V。」——因为总结轮的消息体里一个字的约束都没有。
+#
+# 板端 RKLLM（Qwen2.5-1.5B）是另一套约束：实测提示词 >约 400 字直接空输出，
+# 而数据段本身已接近该上限，所以默认（auto）只回灌给外部云模型。
+SUMMARY_SPEC_MODES = ('auto', 'on', 'off')
+
+# 总结轮收尾语（中继语音助手用；网页 Agent 对话传自己的）
+SUMMARY_TAIL_ASSIST = ('直接给结论，不要说「根据数据」「根据您提供的数据」这类开场白，'
+                       '不要复述问题，用中文 1~2 句回答：')
+
+
+def summary_spec(spec='', provider='local', mode='auto', cap=1200):
+    """决定总结轮要回灌多少「行为约束」，返回要回灌的文本（'' = 不回灌）。
+
+    mode:
+      auto（默认）—— 只回灌给外部云模型；板端 RKLLM 不回灌（见上）。
+      on / off    —— 强制回灌 / 强制不回灌。
+    cap: 回灌字符上限，防止长规范把板端模型顶到空输出。
+    """
+    s = (spec or '').strip()
+    if not s:
+        return ''
+    m = str(mode or 'auto').strip().lower()
+    if m not in SUMMARY_SPEC_MODES:
+        m = 'auto'
+    if m == 'off' or (m == 'auto' and str(provider) != 'external'):
+        return ''
+    try:
+        cap = max(120, min(4000, int(cap)))
+    except Exception:
+        cap = 1200
+    return s[:cap]
+
+
+def summary_messages(collected, question, spec='', provider='local',
+                     mode='auto', cap=1200, data_cap=280, tail=None):
+    """拼「总结轮」的消息体：拿到工具数据 → 要一句最终回答。
+
+    外部云模型把约束放进**真正的 system 轮**：权威性高，也不会被前面的数据段
+    冲淡；板端 RKLLM 实测不认 system 轮（所以第一轮才把指令并进用户消息），
+    在它身上只能把约束并进同一条用户消息。
+    """
+    tail = tail or SUMMARY_TAIL_ASSIST
+    data = ('设备实时数据：'
+            + json.dumps(collected, ensure_ascii=False)[:int(data_cap)])
+    sp = summary_spec(spec, provider, mode=mode, cap=cap)
+    if not sp:
+        return [{'role': 'user', 'content': data + '\n' + tail + (question or '')}]
+    if str(provider) == 'external':
+        return [{'role': 'system', 'content': sp},
+                {'role': 'user', 'content': data + '\n' + tail + (question or '')}]
+    return [{'role': 'user',
+             'content': '【播报要求】' + sp + '\n' + data + '\n' + tail + (question or '')}]
+
+
 def build_agent_prompt(base_prompt='', enabled=None):
     """基础提示词（用户注入） + 工具说明。"""
     parts = []

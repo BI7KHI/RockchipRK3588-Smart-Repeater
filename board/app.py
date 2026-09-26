@@ -1924,6 +1924,15 @@ def api_agent_chat():
     base_prompt = base_prompt[:4000]
     temperature = float(data.get('temperature', 0.3))
     max_tokens = int(data.get('max_tokens', 1024))
+    # 总结轮要不要回灌基础设定：见 agent_service.summary_spec（auto = 只给外部云模型）
+    sp_mode = (os.environ.get('RELAY_ASSIST_SUMMARY_SPEC') or 'auto').strip().lower()
+    if sp_mode not in agent_service.SUMMARY_SPEC_MODES:
+        sp_mode = 'auto'
+    try:
+        sp_cap = max(120, min(4000, int(
+            os.environ.get('RELAY_ASSIST_SUMMARY_SPEC_MAX') or 1200)))
+    except Exception:
+        sp_cap = 1200
 
     def generate():
         meter_all = agent_service.RateMeter()
@@ -1948,11 +1957,14 @@ def api_agent_chat():
                 content = agent_service.compose_user_prompt(base_prompt, question, enabled)
                 if force:
                     content += '\n现在只输出一行读取指令（格式 READ 名称 {}），不要回答用户。'
+                msgs = [{'role': 'user', 'content': content}]
             else:
-                # 数据已拿到：用一条**很短**的用户消息让模型总结（长提示词会导致空输出）
-                content = ('设备实时数据：' + json.dumps(collected, ensure_ascii=False)[:280] +
-                           '\n请用中文 1~3 句回答：' + question[:100])
-            msgs = [{'role': 'user', 'content': content}]
+                # 数据已拿到：让模型只做总结。约束必须在这一轮重新出现——
+                # **这一轮产出的字才是用户真正看到的**（第一轮被要求只输出读取指令）。
+                msgs = agent_service.summary_messages(
+                    collected, question[:100], base_prompt, provider,
+                    mode=sp_mode, cap=sp_cap,
+                    tail='请用中文 1~3 句回答：')
             payload = {'model': model, 'messages': msgs, 'stream': True,
                        'temperature': temperature, 'max_tokens': max_tokens}
             text = ''
@@ -5803,7 +5815,7 @@ def _assist_channel_busy():
 
 
 def _assist_ask(prompt, question='', max_tokens=256, temperature=0.3,
-                use_tools=True, max_iters=2):
+                use_tools=True, max_iters=2, sysprompt=''):
     """阻塞式 LLM 调用（可选 Agent 工具循环），供中继语音助手后台线程使用。
 
     参数说明（两者不能混用）：
@@ -5811,6 +5823,11 @@ def _assist_ask(prompt, question='', max_tokens=256, temperature=0.3,
                   只用于**第一轮**。绝不能再拿它去拼第二轮，否则模型会把
                   系统设定当成用户问题照抄回来（实测踩过）。
       question —— 用户那一句短问题，只用于**拿到数据后的总结轮**。
+      sysprompt—— 基础设定+语音播报规范的**原文**（不含历史与问题）。总结轮要
+                  靠它重新约束输出：真正被朗读的文本是总结轮产出的，而第一轮在
+                  force_first 下被要求「只输出读取指令、不要回答用户」，约束若
+                  只出现在第一轮，模型就当没看见（2026-09-26 实测：规范里的
+                  「全中文单位」「每句加喵」对 deepseek-chat 全部未生效）。
 
     为什么不用 /api/agent/chat 那套 SSE：助手要的是**完整一句话**才能合成语音，
     流式只增加复杂度没有收益，而且这里必须在后台线程里同步拿到结果。
@@ -5858,6 +5875,16 @@ def _assist_ask(prompt, question='', max_tokens=256, temperature=0.3,
         # q_short 只用于总结轮；prompt 只用于第一轮
         q_short = (question or '').strip() or (prompt or '')[:120]
         q_short = q_short[:120]
+        # 总结轮要不要回灌约束、回灌多少：见 agent_service.summary_spec 的说明。
+        # auto = 只给外部云模型（板端 RKLLM 提示词一长就空输出）。
+        sp_mode = (os.environ.get('RELAY_ASSIST_SUMMARY_SPEC') or 'auto').strip().lower()
+        if sp_mode not in agent_service.SUMMARY_SPEC_MODES:
+            sp_mode = 'auto'
+        try:
+            sp_cap = max(120, min(4000, int(
+                os.environ.get('RELAY_ASSIST_SUMMARY_SPEC_MAX') or 1200)))
+        except Exception:
+            sp_cap = 1200
         collected, used = [], []
         text = ''
         force_first = agent_on and agent_service.wants_realtime(q_short or prompt)
@@ -5872,13 +5899,15 @@ def _assist_ask(prompt, question='', max_tokens=256, temperature=0.3,
                     if force_first:
                         content += ('\n现在只输出一行读取指令'
                                     '（格式 READ 名称 {}），不要回答用户。')
+                msgs = [{'role': 'user', 'content': content}]
             else:
-                # 数据已拿到：用一条**很短**的用户消息让它总结。
-                # 板端 RKLLM 提示词一长就空输出，这里必须短。
-                content = ('设备实时数据：' + json.dumps(collected, ensure_ascii=False)[:280] +
-                           '\n直接给结论，不要说「根据数据」「根据您提供的数据」这类开场白，不要复述问题，用中文 1~2 句回答：' + q_short)
+                # 数据已拿到：让模型只做「总结成一句话」这一件事。
+                # 行为约束必须在这一轮重新出现：**这一轮产出的才是被朗读的文本**。
+                msgs = agent_service.summary_messages(
+                    collected, q_short, sysprompt, provider,
+                    mode=sp_mode, cap=sp_cap)
             body = {'model': cfg.get('model') or 'qwen2.5-1.5b',
-                    'messages': [{'role': 'user', 'content': content}],
+                    'messages': msgs,
                     'max_tokens': int(max_tokens), 'temperature': float(temperature),
                     'stream': False}
             r = requests.post(cfg['url'], json=body,
@@ -5918,10 +5947,9 @@ def _assist_ask(prompt, question='', max_tokens=256, temperature=0.3,
         if collected and (not text or agent_service.parse_tool_calls(text, valid=valid)):
             voice_service.llm_lease(300.0)
             body = {'model': cfg.get('model') or 'qwen2.5-1.5b',
-                    'messages': [{'role': 'user', 'content':
-                                  '设备实时数据：' +
-                                  json.dumps(collected, ensure_ascii=False)[:280] +
-                                  '\n直接给结论，不要说「根据数据」「根据您提供的数据」这类开场白，不要复述问题，用中文 1~2 句回答：' + q_short}],
+                    'messages': agent_service.summary_messages(
+                        collected, q_short, sysprompt, provider,
+                        mode=sp_mode, cap=sp_cap),
                     'max_tokens': int(max_tokens), 'temperature': float(temperature),
                     'stream': False}
             r = requests.post(cfg['url'], json=body,
