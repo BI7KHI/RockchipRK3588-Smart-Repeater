@@ -12,6 +12,24 @@
   .kv-list b.rec { color: #2ecc71; }          /* 本地录音中 */
   #btn-voice-busy.recording { background: #e74c3c; border-color: #e74c3c; color: #fff; }
   #agent-tool-list label { margin: 2px 0; }
+  /* 总览页子选项卡（运行概览 / 能量统计） */
+  .sub-tabs { display: flex; gap: 6px; margin: 0 0 14px; border-bottom: 1px solid var(--border); }
+  .sub-tab-btn { background: none; border: none; color: var(--muted); cursor: pointer;
+                 padding: 8px 14px; font-size: 14px; border-bottom: 2px solid transparent; }
+  .sub-tab-btn:hover { color: var(--fg); }
+  .sub-tab-btn.active { color: var(--fg); border-bottom-color: #4a6cf7; font-weight: 600; }
+  .sub-panel { display: none; }
+  .sub-panel.active { display: block; }
+  /* 能量统计：画布 + 悬停提示 */
+  .energy-wrap { position: relative; }
+  #energy-chart { width: 100%; height: 260px; display: block; border-radius: 8px; }
+  .energy-tip { position: absolute; pointer-events: none; z-index: 5;
+                background: rgba(13, 21, 38, .96); border: 1px solid #26334d;
+                border-radius: 8px; padding: 7px 10px; font-size: 12px; line-height: 1.5;
+                color: #e6edf7; white-space: nowrap; box-shadow: 0 6px 20px rgba(0,0,0,.45); }
+  .energy-tip.hidden { display: none; }
+  .energy-tip b { font-variant-numeric: tabular-nums; }
+  .energy-dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; }
 </style>
 {% endblock %}
 {% block content %}
@@ -22,6 +40,12 @@
     <h2>中继运行总览</h2>
     <span class="muted" id="last-update">--</span>
   </div>
+  <div class="sub-tabs" id="ov-subtabs">
+    <button class="sub-tab-btn active" data-subtab="ov-run">运行概览</button>
+    <button class="sub-tab-btn" data-subtab="ov-energy">能量统计</button>
+  </div>
+
+  <div class="sub-panel active" id="ov-run">
   <div class="grid grid-3">
     <div class="card">
       <div class="card-title">电池电压</div>
@@ -64,6 +88,73 @@
       </div>
     </div>
   </div>
+  </div><!-- /#ov-run -->
+
+  <div class="sub-panel" id="ov-energy">
+    <div class="panel-head">
+      <h3>能量统计（电池 / 光伏电压）</h3>
+      <div class="row gap">
+        <label class="inline-label">日期</label>
+        <input type="date" id="energy-date">
+        <label class="inline-label">时间轴采样</label>
+        <select id="energy-interval">
+          <option value="1">1 分钟</option>
+          <option value="5" selected>5 分钟</option>
+          <option value="10">10 分钟</option>
+          <option value="30">30 分钟</option>
+          <option value="60">60 分钟</option>
+        </select>
+        <button class="btn ghost" id="btn-energy-export">导出 CSV</button>
+      </div>
+    </div>
+    <div class="grid grid-3">
+      <div class="card">
+        <div class="card-title">电池电压（当日）</div>
+        <div class="kv-list">
+          <div><span>最高</span><b id="energy-bat-max">-- V</b></div>
+          <div><span>最高时刻</span><b id="energy-bat-max-ts">--</b></div>
+          <div><span>最低</span><b id="energy-bat-min">-- V</b></div>
+          <div><span>最低时刻</span><b id="energy-bat-min-ts">--</b></div>
+          <div><span>平均</span><b id="energy-bat-avg">-- V</b></div>
+          <div><span>峰谷差</span><b id="energy-bat-drop" title="当日最高与最低之差，反映负载/光照波动">-- V</b></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">光伏电压（当日）</div>
+        <div class="kv-list">
+          <div><span>最高</span><b id="energy-pv-max">-- V</b></div>
+          <div><span>最高时刻</span><b id="energy-pv-max-ts">--</b></div>
+          <div><span>最低</span><b id="energy-pv-min">-- V</b></div>
+          <div><span>最低时刻</span><b id="energy-pv-min-ts">--</b></div>
+          <div><span>平均</span><b id="energy-pv-avg">-- V</b></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">采样情况</div>
+        <div class="kv-list">
+          <div><span>采样点数</span><b id="energy-count">--</b></div>
+          <div><span>采样间隔</span><b id="energy-sample-info">--</b></div>
+          <div><span>保留天数</span><b id="energy-retention-info">--</b></div>
+          <div><span>记录起止</span><b id="energy-span">--</b></div>
+        </div>
+        <p class="muted small" id="energy-note">电压原先不落库，历史无法回溯；时间轴从启用采样后开始积累。</p>
+      </div>
+    </div>
+    <div class="card mt">
+      <div class="row gap" style="justify-content:space-between;align-items:center">
+        <div class="card-title" style="margin:0">全日电压时间轴</div>
+        <div class="muted small">
+          <span class="energy-dot" style="background:#f5a623"></span> 电池
+          <span class="energy-dot" style="background:#3b82f6;margin-left:10px"></span> 光伏
+          <span style="margin-left:10px">鼠标悬停查看该处数值</span>
+        </div>
+      </div>
+      <div class="energy-wrap">
+        <canvas id="energy-chart"></canvas>
+        <div class="energy-tip hidden" id="energy-tip"></div>
+      </div>
+    </div>
+  </div><!-- /#ov-energy -->
 </section>
 
 <!-- 网页对讲 -->
@@ -741,6 +832,27 @@
       <div class="row gap mt">
         <button class="btn primary" id="btn-save-cal">保存校准</button>
         <button class="btn ghost" id="btn-cal-design">填入设计值（电池 10.11 / 光伏 17.01）</button>
+      </div>
+      <div class="cal-row mt" style="border-top:1px solid var(--border);padding-top:12px">
+        <div>
+          <label>能量统计：采样间隔（秒）</label>
+          <input id="energy-sample-sec" type="number" min="10" max="600" step="10">
+        </div>
+        <div>
+          <label>采样保留（天）</label>
+          <input id="energy-retention-days" type="number" min="1" max="3650" step="30">
+        </div>
+        <div>
+          <label>电压采样落库</label>
+          <select id="energy-log-enabled">
+            <option value="1">开启（推荐）</option>
+            <option value="0">关闭</option>
+          </select>
+        </div>
+      </div>
+      <div class="row gap mt">
+        <button class="btn primary" id="btn-save-energy">保存能量统计设置</button>
+        <span class="muted small">关掉就不再写新采样；总览「能量统计」时间轴靠这些采样绘制</span>
       </div>
     </div>
     <div class="card" id="ptt-diag-card">

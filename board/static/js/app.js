@@ -94,6 +94,24 @@
     }
   }
 
+  // ---------------- 总览页子选项卡（运行概览 / 能量统计） ----------------
+  function initOverviewSubtabs() {
+    const box = $('#ov-subtabs');
+    if (!box) return;
+    $$('.sub-tab-btn', box).forEach(btn => {
+      btn.addEventListener('click', () => {
+        $$('.sub-tab-btn', box).forEach(b => b.classList.toggle('active', b === btn));
+        $$('#tab-overview .sub-panel').forEach(
+          p => p.classList.toggle('active', p.id === btn.dataset.subtab));
+        if (btn.dataset.subtab === 'ov-energy') {
+          // 首次切进来才拉数据：别让它在总览轮询里白拉一整天
+          if (!energyState.loaded) loadEnergy();
+          else drawEnergyChart();
+        }
+      });
+    });
+  }
+
   // ---------------- overview ----------------
   async function loadStatus() {
     try {
@@ -197,6 +215,40 @@
       showToast('电压校准已保存', 'success');
       loadStatus();
       loadCalibration();
+    } catch (e) { showToast(e.message, 'error'); }
+  }
+
+  // 能量统计采样设置（采样间隔 / 保留天数 / 是否落库）
+  async function loadEnergySettings() {
+    try {
+      const d = await apiFetch('/api/settings');
+      const s = d.settings || d || {};
+      if ($('#energy-sample-sec')) {
+        $('#energy-sample-sec').value = s.energy_sample_sec ?? 60;
+      }
+      if ($('#energy-retention-days')) {
+        $('#energy-retention-days').value = s.energy_retention_days ?? 365;
+      }
+      if ($('#energy-log-enabled')) {
+        $('#energy-log-enabled').value =
+          String(s.energy_log_enabled ?? '1') === '0' ? '0' : '1';
+      }
+    } catch (e) { /* 设置页读不到不该挡住整个总览 */ }
+  }
+
+  async function saveEnergySettings() {
+    try {
+      await apiFetch('/api/settings', {
+        method: 'POST',
+        body: JSON.stringify({
+          energy_sample_sec: parseInt($('#energy-sample-sec')?.value ?? '60', 10),
+          energy_retention_days: parseInt($('#energy-retention-days')?.value ?? '365', 10),
+          energy_log_enabled: $('#energy-log-enabled')?.value ?? '1',
+        }),
+      });
+      showToast('能量统计设置已保存（采样线程下一轮生效）', 'success');
+      loadEnergySettings();
+      if (energyState.loaded) loadEnergy(false);
     } catch (e) { showToast(e.message, 'error'); }
   }
 
@@ -1843,6 +1895,281 @@
     ctx.fillText(label(points[n - 1]), pad.l + cw - 30, h - 8);
   }
 
+  // ---------------- 能量统计（电池 / 光伏电压全日时间轴） ----------------
+  // 数据来自后台采样器写入的 voltage_readings。电压原先**不落库**，
+  // 所以历史补不回来，时间轴从启用采样之后开始积累。
+  const energyState = {
+    day: '', interval: 5, points: [], stats: null, loaded: false,
+    hover: -1, box: null, scale: null,
+  };
+
+  function energyToday() {
+    const d = new Date();
+    const p = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  }
+
+  // X 轴**固定 00:00→24:00**：这样不同日期的曲线能直接叠着比，也才叫「全日时间轴」。
+  function energySecOfDay(epoch) {
+    const d = new Date(epoch * 1000);
+    return d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds();
+  }
+
+  function energyFmtV(v, digits = 2) {
+    return (v === null || v === undefined) ? '--' : Number(v).toFixed(digits) + ' V';
+  }
+
+  function energyHm(ts) {
+    const m = /[T ](\d{2}:\d{2}:\d{2})/.exec(ts || '');
+    return m ? m[1] : (ts || '--');
+  }
+
+  function energyVisible() {
+    const p = $('#ov-energy');
+    const t = $('#tab-overview');
+    return !!(p && p.classList.contains('active')
+              && t && t.classList.contains('active'));
+  }
+
+  async function loadEnergy(showToast) {
+    const dayEl = $('#energy-date');
+    const ivEl = $('#energy-interval');
+    const day = (dayEl && dayEl.value) || energyToday();
+    const interval = parseInt((ivEl && ivEl.value) || '5', 10) || 5;
+    energyState.day = day;
+    energyState.interval = interval;
+    try {
+      const d = await apiFetch('/api/energy/day?day=' + encodeURIComponent(day)
+                               + '&interval=' + interval);
+      energyState.points = d.points || [];
+      energyState.stats = d.stats || {};
+      energyState.loaded = true;
+      energyState.hover = -1;
+      renderEnergyCards(d);
+      drawEnergyChart();
+    } catch (e) {
+      if (showToast !== false) toast('能量数据加载失败：' + e.message, 'error');
+    }
+  }
+
+  function renderEnergyCards(d) {
+    const st = d.stats || {};
+    const b = st.battery || {};
+    const p = st.pv || {};
+    const set = (id, txt) => { const el = $('#' + id); if (el) el.textContent = txt; };
+    set('energy-bat-max', energyFmtV(b.max));
+    set('energy-bat-max-ts', energyHm(b.max_ts));
+    set('energy-bat-min', energyFmtV(b.min));
+    set('energy-bat-min-ts', energyHm(b.min_ts));
+    set('energy-bat-avg', energyFmtV(b.avg));
+    set('energy-bat-drop', energyFmtV(st.battery_drop));
+    set('energy-pv-max', energyFmtV(p.max));
+    set('energy-pv-max-ts', energyHm(p.max_ts));
+    set('energy-pv-min', energyFmtV(p.min));
+    set('energy-pv-min-ts', energyHm(p.min_ts));
+    set('energy-pv-avg', energyFmtV(p.avg));
+    set('energy-count', String(st.points || 0) + ' 点');
+    const lg = d.logging || {};
+    set('energy-sample-info', (lg.sample_sec === undefined ? '--' : lg.sample_sec) + ' 秒');
+    set('energy-retention-info',
+        (lg.retention_days === undefined ? '--' : lg.retention_days) + ' 天');
+    set('energy-span', st.first_ts
+        ? (energyHm(st.first_ts) + ' ~ ' + energyHm(st.last_ts)) : '--');
+    const note = $('#energy-note');
+    if (note && lg.enabled === false) {
+      note.textContent = '电压采样当前已关闭（设置 → 硬件校准与射频），时间轴不会有新数据。';
+    }
+  }
+
+  // 缺桶**不连线**：某点为 null 就断开，让图上的空档老实表达「这段时间没采到」，
+  // 而不是拉一条直线假装连续。
+  function drawEnergySeries(ctx, pts, key, color, xOf, yOf) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    let pen = false;
+    pts.forEach(p => {
+      const v = p[key];
+      if (v === null || v === undefined) { pen = false; return; }
+      const x = xOf(p);
+      const y = yOf(v);
+      if (pen) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+      pen = true;
+    });
+    ctx.stroke();
+  }
+
+  function drawEnergyChart() {
+    const canvas = $('#energy-chart');
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth || 800;
+    const h = canvas.clientHeight || 260;
+    canvas.width = Math.max(300, w) * dpr;
+    canvas.height = h * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#0d1526';
+    ctx.fillRect(0, 0, w, h);
+    const pad = { l: 48, r: 14, t: 14, b: 26 };
+    const cw = Math.max(10, w - pad.l - pad.r);
+    const ch = h - pad.t - pad.b;
+    const pts = energyState.points || [];
+    energyState.box = { pad, cw, ch, w, h };
+    ctx.strokeStyle = '#26334d';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i++) {
+      const y = pad.t + ch * i / 4;
+      ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l + cw, y); ctx.stroke();
+    }
+    for (let hr = 3; hr < 24; hr += 3) {
+      const x = pad.l + cw * hr / 24;
+      ctx.globalAlpha = (hr % 6 === 0) ? 0.9 : 0.4;
+      ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, pad.t + ch); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#8fa2c4';
+    ctx.font = '11px Microsoft YaHei';
+    for (let hr = 0; hr <= 24; hr += 3) {
+      const x = pad.l + cw * hr / 24;
+      const lab = String(hr).padStart(2, '0') + ':00';
+      ctx.fillText(lab, Math.min(x, pad.l + cw - 28), h - 8);
+    }
+    if (!pts.length) {
+      ctx.fillStyle = '#8fa2c4';
+      ctx.font = '13px Microsoft YaHei';
+      ctx.fillText('当日暂无电压采样（采样从启用后开始，历史无法回溯）',
+                   pad.l + 10, pad.t + 24);
+      hideEnergyTip();
+      return;
+    }
+    const vals = [];
+    pts.forEach(p => {
+      if (p.battery !== null && p.battery !== undefined) vals.push(+p.battery);
+      if (p.pv !== null && p.pv !== undefined) vals.push(+p.pv);
+    });
+    let lo = vals.length ? Math.min.apply(null, vals) : 0;
+    let hi = vals.length ? Math.max.apply(null, vals) : 1;
+    if (!isFinite(lo) || !isFinite(hi)) { lo = 0; hi = 1; }
+    if (hi - lo < 0.5) { const mid = (hi + lo) / 2; lo = mid - 0.5; hi = mid + 0.5; }
+    const padV = Math.max(0.15, (hi - lo) * 0.12);
+    lo = Math.max(0, lo - padV);
+    hi = hi + padV;
+    const xOf = p => pad.l + cw * (energySecOfDay(p.epoch) / 86400);
+    const yOf = v => pad.t + ch - ch * ((v - lo) / (hi - lo));
+    energyState.scale = { lo, hi };
+    ctx.fillStyle = '#8fa2c4';
+    for (let i = 0; i <= 4; i++) {
+      ctx.fillText((hi - (hi - lo) * i / 4).toFixed(2), 6, pad.t + ch * i / 4 + 4);
+    }
+    drawEnergySeries(ctx, pts, 'battery', '#f5a623', xOf, yOf);
+    drawEnergySeries(ctx, pts, 'pv', '#3b82f6', xOf, yOf);
+    const hi2 = energyState.hover;
+    if (hi2 >= 0 && hi2 < pts.length) {
+      const p = pts[hi2];
+      const x = xOf(p);
+      ctx.strokeStyle = '#8fa2c4';
+      ctx.globalAlpha = 0.6;
+      ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, pad.t + ch); ctx.stroke();
+      ctx.globalAlpha = 1;
+      [['battery', '#f5a623'], ['pv', '#3b82f6']].forEach(pair => {
+        const v = p[pair[0]];
+        if (v === null || v === undefined) return;
+        ctx.fillStyle = pair[1];
+        ctx.beginPath(); ctx.arc(x, yOf(v), 3.2, 0, Math.PI * 2); ctx.fill();
+      });
+    }
+  }
+
+  function energyNearestIndex(clientX) {
+    const cv = $('#energy-chart');
+    const b = energyState.box;
+    if (!cv || !b || !energyState.points.length) return -1;
+    const rect = cv.getBoundingClientRect();
+    const sec = (clientX - rect.left - b.pad.l) / b.cw * 86400;
+    let bi = -1;
+    let bd = Infinity;
+    energyState.points.forEach((p, i) => {
+      const d = Math.abs(energySecOfDay(p.epoch) - sec);
+      if (d < bd) { bd = d; bi = i; }
+    });
+    return bi;
+  }
+
+  function hideEnergyTip() {
+    const t = $('#energy-tip');
+    if (t) t.classList.add('hidden');
+  }
+
+  function showEnergyTip(i, clientX) {
+    const tip = $('#energy-tip');
+    const b = energyState.box;
+    const p = energyState.points[i];
+    if (!tip || !b || !p) return;
+    const bits = ['<b>' + (p.time || '') + '</b>'];
+    bits.push('<span style="color:#f5a623">电池</span> <b>' + energyFmtV(p.battery) + '</b>');
+    bits.push('<span style="color:#3b82f6">光伏</span> <b>' + energyFmtV(p.pv) + '</b>');
+    if (p.battery_min !== null && p.battery_max !== null
+        && p.battery_max !== p.battery_min) {
+      bits.push('<span style="opacity:.7">本桶 ' + Number(p.battery_min).toFixed(2)
+                + '~' + Number(p.battery_max).toFixed(2) + ' V</span>');
+    }
+    bits.push('<span style="opacity:.7">' + (p.n || 0) + ' 个采样</span>');
+    tip.innerHTML = bits.join('<br>');
+    tip.classList.remove('hidden');
+    const wrap = tip.parentElement;
+    const wrapRect = wrap.getBoundingClientRect();
+    let left = clientX - wrapRect.left + 14;
+    if (left + tip.offsetWidth > wrap.clientWidth - 2) {
+      left = Math.max(2, left - tip.offsetWidth - 28);
+    }
+    tip.style.left = left + 'px';
+    tip.style.top = (b.pad.t + 6) + 'px';
+  }
+
+  function initEnergy() {
+    const cv = $('#energy-chart');
+    if (!cv) return;
+    const di = $('#energy-date');
+    if (di) {
+      di.value = energyToday();
+      di.max = energyToday();
+      di.addEventListener('change', () => loadEnergy());
+    }
+    const iv = $('#energy-interval');
+    if (iv) iv.addEventListener('change', () => loadEnergy());
+    const ex = $('#btn-energy-export');
+    if (ex) {
+      ex.addEventListener('click', () => {
+        const day = ($('#energy-date') && $('#energy-date').value) || energyToday();
+        window.location.href = '/api/energy/export?day=' + encodeURIComponent(day);
+      });
+    }
+    cv.addEventListener('mousemove', ev => {
+      const i = energyNearestIndex(ev.clientX);
+      if (i < 0) { hideEnergyTip(); return; }
+      if (i !== energyState.hover) {
+        energyState.hover = i;
+        drawEnergyChart();
+      }
+      showEnergyTip(i, ev.clientX);
+    });
+    cv.addEventListener('mouseleave', () => {
+      if (energyState.hover !== -1) {
+        energyState.hover = -1;
+        drawEnergyChart();
+      }
+      hideEnergyTip();
+    });
+    window.addEventListener('resize', () => {
+      if (energyVisible()) drawEnergyChart();
+    });
+    // 能量曲线按分钟刷新即可（采样间隔默认 60 秒），且只在子选项卡可见时拉
+    ELF2Poll.loop(() => { if (energyVisible()) loadEnergy(false); }, 60000,
+                  { skipHidden: true });
+  }
+
   // 传感器卡片实时状态（设置页友好显示：是否采集 / 当前值 / 最后成功 / 错误）
   // ---------------- BUSY 接收诊断（设置/校准页） ----------------
   async function pollBusyDiag() {
@@ -2570,6 +2897,7 @@
     $('#btn-save-cal')?.addEventListener('click', saveCalibration);
     bindPttSelfTest();
     $('#btn-cal-design')?.addEventListener('click', fillDesignCal);
+    $('#btn-save-energy')?.addEventListener('click', saveEnergySettings);
     bindVoiceInput();
     $('#btn-save-prompt')?.addEventListener('click', saveLlmAgentSettings);
     $('#btn-save-agent')?.addEventListener('click', saveLlmAgentSettings);
@@ -2741,6 +3069,8 @@
   document.addEventListener('DOMContentLoaded', () => {
     startBeijingClock();
     initTabs();
+    initOverviewSubtabs();
+    initEnergy();
     initAccordions();
     initEvents();
     loadStatus();
@@ -2759,6 +3089,7 @@
       loadSensorStatus();
       loadLlmAgentSettings();
       loadLlmStats();
+      loadEnergySettings();
     }
     loadCalibration();
     // 全部改成 ELF2Poll.loop：上一次 settle 之后再排下一次，绝不并发叠加。

@@ -52,6 +52,7 @@ import weather_service
 import voice_service
 import assistant_service
 import aprs_service
+import energy_service
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / 'relay.db'
@@ -471,6 +472,10 @@ def _set_default_settings(db):
         'pv_adc_channel': str(ADC_CHANNELS['pv']['default_channel']),
         'pv_zero_raw': str(ADC_CHANNELS['pv']['default_zero']),
         'pv_multiplier': str(ADC_CHANNELS['pv']['default_multiplier']),
+        # 能量统计：电压此前不落库，全天时间轴靠这个采样器攒
+        'energy_log_enabled': '1',
+        'energy_sample_sec': '60',
+        'energy_retention_days': '365',
         'record_auto_play': '1',
         'site_title': 'ELF2 智能中继控制中心',
         # 提示词注入 / Agent 工具
@@ -719,6 +724,17 @@ def init_db():
             ok INTEGER DEFAULT 1,
             note TEXT DEFAULT ''
         );
+        CREATE TABLE IF NOT EXISTS voltage_readings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            ts_epoch REAL NOT NULL,
+            battery REAL,
+            pv REAL,
+            battery_raw INTEGER,
+            pv_raw INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_volt_ts_epoch ON voltage_readings(ts_epoch);
+        CREATE INDEX IF NOT EXISTS idx_volt_ts ON voltage_readings(ts);
         '''
     )
     db.execute('PRAGMA journal_mode=WAL')
@@ -1058,6 +1074,127 @@ def voltage_payload():
     return out
 
 
+# ---------------------------------------------------------------------------
+# 能量统计：电池/光伏电压采样落库 + 全日时间轴
+# ---------------------------------------------------------------------------
+# 电压此前**完全没落库**（voltage_payload 按需读 ADC、算完即弃），所以「全天
+# 时间轴」的前提是先攒数据；历史补不回来，图表从部署后开始积累。
+def _db_direct():
+    """后台线程/非请求路径用的直连。
+
+    get_db() 把连接挂在 Flask 的 g 上，脱离请求上下文就会炸，所以采样线程
+    必须自己开连接。
+    """
+    db = sqlite3.connect(str(DB_PATH), timeout=10)
+    db.row_factory = sqlite3.Row
+    db.execute('PRAGMA journal_mode=WAL')
+    db.execute('PRAGMA synchronous=NORMAL')
+    return db
+
+
+def _energy_sample_once():
+    """采一次电压入库，返回是否写入。"""
+    pw = voltage_payload()
+    b = pw.get('battery') or {}
+    p = pw.get('pv') or {}
+    bv, pv = b.get('voltage'), p.get('voltage')
+    if bv is None and pv is None:
+        return False        # ADC 读不到就别写空行，免得时间轴被一堆空洞占满
+    db = _db_direct()
+    try:
+        db.execute(
+            'INSERT INTO voltage_readings(ts,ts_epoch,battery,pv,battery_raw,pv_raw)'
+            ' VALUES(?,?,?,?,?,?)',
+            (now_iso(), time.time(), bv, pv, b.get('raw'), p.get('raw')))
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
+def _energy_purge(days):
+    """按保留天数清理旧采样。"""
+    cut = time.time() - energy_service.clamp_retention_days(days) * 86400.0
+    db = _db_direct()
+    try:
+        cur = db.execute('DELETE FROM voltage_readings WHERE ts_epoch < ?', (cut,))
+        db.commit()
+        return cur.rowcount or 0
+    finally:
+        db.close()
+
+
+def _energy_sampler():
+    """后台采样线程：间隔与保留天数都是设置项，改完下一轮即生效。"""
+    time.sleep(15)                 # 先让 ADC 与电压校准就绪
+    last_purge = 0.0
+    while True:
+        try:
+            if bool_setting('energy_log_enabled', True):
+                _energy_sample_once()
+                now = time.time()
+                if now - last_purge > 3600:
+                    last_purge = now
+                    n = _energy_purge(_setting_direct('energy_retention_days', '365'))
+                    if n:
+                        print('[ENERGY] 清理 %d 条过期电压采样' % n, flush=True)
+        except Exception as e:
+            print('[ENERGY] 采样异常: %s: %s' % (type(e).__name__, e), flush=True)
+        time.sleep(energy_service.clamp_sample_sec(
+            _setting_direct('energy_sample_sec', '60')))
+
+
+def _energy_day_rows(day):
+    """取某天的原始采样（升序）。一天按 60s 采样也就 1440 行，直接全取。"""
+    db = get_db()
+    return [dict(r) for r in db.execute(
+        'SELECT ts,ts_epoch,battery,pv,battery_raw,pv_raw FROM voltage_readings '
+        'WHERE ts LIKE ? ORDER BY ts_epoch ASC LIMIT 20000',
+        (str(day)[:10] + '%',)).fetchall()]
+
+
+def _energy_days(limit=120):
+    """有采样的日期列表（新→旧），供前端日期下拉。"""
+    db = get_db()
+    return [r['day'] for r in db.execute(
+        "SELECT substr(ts,1,10) AS day FROM voltage_readings "
+        "GROUP BY day ORDER BY day DESC LIMIT ?", (int(limit),)).fetchall()]
+
+
+@app.route('/api/energy/day')
+@login_required
+def api_energy_day():
+    """某天的电压时间轴 + 当日统计。"""
+    day = (request.args.get('day') or '').strip()[:10] or \
+        datetime.now().strftime('%Y-%m-%d')
+    interval = energy_service.clamp_interval(request.args.get('interval') or 5)
+    rows = _energy_day_rows(day)
+    return api_ok(day=day, interval=interval,
+                  points=energy_service.points_from_rows(rows, interval),
+                  stats=energy_service.day_stats(rows),
+                  days=_energy_days(),
+                  logging={
+                      'enabled': bool_setting('energy_log_enabled', True),
+                      'sample_sec': energy_service.clamp_sample_sec(
+                          _setting_direct('energy_sample_sec', '60')),
+                      'retention_days': energy_service.clamp_retention_days(
+                          _setting_direct('energy_retention_days', '365')),
+                  })
+
+
+@app.route('/api/energy/export')
+@login_required
+def api_energy_export():
+    """整日序列导出 CSV。带 BOM，Excel 打开中文表头才不乱码。"""
+    day = (request.args.get('day') or '').strip()[:10] or \
+        datetime.now().strftime('%Y-%m-%d')
+    body = '\ufeff' + energy_service.rows_to_csv(_energy_day_rows(day))
+    return Response(
+        body, mimetype='text/csv; charset=utf-8',
+        headers={'Content-Disposition':
+                 'attachment; filename=energy_%s.csv' % day})
+
+
 @app.route('/api/status')
 @login_required
 def api_status():
@@ -1177,6 +1314,7 @@ def api_settings_get():
         'aprs_map_provider', 'aprs_map_tk', 'aprs_map_tk_browser',
         'aprs_map_layers', 'aprs_map_cache_mb', 'aprs_track_points',
         'reboot_enabled', 'reboot_times', 'reboot_notice_sec', 'reboot_text',
+        'energy_log_enabled', 'energy_sample_sec', 'energy_retention_days',
     ]
     out = {k: get_setting(k) for k in keys}
     out['local_api_key_set'] = bool(out.get('local_api_key'))
@@ -1201,6 +1339,10 @@ def api_settings_set():
         'external_model': lambda v: str(v).strip(),
         'external_api_key': lambda v: str(v),
         'record_auto_play': lambda v: '1' if str(v) in ('1', 'true', 'True', 'on') else '0',
+        # 能量统计（电压采样）
+        'energy_log_enabled': _bool_caster,
+        'energy_sample_sec': lambda v: str(energy_service.clamp_sample_sec(v)),
+        'energy_retention_days': lambda v: str(energy_service.clamp_retention_days(v)),
         'site_title': lambda v: str(v).strip()[:80],
         'tts_provider': lambda v: str(v).strip(),
         'tts_local_voice': lambda v: str(v).strip()[:80],
@@ -6417,4 +6559,7 @@ if __name__ == '__main__':
     except Exception:
         pass
     # 循环录像守护线程已在模块加载时启动（见 _camera_autostart_worker）
+    # 能量统计采样线程：表已由上面的 init_db() 建好，这里起最稳
+    threading.Thread(target=_energy_sampler, daemon=True,
+                     name='energy-sampler').start()
     _serve()
