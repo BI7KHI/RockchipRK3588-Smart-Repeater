@@ -1467,6 +1467,7 @@ class AprsService:
         self.run_flag = True
         self.tx_lock = threading.Lock()
         self.next_tx = {}            # ptype -> 下次发射 epoch
+        self._sched_iv = {}          # ptype -> 上次生效的间隔（秒），用于检测设置变更
         self.stats = {
             'rx_total': 0, 'rx_dropped': 0, 'tx_ok': 0, 'tx_fail': 0,
             'tx_deferred': 0, 'tx_skipped': 0, 'audio_s': 0.0,
@@ -1930,6 +1931,12 @@ class AprsService:
             if not _flag(st.get(flag_key), False):
                 continue
             iv = max(30.0, _f(st.get(iv_key), 1800.0))
+            if self._sched_iv.get(ptype) != iv:
+                # 间隔设置被改动（含首次）→ 立即按新间隔重新计时。
+                # 否则用户改完间隔要等旧周期走完才生效，看起来像“设置没起作用”。
+                self._sched_iv[ptype] = iv
+                self.next_tx[ptype] = now + iv + random.uniform(0, jit)
+                continue
             nxt = self.next_tx.get(ptype)
             if nxt is None:
                 self.next_tx[ptype] = now + iv + random.uniform(0, jit)
