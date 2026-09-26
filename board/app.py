@@ -5994,6 +5994,14 @@ def _assist_ask(prompt, question='', max_tokens=256, temperature=0.3,
                     res = fn(**(c.get('arguments') or {})) if fn else {'error': '未知工具'}
                 except Exception as e:
                     res = {'error': '%s: %s' % (type(e).__name__, e)}
+                # 工具报错必须留痕。模型拿到 error 会如实答「不知道」，而
+                # 「调用了工具」这个事实照样成立——没有这一行，外部完全分辨
+                # 不出「工具抛异常」和「工具没数据」。实测踩过：板端
+                # aprs_service 漏部署，三个位置问题全答「不知道」，而验证脚本
+                # 只看 tools 字段，20 项全绿却掩盖了故障。
+                if isinstance(res, dict) and res.get('error'):
+                    print('[ASSIST] 工具 %s 出错：%s' % (
+                        c['name'], str(res.get('error'))[:160]), flush=True)
                 collected.append({c['name']: res})
             out['tools'] = ','.join(used)
             if not collected:
