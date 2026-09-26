@@ -1652,6 +1652,54 @@ def _agent_ctx():
         return {'datetime': now.strftime('%Y-%m-%d %H:%M:%S'),
                 'weekday': '星期' + '一二三四五六日'[now.weekday()]}
 
+    def get_home_position():
+        """本站自身位置。坐标没配就问不出来——必须返回一句人话，别给空字典。"""
+        try:
+            p = aprs_service_instance.home_position()
+        except Exception as e:
+            return {'error': '%s: %s' % (type(e).__name__, e)}
+        if p.get('lat') is None and p.get('lon') is None:
+            return {'error': '本站坐标未配置（设置 → APRS 位置来源）'}
+        return p
+
+    def get_station_position(call=''):
+        """按呼号查最后位置；呼号留空 = 最近听到的那个台。
+
+        只查得到**收到过 APRS 信标**的台：语音里报的呼号如果从没发过包，
+        这里就是不认识——要如实说，不能让模型编一个坐标出来。
+        """
+        want = str(call or '').strip()
+        try:
+            r = aprs_service_instance.station_position(want)
+        except Exception as e:
+            return {'error': '%s: %s' % (type(e).__name__, e)}
+        if not r:
+            return {'error': ('没收到过 %s 的位置信标' % want) if want
+                    else '本机还没收到过任何带位置的信标'}
+        return r
+
+    def get_nearby_stations(km=50, limit=5):
+        """附近电台排行。结果条数要压住——板端模型看不了长列表。"""
+        try:
+            items = aprs_service_instance.nearby_stations(km=km, limit=limit)
+        except Exception as e:
+            return {'error': '%s: %s' % (type(e).__name__, e)}
+        home = {}
+        try:
+            home = aprs_service_instance.home_position()
+        except Exception:
+            pass
+        if not items:
+            return {'home_valid': bool(home.get('valid')),
+                    'count': 0, 'stations': [],
+                    'note': '最近 %s 小时内没有收到带位置的 APRS 信标' % 24}
+        # 最多 5 条进提示词；每条只留模型真正要说的字段
+        keep = ('call', 'km', 'dir', 'age_min', 'speed_kt')
+        return {'home_valid': bool(home.get('valid')),
+                'count': len(items),
+                'stations': [{k: it[k] for k in keep if k in it}
+                             for it in items[:5]]}
+
     def speak(text=''):
         body = str(text or '').strip()[:200]
         if not body:
@@ -1669,7 +1717,9 @@ def _agent_ctx():
 
     return {'get_weather': get_weather, 'get_rain': get_rain, 'get_power': get_power,
             'get_system': get_system, 'get_radio': get_radio, 'get_camera': get_camera,
-            'get_time': get_time, 'speak': speak}
+            'get_time': get_time, 'get_home_position': get_home_position,
+            'get_station_position': get_station_position,
+            'get_nearby_stations': get_nearby_stations, 'speak': speak}
 
 
 def _llm_headers(key):
@@ -2148,6 +2198,10 @@ def api_voice_list():
     category = (request.args.get('category') or '').strip() or None
     kind = (request.args.get('kind') or '').strip() or None
     q = (request.args.get('q') or '').strip() or None
+    # 只看含 APRS 位置的段（尾音里解出对方信标），便于标记与查找
+    pos = (request.args.get('pos') or '').strip() or None
+    if pos not in ('only', 'none'):
+        pos = None
     try:
         limit = max(1, min(1000, int(request.args.get('limit') or 200)))
     except Exception:
@@ -2156,7 +2210,9 @@ def api_voice_list():
         offset = max(0, int(request.args.get('offset') or 0))
     except Exception:
         offset = 0
-    items = voice_service_instance.list_logs(day, category, kind, q, limit, offset)
+    items = voice_service_instance.list_logs(day=day, category=category,
+                                             kind=kind, q=q, pos=pos,
+                                             limit=limit, offset=offset)
     return api_ok(items=items, day=day, limit=limit, offset=offset,
                   stats=voice_service_instance.day_stats(day))
 

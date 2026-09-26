@@ -11,6 +11,7 @@
     category: '',
     kind: '',
     q: '',
+    pos: '',
     limit: 100,
     offset: 0,
     items: [],
@@ -159,6 +160,7 @@
       if (state.category) qs.set('category', state.category);
       if (state.kind) qs.set('kind', state.kind);
       if (state.q) qs.set('q', state.q);
+      if (state.pos) qs.set('pos', state.pos);
       const d = await api('/api/voice/list?' + qs.toString());
       state.items = d.items || [];
       renderList();
@@ -168,7 +170,8 @@
       $('#btn-vlog-prev').disabled = state.offset <= 0;
       $('#btn-vlog-next').disabled = state.offset + state.limit >= total;
       const st = d.stats || {};
-      $('#vlog-m-total-sub').textContent = '段 · 当前筛选 ' + state.items.length;
+      $('#vlog-m-total-sub').textContent = '段 · 当前筛选 ' + state.items.length
+        + (st.aprs_pos ? ' · 含位置 ' + st.aprs_pos : '');
       loadTimeline();
     } catch (e) {
       toast('加载失败：' + e.message, 'error');
@@ -215,6 +218,18 @@
         if (raw.length) t.title = '识别原文为 ' + raw.join('/') + '，已按白名单纠错';
         tags.appendChild(t);
       });
+      if (it.aprs_pos) {
+        // 尾音里解出了对方的 APRS 位置信标：标出来，坐标放 tooltip
+        const t = tag('aprs-pos', '位置 ' + (it.aprs_call || 'APRS'));
+        const bits = ['本段含 APRS 位置信息'];
+        if (it.aprs_call) bits.push('呼号 ' + it.aprs_call);
+        if (it.aprs_lat != null && it.aprs_lon != null) {
+          bits.push('坐标 ' + Number(it.aprs_lat).toFixed(4) + ', '
+                    + Number(it.aprs_lon).toFixed(4));
+        }
+        t.title = bits.join('：');
+        tags.appendChild(t);
+      }
       if (it.asr_status === 'pending' || it.asr_status === 'running') {
         tags.appendChild(tag('asr-' + it.asr_status, it.asr_status === 'running' ? '识别中' : '待识别'));
       } else if (it.asr_status === 'error') {
@@ -679,6 +694,7 @@
     });
     $('#vlog-cat').addEventListener('change', (e) => { state.category = e.target.value; state.offset = 0; loadList(); });
     $('#vlog-kind').addEventListener('change', (e) => { state.kind = e.target.value; state.offset = 0; loadList(); });
+    $('#vlog-pos').addEventListener('change', (e) => { state.pos = e.target.value; state.offset = 0; loadList(); });
     $('#btn-vlog-search').addEventListener('click', () => { state.q = $('#vlog-q').value.trim(); state.offset = 0; loadList(); });
     $('#vlog-q').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { state.q = e.target.value.trim(); state.offset = 0; loadList(); }

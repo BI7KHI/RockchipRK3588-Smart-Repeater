@@ -178,6 +178,8 @@
 .vlog-warn { color: #fdba74; }
 #vlog-st-level { font-variant-numeric: tabular-nums; }
 .tag.cs { background: #0f3f5c; color: #7dd3fc; font-weight: 600; }
+/* 段内 APRS 位置标记：尾音里解出的对方位置信标（呼号 + 坐标） */
+.tag.aprs-pos { background: #4c1d95; color: #ddd6fe; font-weight: 600; }
 .vlog-cs-input { min-width: 190px; max-width: 260px; }
 
 

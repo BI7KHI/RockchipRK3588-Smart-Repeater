@@ -7,7 +7,7 @@
 {% endblock %}
 
 {% block head_extra %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/voice-log.css', v='20260924a') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/voice-log.css', v='20260930c') }}">
 {% endblock %}
 
 {% block content %}
@@ -112,7 +112,12 @@
           <option value="tx">本机发射</option>
           <option value="both">收发同时</option>
         </select>
-        <input id="vlog-q" placeholder="搜索识别文字…" class="vlog-q">
+        <select id="vlog-pos" title="只看尾音里带 APRS 位置信标的段">
+          <option value="">位置：全部</option>
+          <option value="only">含 APRS 位置</option>
+          <option value="none">不含位置</option>
+        </select>
+        <input id="vlog-q" placeholder="搜索文字/呼号…" class="vlog-q">
         <button class="btn" id="btn-vlog-search">搜索</button>
       </div>
       <div class="row gap">
@@ -181,5 +186,5 @@
 
 {% block scripts %}
 <script>window.VLOG_CSRF = document.querySelector('meta[name="csrf-token"]')?.content || '';</script>
-<script src="{{ url_for('static', filename='js/voice-log.js', v='20260930b') }}"></script>
+<script src="{{ url_for('static', filename='js/voice-log.js', v='20260930c') }}"></script>
 {% endblock %}
