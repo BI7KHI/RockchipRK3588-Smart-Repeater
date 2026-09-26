@@ -695,8 +695,18 @@
 
 <!-- 设置 / 校准 -->
 <section id="tab-settings" class="tab-panel admin-only">
-  <div class="panel-head"><h2>设置与电压校准</h2><span class="muted">仅管理员可修改</span></div>
-  <div class="grid grid-2">
+  <div class="panel-head">
+    <h2>设置与电压校准</h2>
+    <div class="row gap">
+      <button class="btn ghost btn-sm" id="btn-acc-expand">全部展开</button>
+      <button class="btn ghost btn-sm" id="btn-acc-collapse">全部收起</button>
+      <span class="muted small">仅管理员可修改 · 按分类收纳，点标题栏展开/收起（状态会记住）</span>
+    </div>
+  </div>
+
+  <details class="acc" open data-acc="hw">
+    <summary><b>① 硬件校准与射频</b><span class="acc-sub">电压校准 · PTT 发射自检 · BUSY 接收状态</span></summary>
+    <div class="grid grid-2">
     <div class="card">
       <div class="card-title">电压校准（RK3588 SARADC 12bit · 0~1.8V）</div>
       <div class="cal-row">
@@ -761,6 +771,12 @@
         注意 3.3V 数字输入的低电平判据 VIL≈0.99V，若触发时只能拉到约 2.7V 会被读成高电平，
         需要加大光耦驱动电流或在 GPIO 侧加对地下拉。下方「原始电平 / 电平变化次数」可直接判断接线是否有效。</p>
     </div>
+    </div>
+  </details>
+
+  <details class="acc" open data-acc="llm">
+    <summary><b>② 音频 · LLM · 语音</b><span class="acc-sub">全局音量 · LLM 提供商 · 提示词/Agent · TTS 音色与流式朗读</span></summary>
+    <div class="grid grid-2">
     <div class="card">
       <div class="card-title">系统全局音量</div>
       <div class="row gap">
@@ -862,24 +878,12 @@
       <div class="muted small" id="voice-upload-info">未上传（音色包约 56MB，上传中请勿关闭页面）</div>
       <p class="muted small">语音训练统一在外部（PC / 服务器）完成，板端只负责部署训练好的 Piper ONNX 权重；GPT-SoVITS 等方案同样建议在 PC 侧完成。</p>
     </div>
-    <div class="card" style="grid-column: 1 / -1" id="reboot-set-card">
-      <div class="card-title">定时重启计划</div>
-      <label class="checkline"><input type="checkbox" id="set-reboot-enabled"> 启用定时重启</label>
-      <label>重启时刻（每天，多个用逗号分隔，如 <code>04:00,16:00</code>）</label>
-      <input id="set-reboot-times" placeholder="04:00,16:00">
-      <div class="cal-row">
-        <div><label>重启前播报提前量（秒，0 = 不播报）</label><input id="set-reboot-notice" type="number" min="0" max="600" step="5" value="30"></div>
-        <div><label>播报文本</label><input id="set-reboot-text" maxlength="80" placeholder="中继台即将重启，请稍候。"></div>
-      </div>
-      <div class="row gap mt">
-        <button class="btn primary" id="btn-save-reboot">保存重启计划</button>
-        <button class="btn ghost" id="btn-reboot-check">测试重启权限</button>
-        <button class="btn ghost" id="btn-reboot-now" title="立即重启板卡，当前会话会断开">立即重启</button>
-        <span class="muted small" id="reboot-save-state">已保存</span>
-      </div>
-      <div class="muted small mt" id="reboot-status">—</div>
-      <p class="muted small">重启走 <code>/usr/local/sbin/elf2-reboot.sh</code> 的 sudoers 白名单（不给 elf 通用 sudo）。<b>开机不足 5 分钟不会触发</b>，避免重启后补触发滚成循环。</p>
     </div>
+  </details>
+
+  <details class="acc" open data-acc="sensor">
+    <summary><b>③ 传感器与 RS485 总线</b><span class="acc-sub">串口总线 · 风速 · 雨量 · 温湿度</span></summary>
+    <div class="grid grid-2">
     <div class="card" style="grid-column: 1 / -1">
       <div class="card-title">RS485 总线（风速 / 雨量共用）</div>
       <div class="cal-row">
@@ -953,6 +957,28 @@
     <p class="muted small">寄存器约定：起始寄存器为温度 raw（int16 有符号），下一个寄存器为湿度 raw（uint16），默认倍率 0.1。当前传感器暂未接线，启用后读取会返回 Modbus 超时，属正常现象。</p>
     <div class="muted small mt" id="th-sensor-status">状态：--</div>
   </div>
+  </details>
+
+  <details class="acc" open data-acc="sys">
+    <summary><b>④ 系统维护</b><span class="acc-sub">定时重启计划 · 修改当前用户密码</span></summary>
+  <div class="card mt" id="reboot-set-card">
+    <div class="card-title">定时重启计划</div>
+    <label class="checkline"><input type="checkbox" id="set-reboot-enabled"> 启用定时重启</label>
+    <label>重启时刻（每天，多个用逗号分隔，如 <code>04:00,16:00</code>）</label>
+    <input id="set-reboot-times" placeholder="04:00,16:00">
+    <div class="cal-row">
+      <div><label>重启前播报提前量（秒，0 = 不播报）</label><input id="set-reboot-notice" type="number" min="0" max="600" step="5" value="30"></div>
+      <div><label>播报文本</label><input id="set-reboot-text" maxlength="80" placeholder="中继台即将重启，请稍候。"></div>
+    </div>
+    <div class="row gap mt">
+      <button class="btn primary" id="btn-save-reboot">保存重启计划</button>
+      <button class="btn ghost" id="btn-reboot-check">测试重启权限</button>
+      <button class="btn ghost" id="btn-reboot-now" title="立即重启板卡，当前会话会断开">立即重启</button>
+      <span class="muted small" id="reboot-save-state">已保存</span>
+    </div>
+    <div class="muted small mt" id="reboot-status">—</div>
+    <p class="muted small">重启走 <code>/usr/local/sbin/elf2-reboot.sh</code> 的 sudoers 白名单（不给 elf 通用 sudo）。<b>开机不足 5 分钟不会触发</b>，避免重启后补触发滚成循环。</p>
+  </div>
   <div class="card mt">
     <div class="card-title">修改当前用户密码</div>
     <div class="row gap">
@@ -961,6 +987,7 @@
       <button class="btn" id="btn-change-pass">修改密码</button>
     </div>
   </div>
+  </details>
 </section>
 
 {% endblock %}

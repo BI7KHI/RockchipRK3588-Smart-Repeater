@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>{% block title %}{{ site_title or 'ELF2 智能中继控制中心' }}{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css', v='20260929a') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css', v='20260930a') }}">
   {# 空 favicon：抑制浏览器自动请求 /favicon.ico 产生的 404（控制台不再有噪声） #}
   <link rel="icon" href="data:,">
   {% block head_extra %}{% endblock %}
@@ -50,7 +50,7 @@
     window.APP_USER = {{ user|tojson }};
   </script>
   {% block app_js %}
-  <script src="{{ url_for('static', filename='js/app.js', v='20260929a') }}"></script>
+  <script src="{{ url_for('static', filename='js/app.js', v='20260930a') }}"></script>
   {% endblock %}
   {% block scripts %}{% endblock %}
 </body>

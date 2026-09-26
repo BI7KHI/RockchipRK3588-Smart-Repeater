@@ -307,6 +307,35 @@
     } catch (e) { showToast(e.message, 'error'); }
   }
 
+  // ---- 设置页分类收纳：记住展开/收起状态，并提供整页展开/收起 ----
+  function initAccordions() {
+    const boxes = $$('details.acc');
+    if (!boxes.length) return;
+    const KEY = 'elf2-set-acc';
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { saved = {}; }
+    const persist = () => {
+      try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch (e) { /* 忽略隐私模式 */ }
+    };
+    boxes.forEach((d) => {
+      const k = d.dataset.acc || '';
+      if (k && typeof saved[k] === 'boolean') d.open = saved[k];
+      d.addEventListener('toggle', () => {
+        if (!k) return;
+        saved[k] = d.open;
+        persist();
+      });
+    });
+    $('#btn-acc-expand')?.addEventListener('click', () => {
+      boxes.forEach((d) => { d.open = true; if (d.dataset.acc) saved[d.dataset.acc] = true; });
+      persist();
+    });
+    $('#btn-acc-collapse')?.addEventListener('click', () => {
+      boxes.forEach((d) => { d.open = false; if (d.dataset.acc) saved[d.dataset.acc] = false; });
+      persist();
+    });
+  }
+
   // ---- 每卡片「有未保存的修改」提示 ----
   function bindDirty(cardSel, stateSel) {
     const card = $(cardSel);
@@ -2710,6 +2739,7 @@
   document.addEventListener('DOMContentLoaded', () => {
     startBeijingClock();
     initTabs();
+    initAccordions();
     initEvents();
     loadStatus();
     loadProviders();
