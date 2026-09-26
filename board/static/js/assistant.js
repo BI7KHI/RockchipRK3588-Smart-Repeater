@@ -113,7 +113,7 @@
     {
       title: 'LLM 与回复预算', hint: '防止长输入长输出挤爆本地上下文 —— 这是本地 1.5B 模型最容易空输出的原因。',
       items: [
-        { k: 'assist_provider', f: 'LLM 提供方', t: 'select', opts: [['local', '板端本地(rkllm)'], ['external', '外部 API']] },
+        // LLM 提供方已统一到「设置 / 校准」页并全局生效，助手页不再重复设置
         { k: 'assist_max_reply_chars', f: '回复字数上限', t: 'num', min: 10, max: 300, step: 5, tip: '直接决定发射时长，80 字约 15~20 秒' },
         { k: 'assist_max_tokens', f: 'max_tokens', t: 'num', min: 32, max: 512, step: 16 },
         { k: 'assist_history_turns', f: '保留历史轮数', t: 'num', min: 0, max: 12, step: 1 },

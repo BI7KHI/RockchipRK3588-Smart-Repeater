@@ -506,7 +506,6 @@ def _set_default_settings(db):
         'assist_history_turns': '6',
         'assist_max_input_chars': '3000',
         'assist_temperature': '0.3',
-        'assist_provider': 'local',
         'assist_use_tools': '1',
         'assist_agent_iters': '2',
         'assist_keep_llm_warm': '1',
@@ -628,6 +627,12 @@ def _set_default_settings(db):
         # 默认常开：LLM 流式输出时边出字边用 Piper 朗读。
         # 这是「运行策略」而不是靠前端复选框——前端同步一旦失败就会静默关掉流式朗读。
         'tts_auto_speak': '1',
+        # 定时重启计划：每天多个 HH:MM（逗号分隔），到点前先语音播报再重启。
+        # 重启走 /usr/local/sbin/elf2-reboot.sh 的 sudoers 白名单（见 board/deploy/）。
+        'reboot_enabled': '0',
+        'reboot_times': '',
+        'reboot_notice_sec': '30',
+        'reboot_text': '中继台即将重启，请稍候。',
     }
     for k, v in defaults.items():
         db.execute('INSERT OR IGNORE INTO settings(key, value) VALUES(?,?)', (k, v))
@@ -1143,7 +1148,6 @@ def api_settings_get():
         'assist_history_turns',
         'assist_max_input_chars',
         'assist_temperature',
-        'assist_provider',
         'assist_use_tools',
         'assist_agent_iters',
         'assist_keep_llm_warm',
@@ -1172,6 +1176,7 @@ def api_settings_get():
         'aprs_dedup_window', 'aprs_telemetry_map', 'aprs_retention_days',
         'aprs_map_provider', 'aprs_map_tk', 'aprs_map_tk_browser',
         'aprs_map_layers', 'aprs_map_cache_mb', 'aprs_track_points',
+        'reboot_enabled', 'reboot_times', 'reboot_notice_sec', 'reboot_text',
     ]
     out = {k: get_setting(k) for k in keys}
     out['local_api_key_set'] = bool(out.get('local_api_key'))
@@ -1203,6 +1208,14 @@ def api_settings_set():
         'tts_icao': lambda v: '1' if str(v) in ('1', 'true', 'True', 'on') else '0',
         'tts_icao_voice': lambda v: str(v).strip()[:80],
         'tts_auto_speak': lambda v: '1' if str(v) in ('1', 'true', 'True', 'on') else '0',
+        # 定时重启：只接受 HH:MM，去重并保留顺序；播报提前量与文本都做钳制
+        'reboot_enabled': _bool_caster,
+        'reboot_times': lambda v: ','.join(
+            x.strip() for x in re.split(r'[,;，；\s]+', str(v))
+            if re.match(r'^\d{1,2}:\d{2}$', x.strip())
+            and 0 <= int(x.split(':')[0]) <= 23 and 0 <= int(x.split(':')[1]) <= 59)[:120],
+        'reboot_notice_sec': lambda v: str(max(0, min(600, int(float(v))))),
+        'reboot_text': lambda v: (str(v).strip()[:80] or '中继台即将重启，请稍候。'),
         'tts_provider': lambda v: 'local',   # 外部 TTS 已下线，强制 local
         'llm_system_prompt': lambda v: str(v)[:4000],
         'llm_system_prompt_on': lambda v: '1' if str(v) in ('1', 'true', 'True', 'on') else '0',
@@ -1241,7 +1254,6 @@ def api_settings_set():
         'assist_history_turns': lambda v: str(int(max(0, min(12, int(float(v)))))),
         'assist_max_input_chars': lambda v: str(int(max(400, min(8000, int(float(v)))))),
         'assist_temperature': lambda v: str(round(max(0.0, min(1.5, float(v))), 2)),
-        'assist_provider': lambda v: v if v in ('local', 'external') else 'local',
         'assist_agent_iters': lambda v: str(int(max(0, min(4, int(float(v)))))),
         'assist_llm_wait': lambda v: str(int(max(5, min(120, int(float(v)))))),
         'assist_prompt_suffix': lambda v: str(v)[:2000],
@@ -3240,6 +3252,133 @@ def play_audio_async(path, ptt=False):
 
 
 # ---------------------------------------------------------------------------
+# 定时重启计划：每天多个 HH:MM，到点前先语音播报，准点重启
+#
+# 重启需要 root，而本服务跑在 elf 用户下：走 /usr/local/sbin/elf2-reboot.sh 的
+# sudoers 白名单（部署文件 board/deploy/elf2-reboot.sh + 99-elf2-reboot.sudoers）。
+# helper 支持 --check，用于在不重启的前提下验证 sudoers 配没配好。
+# ---------------------------------------------------------------------------
+REBOOT_HELPER = '/usr/local/sbin/elf2-reboot.sh'
+REBOOT_MIN_UPTIME = 300     # 开机 5 分钟内不触发，避免「重启后补触发」滚成重启循环
+REBOOT_FIRE_WINDOW = 90     # 到点后多久内仍允许触发（秒）
+BOOT_TS = time.time()
+_reboot_state = {}
+
+
+def _reboot_times():
+    """解析设置里的 HH:MM 列表，返回排序去重后的 [(h, m)]。"""
+    raw = _setting_direct('reboot_times', '') or ''
+    out = []
+    for part in re.split(r'[,;，；\s]+', raw):
+        m = re.match(r'^(\d{1,2}):(\d{2})$', part.strip())
+        if not m:
+            continue
+        h, mi = int(m.group(1)), int(m.group(2))
+        if 0 <= h <= 23 and 0 <= mi <= 59 and (h, mi) not in out:
+            out.append((h, mi))
+    return sorted(out)
+
+
+def _reboot_helper(args=None):
+    """同步调用重启 helper，返回 (ok, 输出)。带 --check 时只验证权限不重启。"""
+    cmd = ['sudo', '-n', REBOOT_HELPER] + list(args or [])
+    try:
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
+        return p.returncode == 0, p.stdout.decode('utf-8', 'replace').strip()
+    except Exception as e:
+        return False, f'{type(e).__name__}: {e}'
+
+
+def _reboot_announce(text):
+    """阻塞播报（AUX + PTT），返回 (ok, err)。重启前通告必须等它播完。"""
+    try:
+        path = tts_service.synthesize_multilingual(
+            text,
+            _setting_direct('tts_local_voice', 'zh_CN-huayan-medium'),
+            en_voice=(_setting_direct('tts_en_voice', '') or None),
+            icao=str(_setting_direct('tts_icao', '1')) in ('1', 'true', 'True', 'on'),
+            icao_voice=(_setting_direct('tts_icao_voice', '') or None))
+    except Exception as e:
+        return False, f'合成失败：{e}'
+    _ptt_retain()
+    try:
+        proc = _play_file_locked(path)
+        if proc:
+            try:
+                proc.wait(timeout=120)
+            except Exception:
+                _stop_proc(proc)
+    finally:
+        _ptt_release()
+    return True, ''
+
+
+def _reboot_scheduler():
+    time.sleep(30)          # 等服务起来，别在启动风暴里抢资源
+    while True:
+        try:
+            if (str(_setting_direct('reboot_enabled', '0')) in ('1', 'true', 'True', 'on')
+                    and (time.time() - BOOT_TS) > REBOOT_MIN_UPTIME):
+                now = datetime.now()
+                notice = int(float(_setting_direct('reboot_notice_sec', '30') or 30))
+                text = _setting_direct('reboot_text', '') or '中继台即将重启，请稍候。'
+                for (h, mi) in _reboot_times():
+                    due = now.replace(hour=h, minute=mi, second=0, microsecond=0)
+                    key = due.strftime('%Y-%m-%d %H:%M')
+                    st = _reboot_state.setdefault(key, {'announced': False, 'fired': False})
+                    delta = (now - due).total_seconds()
+                    # 播报窗：due - notice <= now < due
+                    if not st['announced'] and -notice <= delta < 0:
+                        st['announced'] = True
+                        ok, err = _reboot_announce(text)
+                        print(f'[REBOOT] {key} 播报{"成功" if ok else "失败 " + err}', flush=True)
+                    # 触发窗：due <= now < due + 90s
+                    if not st['fired'] and 0 <= delta < REBOOT_FIRE_WINDOW:
+                        _ptt_force_low()
+                        ok, out = _reboot_helper()
+                        st['fired'] = ok
+                        print(f'[REBOOT] {key} 触发重启 ok={ok} {out}', flush=True)
+                today = now.strftime('%Y-%m-%d')
+                for k in [k for k in _reboot_state if not k.startswith(today)]:
+                    _reboot_state.pop(k, None)
+        except Exception as e:
+            print(f'[REBOOT] 调度异常: {e}', flush=True)
+        time.sleep(20)
+
+
+threading.Thread(target=_reboot_scheduler, daemon=True).start()
+
+
+@app.route('/api/reboot/check')
+@login_required
+@admin_required
+def api_reboot_check():
+    """只验证 sudoers 权限，不重启。"""
+    ok, out = _reboot_helper(['--check'])
+    return api_ok(ok=ok, output=out, helper=REBOOT_HELPER,
+                  times=[f'{h:02d}:{m:02d}' for h, m in _reboot_times()])
+
+
+@app.route('/api/reboot/now', methods=['POST'])
+@login_required
+@admin_required
+def api_reboot_now():
+    """手动立即重启。先同步验证权限，再延迟下发，好让响应能发出去。"""
+    ok, out = _reboot_helper(['--check'])
+    if not ok:
+        return api_err(f'重启权限未就绪（检查 sudoers）：{out}')
+    audit('reboot_now', 'manual')
+    _ptt_force_low()
+
+    def _go():
+        time.sleep(1.5)
+        _reboot_helper()
+
+    threading.Thread(target=_go, daemon=True).start()
+    return api_ok(ok=True, note='已下发重启命令，连接会中断')
+
+
+# ---------------------------------------------------------------------------
 # 开发板 3.5mm 耳机/麦克风输入采集：电平监视 + 实时 PCM 流到网页
 # ---------------------------------------------------------------------------
 def _amixer_set(control, value):
@@ -3960,29 +4099,6 @@ def api_tts_upload_voice():
         return api_err(f'音色包上传失败：{e}', 400)
     audit('tts_upload_voice', f'{result["id"]}')
     return api_ok(result=result, voices=tts_service.list_voices())
-
-
-@app.route('/api/tts/training/upload', methods=['POST'])
-@login_required
-@admin_required
-def api_tts_training_upload():
-    if 'dataset' not in request.files:
-        return api_err('请上传训练数据 zip')
-    f = request.files['dataset']
-    dataset_id = request.form.get('dataset_id') or (Path(f.filename or 'dataset').stem)
-    try:
-        result = tts_service.save_training_zip(f, dataset_id)
-    except Exception as e:
-        return api_err(f'训练数据上传失败：{e}', 400)
-    audit('tts_upload_training', result['dataset_id'])
-    return api_ok(result=result, jobs=tts_service.list_training_jobs())
-
-
-@app.route('/api/tts/training/jobs')
-@login_required
-@admin_required
-def api_tts_training_jobs():
-    return api_ok(jobs=tts_service.list_training_jobs())
 
 
 @app.route('/recordings/<path:filename>')
@@ -5676,7 +5792,9 @@ def _assist_ask(prompt, question='', max_tokens=256, temperature=0.3,
     out = {'ok': False, 'reply': '', 'ms': 0, 'provider': '', 'model': '',
            'iters': 0, 'tools': '', 'error': ''}
     try:
-        provider = (_setting_direct('assist_provider', 'local') or 'local').strip()
+        # LLM 提供方跟随「设置 / 校准」里的全局 llm_provider：
+        # 助手页已不再单独设置，避免两处各说各话。
+        provider = (_setting_direct('llm_provider', 'local') or 'local').strip()
         if provider not in ('local', 'external'):
             provider = 'local'
         cfg = provider_config(provider) or {}

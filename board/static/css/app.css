@@ -142,6 +142,8 @@ input, select, textarea { margin-bottom: 2px; }
 .toast.error { border-left-color: var(--red); }
 .toast.success { border-left-color: var(--green); }
 .cal-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+/* 每卡片保存按钮旁的「有未保存的修改」提示 */
+.muted.small.dirty { color: #f5a623; opacity: 1; }
 
 @media (max-width: 980px) {
   .grid-3, .grid-2 { grid-template-columns: 1fr; }

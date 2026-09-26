@@ -259,12 +259,19 @@
       if ($('#set-tts-en-voice')) $('#set-tts-en-voice').value = s.tts_en_voice || '';
       if ($('#set-tts-icao')) $('#set-tts-icao').checked = s.tts_icao === '1';
       if ($('#set-tts-icao-voice')) $('#set-tts-icao-voice').dataset.saved = s.tts_icao_voice || '';
-      if ($('#tts-icao')) $('#tts-icao').checked = s.tts_icao !== '0';
       if ($('#set-tts-auto-speak')) $('#set-tts-auto-speak').checked = s.tts_auto_speak === '1';
+      applySpeakPolicy(s.tts_auto_speak === '1');
+      // 定时重启
+      if ($('#set-reboot-enabled')) $('#set-reboot-enabled').checked = s.reboot_enabled === '1';
+      if ($('#set-reboot-times')) $('#set-reboot-times').value = s.reboot_times || '';
+      if ($('#set-reboot-notice')) $('#set-reboot-notice').value = s.reboot_notice_sec || '30';
+      if ($('#set-reboot-text')) $('#set-reboot-text').value = s.reboot_text || '';
+      clearDirty('#llm-save-state'); clearDirty('#tts-save-state'); clearDirty('#reboot-save-state');
     } catch (e) { showToast(e.message, 'error'); }
   }
 
-  async function saveSettings() {
+  // 每张卡片各自保存：LLM/页面 与 语音 分开，避免「改了语音卡片却要按 LLM 卡片的保存」
+  async function saveLlmSettings() {
     const body = {
       llm_provider: $('#set-llm-provider').value,
       local_base_url: $('#set-local-base').value,
@@ -272,21 +279,88 @@
       external_base_url: $('#set-ext-base').value,
       external_model: $('#set-ext-model').value,
       record_auto_play: $('#set-auto-play').checked ? '1' : '0',
+    };
+    if ($('#set-local-key').value) body.local_api_key = $('#set-local-key').value;
+    if ($('#set-ext-key').value) body.external_api_key = $('#set-ext-key').value;
+    try {
+      await apiFetch('/api/settings', { method: 'POST', body: JSON.stringify(body) });
+      showToast('LLM / 页面设置已保存', 'success');
+      clearDirty('#llm-save-state');
+      loadSettings();
+      loadProviders();
+    } catch (e) { showToast(e.message, 'error'); }
+  }
+
+  async function saveTtsSettings() {
+    const body = {
       tts_local_voice: $('#set-tts-voice')?.value || '',
       tts_en_voice: $('#set-tts-en-voice')?.value || '',
       tts_icao: $('#set-tts-icao')?.checked ? '1' : '0',
       tts_icao_voice: $('#set-tts-icao-voice')?.value || '',
       tts_auto_speak: $('#set-tts-auto-speak')?.checked ? '1' : '0',
     };
-    if ($('#set-local-key').value) body.local_api_key = $('#set-local-key').value;
-    if ($('#set-ext-key').value) body.external_api_key = $('#set-ext-key').value;
     try {
       await apiFetch('/api/settings', { method: 'POST', body: JSON.stringify(body) });
-      showToast('设置已保存', 'success');
-      loadSettings();
-      loadProviders();
+      showToast('语音设置已保存（全局生效）', 'success');
+      clearDirty('#tts-save-state');
       loadTtsProviders();
     } catch (e) { showToast(e.message, 'error'); }
+  }
+
+  // ---- 每卡片「有未保存的修改」提示 ----
+  function bindDirty(cardSel, stateSel) {
+    const card = $(cardSel);
+    if (!card) return;
+    const mark = () => {
+      const el = $(stateSel);
+      if (el) { el.textContent = '● 有未保存的修改'; el.classList.add('dirty'); }
+    };
+    card.addEventListener('input', mark);
+    card.addEventListener('change', mark);
+  }
+
+  function clearDirty(stateSel, text) {
+    const el = $(stateSel);
+    if (el) { el.textContent = text || '已保存'; el.classList.remove('dirty'); }
+  }
+
+  // ---- 定时重启计划 ----
+  async function saveRebootSettings() {
+    const body = {
+      reboot_enabled: $('#set-reboot-enabled')?.checked ? '1' : '0',
+      reboot_times: $('#set-reboot-times')?.value || '',
+      reboot_notice_sec: $('#set-reboot-notice')?.value || '30',
+      reboot_text: $('#set-reboot-text')?.value || '',
+    };
+    try {
+      await apiFetch('/api/settings', { method: 'POST', body: JSON.stringify(body) });
+      showToast('重启计划已保存', 'success');
+      clearDirty('#reboot-save-state');
+      loadSettings();
+    } catch (e) { showToast(e.message, 'error'); }
+  }
+
+  async function checkRebootPermission() {
+    const el = $('#reboot-status');
+    if (el) el.textContent = '检测中…';
+    try {
+      const d = await apiFetch('/api/reboot/check');
+      const times = (d.times || []).join('、') || '（未设置时刻）';
+      if (el) {
+        el.textContent = d.ok
+          ? `重启权限正常（${d.output || ''}）· 生效时刻：${times}`
+          : `重启权限不可用：${d.output || '未知'} —— 检查 /etc/sudoers.d/99-elf2-reboot`;
+      }
+    } catch (e) { if (el) el.textContent = '检测失败：' + e.message; }
+  }
+
+  async function rebootNow() {
+    if (!confirm('确定立即重启中继主控？所有连接会中断约 1~3 分钟。')) return;
+    if (!confirm('再次确认：现在就重启？')) return;
+    try {
+      await apiFetch('/api/reboot/now', { method: 'POST', body: '{}' });
+      showToast('已下发重启命令，连接即将中断', 'success');
+    } catch (e) { showToast('重启失败：' + e.message, 'error'); }
   }
 
   async function changeOwnPassword() {
@@ -401,7 +475,7 @@
     if (!ttsStreamSession || !text || !text.trim()) return;
     const sid = ttsStreamSession;
     const provider = 'local';   // 仅本地 Piper
-    const voice = $('#tts-voice')?.value || '';
+    const voice = ttsVoice();
     // 与 speakText 保持一致：英文音色 / ICAO 开关对流式朗读同样生效
     const body = {
       session_id: sid, client_id: TTS_CLIENT_ID, text, provider, voice,
@@ -511,7 +585,7 @@
     chatMessages.push({ role: 'user', content: text });
     addChatBubble('user', text);
     $('#chat-text').value = '';
-    const autoSpeak = !!$('#tts-auto-speak')?.checked;
+    const autoSpeak = speakPolicyOn;
     const streamBox = $('#chat-stream');
     if (autoSpeak && streamBox && !streamBox.checked) streamBox.checked = true;
     const stream = !!(streamBox && streamBox.checked);
@@ -594,18 +668,22 @@
   }
 
   async function maybeAutoSpeak(text) {
-    if (!$('#tts-auto-speak')?.checked) return;
+    if (!speakPolicyOn) return;
     try {
-      await speakText(text, 'local', $('#tts-voice')?.value || '', true, false, ttsEnVoice(), ttsIcao());
+      await speakText(text, 'local', ttsVoice(), true, false, ttsEnVoice(), ttsIcao());
     } catch (e) {
       showToast('TTS 朗读失败：' + e.message, 'error');
     }
   }
 
   // ---------------- TTS ----------------
-  function ttsEnVoice() { return $('#tts-en-voice')?.value || $('#set-tts-en-voice')?.value || ''; }
+  // 语音音色 / ICAO / 流式朗读策略的唯一来源是「设置 / 校准」页。
+  // LLM 对话页与助手页不再放这些控件，避免同一开关两处各说各话。
+  let speakPolicyOn = false;
+  function ttsVoice() { return $('#set-tts-voice')?.value || ''; }
+  function ttsEnVoice() { return $('#set-tts-en-voice')?.value || ''; }
   function ttsIcao() {
-    const el = $('#tts-icao') || $('#set-tts-icao');
+    const el = $('#set-tts-icao');
     return el ? !!el.checked : true;
   }
 
@@ -642,13 +720,13 @@
   // 原来这三行写在整个 try 的最末尾，前面「列音色包 / 渲染音色表」任何一步抛异常，
   // 策略就被静默跳过、复选框保持 HTML 默认的未勾选 → 流式朗读一声不响地关掉。
   function applySpeakPolicy(on) {
-    if ($('#tts-auto-speak')) $('#tts-auto-speak').checked = !!on;
+    speakPolicyOn = !!on;
     if ($('#set-tts-auto-speak')) $('#set-tts-auto-speak').checked = !!on;
     if (on && $('#chat-stream')) $('#chat-stream').checked = true;
     const st = $('#tts-stream-status');
     if (st && !ttsStreamSession) {
       st.textContent = on ? '流式朗读：策略已开（发送即边出字边朗读）'
-                          : '流式朗读：策略关闭（勾选「自动朗读」开启）';
+                          : '流式朗读：策略关闭（在「设置 / 校准」开启）';
     }
   }
 
@@ -668,14 +746,13 @@
       const voiceOptions = ttsState.voices.map(v =>
         `<option value="${escapeHtml(v.id)}">${escapeHtml(v.name)}${v.ready ? '' : '（不完整）'}</option>`).join('');
       const cur = $('#set-tts-voice')?.value || '';
-      if ($('#tts-voice')) $('#tts-voice').innerHTML = voiceOptions || '<option value="">无可选音色</option>';
       if ($('#set-tts-voice')) $('#set-tts-voice').innerHTML = voiceOptions || '<option value="">无可选音色</option>';
       // 英文音色下拉：默认「自动」（按 language=en* 挑一个）
       const enVoices = ttsState.voices.filter(v => String(v.language || '').toLowerCase().startsWith('en'));
       const enOptions = '<option value="">自动（有英文音色就用）</option>' + enVoices.map(v =>
         `<option value="${escapeHtml(v.id)}">${escapeHtml(v.name)}</option>`).join('');
       const savedEn = $('#set-tts-en-voice')?.dataset.saved || '';
-      ['#tts-en-voice', '#set-tts-en-voice'].forEach((sel) => {
+      ['#set-tts-en-voice'].forEach((sel) => {
         const el = $(sel);
         if (!el) return;
         const prev = el.value || savedEn;
@@ -693,7 +770,7 @@
         if (prev && Array.from(icaoSel.options).some(o => o.value === prev)) icaoSel.value = prev;
       }
       const want = data.local?.voice || '';
-      ['#tts-voice', '#set-tts-voice'].forEach((sel) => {
+      ['#set-tts-voice'].forEach((sel) => {
         const el = $(sel);
         if (!el) return;
         const val = el.value || cur || want;
@@ -794,29 +871,6 @@
       await loadTtsProviders();
     } catch (e) {
       setUploadBar('#voice-upload-bar', '#voice-upload-info', 0, '上传失败：' + e.message);
-      showToast(e.message, 'error');
-    }
-  }
-
-  async function uploadTrainingData() {
-    const file = $('#tts-train-zip')?.files?.[0];
-    if (!file) return showToast('请选择训练数据 zip', 'error');
-    const mb = file.size / 1024 / 1024;
-    const fd = new FormData();
-    fd.append('dataset', file, file.name);
-    fd.append('dataset_id', ($('#tts-train-id')?.value || '').trim());
-    const t0 = Date.now();
-    setUploadBar('#train-upload-bar', '#train-upload-info', 0, `准备上传 ${file.name}（${mb.toFixed(1)} MB）…`);
-    try {
-      await uploadWithProgress('/api/tts/training/upload', fd, (r, loaded, total) => {
-        const sp = (loaded / 1024 / 1024) / Math.max(0.001, (Date.now() - t0) / 1000);
-        setUploadBar('#train-upload-bar', '#train-upload-info', r,
-          `上传中 ${(r * 100).toFixed(0)}%（${(loaded / 1048576).toFixed(1)}/${(total / 1048576).toFixed(1)} MB，${sp.toFixed(1)} MB/s）`);
-      });
-      setUploadBar('#train-upload-bar', '#train-upload-info', 1, `上传完成：${file.name}`);
-      showToast('训练数据已上传，板端等待 PC/服务器微调', 'success');
-    } catch (e) {
-      setUploadBar('#train-upload-bar', '#train-upload-info', 0, '上传失败：' + e.message);
       showToast(e.message, 'error');
     }
   }
@@ -2134,7 +2188,7 @@
     chatMessages.push({ role: 'user', content: text });
     addChatBubble('user', text);
     $('#chat-text').value = '';
-    const autoSpeak = !!$('#tts-auto-speak')?.checked;
+    const autoSpeak = speakPolicyOn;
     const el = addChatBubble('assistant', '思考中（可调用技能读取实时数据）…');
     let answer = '';
     llmRateReset();
@@ -2499,18 +2553,12 @@
       if (t) { t.value = DEFAULT_LLM_PROMPT; showToast('已填入推荐提示词，记得点保存', 'success'); }
     });
     $('#btn-add-user')?.addEventListener('click', addUser);
-    $('#btn-save-settings')?.addEventListener('click', saveSettings);
+    $('#btn-save-settings')?.addEventListener('click', saveLlmSettings);
     $('#btn-change-pass')?.addEventListener('click', changeOwnPassword);
     $('#btn-llm-refresh')?.addEventListener('click', loadProviders);
     $('#llm-provider')?.addEventListener('change', loadProviders);
     $('#btn-chat-send')?.addEventListener('click', sendChat);
     $('#btn-tts-stop')?.addEventListener('click', stopTtsStream);
-    $('#tts-auto-speak')?.addEventListener('change', (e) => {
-      if (e.target.checked && $('#chat-stream')) $('#chat-stream').checked = true;
-      // 同步设置页复选框 + 刷新策略提示，让「流式朗读是否常开」一眼可见
-      if ($('#set-tts-auto-speak')) $('#set-tts-auto-speak').checked = e.target.checked;
-      applySpeakPolicy(e.target.checked);
-    });
     $('#chat-text')?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
@@ -2519,14 +2567,14 @@
     });
     $('#btn-tts-test')?.addEventListener('click', async () => {
       try {
-        await speakText($('#tts-test-text')?.value || 'TTS 测试', 'local', $('#tts-voice')?.value || '', true,
+        await speakText($('#tts-test-text')?.value || 'TTS 测试', 'local', ttsVoice(), true,
                         false, ttsEnVoice(), ttsIcao());
       } catch (e) { showToast(e.message, 'error'); }
     });
     $('#btn-tts-test-web')?.addEventListener('click', async () => {
       try {
         // 只合成、不在板端播放，直接在网页播放器里播放
-        await speakText($('#tts-test-text')?.value || 'TTS 测试', 'local', $('#tts-voice')?.value || '', false, true,
+        await speakText($('#tts-test-text')?.value || 'TTS 测试', 'local', ttsVoice(), false, true,
                         ttsEnVoice(), ttsIcao());
       } catch (e) { showToast(e.message, 'error'); }
     });
@@ -2540,9 +2588,14 @@
     $('#set-tts-en-voice')?.addEventListener('change', (e) => {
       if (e.target) e.target.dataset.saved = e.target.value || '';
     });
-    $('#tts-icao')?.addEventListener('change', () => { /* 仅前端开关，随朗读请求发送 */ });
     $('#btn-tts-voice-upload')?.addEventListener('click', uploadVoicePack);
-    $('#btn-tts-train-upload')?.addEventListener('click', uploadTrainingData);
+    $('#btn-save-tts')?.addEventListener('click', saveTtsSettings);
+    $('#btn-save-reboot')?.addEventListener('click', saveRebootSettings);
+    $('#btn-reboot-check')?.addEventListener('click', checkRebootPermission);
+    $('#btn-reboot-now')?.addEventListener('click', rebootNow);
+    bindDirty('#llm-set-card', '#llm-save-state');
+    bindDirty('#tts-set-card', '#tts-save-state');
+    bindDirty('#reboot-set-card', '#reboot-save-state');
     const micSlider = (id, labelId) => {
       $(id)?.addEventListener('input', (e) => { if ($(labelId)) $(labelId).textContent = e.target.value + '%'; });
     };

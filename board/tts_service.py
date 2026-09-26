@@ -24,11 +24,10 @@ PIPER_ESPEAK = PIPER_DIR / 'espeak-ng-data'
 VOICES_DIR = Path('/opt/ai/voices')
 PROTECTED_VOICES = {'zh_CN-huayan-medium'}   # 内置基座音色，禁止删除
 TTS_CACHE_DIR = Path('/www/tts_cache')
-TRAINING_DIR = Path('/opt/ai/voice_training')
 
 
 def ensure_dirs():
-    for p in (VOICES_DIR, TTS_CACHE_DIR, TRAINING_DIR):
+    for p in (VOICES_DIR, TTS_CACHE_DIR):
         p.mkdir(parents=True, exist_ok=True)
 
 
@@ -651,27 +650,3 @@ def _sanitize_voice_config(config_path):
         pass
     Path(config_path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
     return bad
-
-
-def save_training_zip(zip_stream, dataset_id):
-    dataset_id = safe_name(dataset_id, 'dataset')
-    target = TRAINING_DIR / dataset_id
-    target.mkdir(parents=True, exist_ok=True)
-    extract_zip_safely(zip_stream, target)
-    mark = target / 'UPLOAD_INFO.txt'
-    mark.write_text(
-        f'上传时间：{time.strftime("%Y-%m-%d %H:%M:%S")}\n'
-        '说明：RK3588 板端不直接进行神经网络 TTS 训练。\n'
-        '建议在 PC/服务器上使用 Piper 训练流程或 GPT-SoVITS 等方案完成微调，\n'
-        '导出为 Piper ONNX 音色包后，通过“上传音色包”部署到 /opt/ai/voices。\n',
-        encoding='utf-8')
-    return {'dataset_id': dataset_id, 'path': str(target)}
-
-
-def list_training_jobs():
-    ensure_dirs()
-    jobs = []
-    for d in sorted(TRAINING_DIR.iterdir()):
-        if d.is_dir():
-            jobs.append({'id': d.name, 'path': str(d), 'mtime': d.stat().st_mtime})
-    return jobs
