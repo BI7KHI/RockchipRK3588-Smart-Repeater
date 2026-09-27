@@ -92,6 +92,39 @@
     if (rateTimer) { clearInterval(rateTimer); rateTimer = null; }
   }
 
+  // ---------------------------------------------- 发射（受控）：生成后发上无线电
+  // 走 /api/assist/say（不过 LLM）：助手的受控发射链路全都在（禁发时段、信道占用、
+  // 最小间隔、单次上限、全局测试模式），这里只负责发起与回显。
+  let lastReply = '';
+
+  function setTxState(msg) {
+    const el = $('#at-tx-state');
+    if (el) el.textContent = msg || '';
+  }
+
+  async function sayToAir(text, ask) {
+    const t = (text || '').trim();
+    if (!t) { toast('没有可发射的文本', 'error'); return; }
+    if (ask && !confirm('会真的发射到无线电（占用信道，其他台能听到）。确定继续？')) return;
+    setTxState('提交发射…');
+    try {
+      const d = await api('/api/assist/say', {
+        method: 'POST', body: JSON.stringify({ text: t, tx: true }),
+      });
+      if (!d.ok) throw new Error(d.error || '提交失败');
+      if (d.test_mode) {
+        setTxState('全局「测试模式」开着：本次只合成不发射');
+        toast('全局「测试模式（只试听不发射）」开着，本次只合成', 'error');
+      } else {
+        setTxState('已提交发射（受控：占用/间隔/上限生效）');
+        toast('已提交发射到无线电', 'success');
+      }
+    } catch (e) {
+      setTxState('发射提交失败：' + e.message);
+      toast('发射失败：' + e.message, 'error');
+    }
+  }
+
   async function sendChat() {
     const ta = $('#at-chat-text');
     const text = (ta && ta.value || '').trim();
@@ -145,6 +178,7 @@
             // 网页对话是语音测试，屏幕上看到的就是会发射的那句话。
             answer = ev.text || answer;
             el.textContent = answer;
+            lastReply = answer;
             if (ev.raw && ev.raw !== answer) {
               const d = document.createElement('details');
               d.className = 'chat-raw';
@@ -162,6 +196,10 @@
       }
       if (!answer) el.textContent = '（没有回答）';
       chatMsgs.push({ role: 'assistant', content: answer });
+      // 用户勾了「生成后自动发射」：文本一生成就发上无线电（受控发射那条路）
+      if (answer && $('#at-tx-auto') && $('#at-tx-auto').checked) {
+        await sayToAir(answer, true);
+      }
     } catch (e) {
       el.textContent = '错误：' + e.message;
       toast(e.message, 'error');
@@ -335,8 +373,10 @@
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
     });
     bindVoiceInput();
+    $('#btn-at-say-last')?.addEventListener('click', () => sayToAir(lastReply, true));
     $('#btn-at-tts-web')?.addEventListener('click', speakToWeb);
     voiceSetState('就绪');
+    setTxState('');
   }
 
   if (document.readyState === 'loading') {

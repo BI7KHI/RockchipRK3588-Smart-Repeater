@@ -496,6 +496,9 @@ def _set_default_settings(db):
         'assist_enabled': '0',
         'assist_wake_words': '智能中继,中继台',
         'assist_wake_fuzzy': '1',
+        # level = 电平分段后判唤醒词（原行为）；busy = BUSY 触发 + 唤醒词双条件
+        'assist_wake_mode': 'level',
+        'assist_wake_loose': '0',
         'assist_channel': 'left',
         'assist_dbfs_open': '-50',
         'assist_dbfs_close': '-56',
@@ -1295,6 +1298,8 @@ def api_settings_get():
         'assist_enabled',
         'assist_wake_words',
         'assist_wake_fuzzy',
+        'assist_wake_mode',
+        'assist_wake_loose',
         'assist_channel',
         'assist_dbfs_open',
         'assist_dbfs_close',
@@ -1427,6 +1432,9 @@ def api_settings_set():
         'assist_use_vad': _bool_caster,
         'assist_enhance': _bool_caster,
         'assist_wake_fuzzy': _bool_caster,
+        'assist_wake_loose': _bool_caster,
+        'assist_wake_mode': lambda v: (str(v).strip().lower()
+            if str(v).strip().lower() in ('level', 'busy') else 'level'),
         'assist_use_tools': _bool_caster,
         'assist_keep_llm_warm': _bool_caster,
         'assist_test_mode': _bool_caster,
@@ -6845,21 +6853,51 @@ def api_assist_audio(rid):
 @app.route('/api/assist/test', methods=['POST'])
 @login_required
 def api_assist_test():
-    """本地回环测试：走完整链路（提示词→LLM→TTS），默认只网页试听不发射。"""
+    """本地回环测试：走完整链路（提示词→LLM→TTS）。
+
+    默认只网页试听不发射；带 `tx: true` 才**受控发射**到无线电（禁发时段、信道占用、
+    最小间隔、单次上限这些红线照样生效；全局「测试模式（只试听不发射）」开着就仍然拒绝）。
+    """
     data = request.get_json(silent=True) or {}
     text = (data.get('text') or '').strip()
     if not text:
         return api_err('测试文本不能为空')
-    audit('assist_test', text[:120])
-    return api_ok(**assistant_service_instance.test_turn(text))
+    tx = bool(data.get('tx'))
+    audit('assist_test', ('tx ' if tx else '') + text[:120])
+    return api_ok(**assistant_service_instance.test_turn(text, tx=tx))
+
+
+@app.route('/api/assist/say', methods=['POST'])
+@login_required
+def api_assist_say():
+    """把**已有文本**合成后发射（或只试听）——「发射这句」按钮用。
+
+    与 /api/assist/test 的区别：不再过 LLM（文本已经生成好了），只做 TTS + 受控发射。
+    """
+    data = request.get_json(silent=True) or {}
+    text = (data.get('text') or '').strip()
+    if not text:
+        return api_err('文本不能为空')
+    if len(text) > 2000:
+        return api_err('文本过长（最多 2000 字）')
+    tx = bool(data.get('tx', True))
+    audit('assist_say', ('tx ' if tx else '试听 ') + text[:120])
+    return api_ok(**assistant_service_instance.say_text(
+        text, tx=tx, voice=(data.get('voice') or '').strip()))
 
 
 @app.route('/api/assist/wake', methods=['POST'])
 @login_required
 def api_assist_wake():
-    """只做唤醒词匹配自测：不调 LLM、不发射，用于调唤醒词与容错。"""
+    """只做唤醒词匹配自测：不调 LLM、不发射，用于调唤醒词与容错。
+
+    带 `busy` 时按所选唤醒方式判定「会不会真的唤醒」（BUSY 模式下要两个条件都满足）。
+    """
     data = request.get_json(silent=True) or {}
-    return api_ok(**assistant_service_instance.test_wake((data.get('text') or '').strip()))
+    busy = data.get('busy')
+    busy = None if busy is None else bool(busy)
+    return api_ok(**assistant_service_instance.test_wake(
+        (data.get('text') or '').strip(), busy=busy))
 
 
 @app.route('/api/assist/stop', methods=['POST'])

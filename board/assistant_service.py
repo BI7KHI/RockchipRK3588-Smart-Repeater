@@ -35,6 +35,7 @@ ASR 模型确实是同一份（`asr_service.ENGINE` 单例 + 解码锁，**没�
   * 可选禁发时段 `assist_quiet_hours`；
   * 网页可一键停止，`stop()` 会立刻打断播放并清空待处理队列。
 """
+import difflib
 import json
 import math
 import inspect
@@ -54,6 +55,9 @@ import agent_service
 
 LOG = '[ASSIST]'
 
+# 唤醒方式：level = 电平分段后判唤醒词（原行为）；busy = BUSY 触发 + 唤醒词双条件
+WAKE_MODES = ('level', 'busy')
+
 SAMPLE_RATE = 16000
 FRAME_BYTES = 2                       # 16bit 单声道
 WORK_DIR = Path('/opt/ai/relay_assist')
@@ -72,6 +76,11 @@ DEFAULTS = {
     'assist_enabled': '0',
     'assist_wake_words': '智能中继,中继台',
     'assist_wake_fuzzy': '1',
+    # level = 电平分段后判唤醒词（原行为）；busy = BUSY 触发 + 唤醒词双条件
+    'assist_wake_mode': 'level',
+    # 宽松匹配：允许唤醒词**漏一个字**（「智能中继」→「智能继」）。默认关闭 ——
+    # 漏字变体会让短词更容易误触发，实测这是误唤醒的主要来源。
+    'assist_wake_loose': '0',
     'assist_channel': 'left',
     # 分段
     'assist_dbfs_open': '-50',
@@ -167,15 +176,18 @@ def _takes_kw(fn, name):
 # 「机」是实测命中的：真实空口录音里「中继台」被识别成「中机台」，
 # 而原来的集合里没有 jī 的常用字，唤醒直接落空。
 _HOMOPHONE = {
-    '台': '台太抬臺苔',
-    '太': '台太抬臺苔',
-    '智': '智志治至知',
-    '志': '智志治至知',
-    '继': '继记纪计技济机基击急即集几己纪技',
-    '记': '继记纪计技济机基击急即集几己',
-    '计': '继记纪计技济机基击急即集几己',
-    '中': '中钟忠终',
-    '钟': '中钟忠终',
+    '台': '台太抬臺苔态泰胎',
+    '太': '台太抬臺苔态泰胎',
+    '智': '智志治至知制直只纸质置',
+    '志': '智志治至知制直只纸',
+    '继': '继记纪计技济机基击急即集几己寂寄系',
+    '记': '继记纪计技济机基击急即集几己寂寄',
+    '计': '继记纪计技济机基击急即集几己寂寄',
+    '中': '中钟忠终肿种仲',
+    '钟': '中钟忠终肿种仲',
+    '能': '能嫩恁',
+    '香': '香想相乡箱翔响享湘向像',
+    '想': '香想相乡箱翔响享湘向像',
 }
 
 # 匹配前丢弃的标点/空白：ASR 可能给出任意断句，不能因此漏唤醒
@@ -212,7 +224,23 @@ def _wake_regex(word, fuzzy=True):
         return None
 
 
-def match_wake(text, words, fuzzy=True):
+def _wake_variants(word, loose=False):
+    """唤醒词的候选写法：原词（+ 宽松模式下各去掉一个字）。
+
+    ASR **漏字**是实测最常见的失败（「智能中继」→「智能继」、「中继台」→「继台」）。
+    但漏字变体会让短词变得极易误触发，所以只对 ≥3 字的词开放，且默认关闭
+    （`assist_wake_loose`）。
+    """
+    out = [word]
+    if loose and len(word) >= 3:
+        for i in range(len(word)):
+            v = word[:i] + word[i + 1:]
+            if len(v) >= 2 and v not in out:
+                out.append(v)
+    return out
+
+
+def match_wake(text, words, fuzzy=True, loose=False):
     """在识别文本里找唤醒词。
 
     返回 (配置里的唤醒词, 实际命中的原文片段, 剥掉唤醒词后剩余的问题文本)。
@@ -225,20 +253,49 @@ def match_wake(text, words, fuzzy=True):
     if not comp:
         return '', '', ''
     for w in words:
-        rx = _wake_regex(w, fuzzy)
-        if rx is None:
-            continue
-        m = rx.search(comp)
-        if not m:
-            continue
-        a, b = m.start(), m.end() - 1
-        if a >= len(idx) or b >= len(idx):
-            continue
-        oa, ob = idx[a], idx[b]
-        rest = (text[:oa] + text[ob + 1:]).strip(' \t，。！？、；：,.!?;:""\'\'（）()')
-        rest = _DUP_PUNC_RE.sub(r'\1', rest)
-        return str(w), text[oa:ob + 1], rest
+        for cand in _wake_variants(w, loose):
+            rx = _wake_regex(cand, fuzzy)
+            if rx is None:
+                continue
+            m = rx.search(comp)
+            if not m:
+                continue
+            a, b = m.start(), m.end() - 1
+            if a >= len(idx) or b >= len(idx):
+                continue
+            oa, ob = idx[a], idx[b]
+            rest = (text[:oa] + text[ob + 1:]).strip(' \t，。！？、；：,.!?;:""\'\'（）()')
+            rest = _DUP_PUNC_RE.sub(r'\1', rest)
+            # 命中：返回**配置里的词**（不是变体），便于日志里对照
+            return w, text[oa:ob + 1], rest
     return '', '', ''
+
+
+def wake_near_miss(text, words, fuzzy=True, threshold=0.6):
+    """没命中时给出「最像哪个唤醒词、相似度多少」——只做诊断，不参与判定。
+
+    唤醒不上时最需要回答的问题是「到底差在哪」：是 ASR 完全没听出来，还是听成了
+    近音字。这里用序列相似度给个数量级，帮助判断该加同音字还是该调电平。
+    """
+    comp, _idx = _compact(text or '')
+    if not comp:
+        return '', 0.0
+    best, best_r = '', 0.0
+    for w in (words or []):
+        if not w:
+            continue
+        n = len(w)
+        for size in {n, n + 1, n - 1, n + 2}:
+            if size <= 0:
+                continue
+            for i in range(0, max(1, len(comp) - size + 1)):
+                seg = comp[i:i + size]
+                if not seg:
+                    continue
+                r = difflib.SequenceMatcher(None, seg, w).ratio()
+                if r > best_r:
+                    best_r, best = r, w
+    return (best, round(best_r, 2)) if best_r >= threshold else ('', round(best_r, 2))
 
 
 def clamp_reply(text, limit):
@@ -449,6 +506,16 @@ class AssistantService:
         out = [w.strip() for w in re.split(r'[,;、\s]+', raw) if w.strip()]
         return out[:8]
 
+    def wake_mode(self, st=None):
+        """唤醒方式：level（电平分段，现状）/ busy（BUSY 触发 + 唤醒词）。
+
+        busy 模式下 BUSY 有效即开段（弱信号也能收），且**只有 BUSY 段**才允许唤醒 ——
+        用户要的是「BUSY 触发且检测到唤醒词才唤醒」，两个条件同时满足。
+        """
+        st = st or self.settings()
+        v = str(st.get('assist_wake_mode') or 'level').strip().lower()
+        return v if v in WAKE_MODES else 'level'
+
     def max_chars(self, st=None):
         st = st or self.settings()
         return max(10, int(_f(st.get('assist_max_reply_chars'), 80)))
@@ -595,17 +662,24 @@ class AssistantService:
         silence = max(0.15, _f(st.get('assist_silence_ms'), 450.0)) / 1000.0
         min_speech = max(0.1, _f(st.get('assist_min_speech_ms'), 350.0)) / 1000.0
         max_utt = max(2.0, _f(st.get('assist_max_utterance'), 15.0))
+        # BUSY 唤醒模式：**载波即触发**。弱信号常常压根到不了起判电平，按电平分段会
+        # 「根本没开段 → 没跑 ASR → 永远唤不醒」；BUSY 有效说明确实有人在发射，
+        # 这时开段并让 BUSY 计入「有声时长」，弱信号才有机会被识别到。
+        busy_wake = self.wake_mode(st) == 'busy'
+        busy_now = bool(self.busy_getter())
 
         if self.seg is None:
-            if dbfs >= open_db:
+            # level 模式：完全维持原行为（只认电平）；busy 模式：载波也算触发条件
+            if dbfs >= open_db or (busy_wake and busy_now):
                 seg = {'start': ts, 'last_voice': ts, 'buf': [], 'n': 0,
-                       'pre': list(self.pre), 'busy': bool(self.busy_getter()),
+                       'pre': list(self.pre), 'busy': busy_now,
                        'peak': dbfs, 'voice_n': 0}
                 seg['buf'].append(mono)
                 seg['n'] += len(mono)
-                seg['voice_n'] += len(mono)
+                if busy_now or dbfs >= close_db:
+                    seg['voice_n'] += len(mono)
                 self.seg = seg
-                self._set_stage('speech', '检测到语音')
+                self._set_stage('speech', '检测到语音' if not busy_now else 'BUSY 触发')
             else:
                 self._push_pre(ts, mono, preroll_ms)
                 # 启用后一直没人讲话时，必须把状态机从初始的 'off' 推进到 'idle'，
@@ -618,7 +692,9 @@ class AssistantService:
         seg['n'] += len(mono)
         if dbfs > seg['peak']:
             seg['peak'] = dbfs
-        if dbfs >= close_db:
+        if busy_now:
+            seg['busy'] = True                  # 段内任一时刻有载波 → 记成 BUSY 段
+        if dbfs >= close_db or (busy_wake and busy_now):
             seg['last_voice'] = ts
             seg['voice_n'] += len(mono)
 
@@ -747,8 +823,24 @@ class AssistantService:
             return
         self._last_heard, self._last_heard_ts = text, now
 
-        wake, hit, rest = match_wake(
-            text, self.wake_words(st), _flag(st.get('assist_wake_fuzzy'), True))
+        fuzzy = _flag(st.get('assist_wake_fuzzy'), True)
+        loose = _flag(st.get('assist_wake_loose'), False)
+        words = self.wake_words(st)
+        wake, hit, rest = match_wake(text, words, fuzzy, loose)
+        mode = self.wake_mode(st)
+        busy_seg = bool(item.get('busy'))
+        # BUSY 唤醒模式的核心判定：**BUSY 触发 且 命中唤醒词** 才算唤醒。
+        # 只满足唤醒词（例如有人在本地对着麦克风说话、或静噪抖动被识别出近音字）
+        # 不唤醒 —— 这一段仍然进实况流，便于看清「为什么没唤醒」。
+        if wake and mode == 'busy' and not busy_seg:
+            rec['action'] = 'ignored'
+            rec['wake'] = hit
+            rec['note'] = 'BUSY 未触发，按 BUSY 唤醒模式跳过'
+            self.counters['busy_skipped'] = int(self.counters.get('busy_skipped', 0)) + 1
+            keep('ignored', hit)
+            self._push_recent(rec)
+            self._set_stage('idle', 'BUSY 未触发，跳过唤醒')
+            return
         in_window = now <= self.follow_until
         if wake:
             rec['wake'] = hit
@@ -761,9 +853,13 @@ class AssistantService:
         else:
             rec['action'] = 'ignored'
             self.counters['ignored'] += 1
+            near, ratio = wake_near_miss(text, words, fuzzy)
+            if near:
+                # 差一点就命中：把「像哪个词、相似度」写进记录，调词时一眼看到差在哪
+                rec['note'] = '接近唤醒词 %s（相似度 %.2f）' % (near, ratio)
             keep('ignored')
             self._push_recent(rec)
-            self._set_stage('idle', '未命中唤醒词')
+            self._set_stage('idle', rec['note'] or '未命中唤醒词')
             return
 
         if not rest:
@@ -1245,8 +1341,13 @@ class AssistantService:
         print('%s 手动停止：清空 %d 条待处理语音' % (LOG, n), flush=True)
         return {'stopped': True, 'cleared': n}
 
-    def test_turn(self, text):
-        """本地回环测试：走完整链路（ASR 可跳过），默认不发射。"""
+    def test_turn(self, text, tx=False):
+        """本地回环测试：走完整链路（ASR 可跳过）。
+
+        默认不发射（no_tx=True 是硬保证）；`tx=True` 时走**受控发射**那条路
+        （禁发时段 → 等信道空闲与最小间隔 → 硬超时），全局「测试模式（只试听不发射）」
+        仍然有效 —— 它开着就照旧拒绝发射并在返回值里说明原因。
+        """
         text = (text or '').strip()
         if not text:
             return {'ok': False, 'error': '测试文本为空'}
@@ -1257,21 +1358,76 @@ class AssistantService:
                 self.counters['test_turns'] += 1
                 self._last_heard, self._last_heard_ts = text, time.time()
                 self._answer(text, st, kind='test', heard=text, asr_ms=0,
-                             rx_bytes=None, dbfs=0.0, no_tx=True)
+                             rx_bytes=None, dbfs=0.0, no_tx=not tx)
             except Exception as e:
                 self.last_error = '%s: %s' % (type(e).__name__, e)
                 print('%s 测试轮失败：%s' % (LOG, self.last_error), flush=True)
 
         threading.Thread(target=_run, daemon=True, name='assist-test').start()
-        return {'ok': True, 'queued': True, 'test_mode': _flag(st.get('assist_test_mode'), False)}
+        return {'ok': True, 'queued': True, 'tx': bool(tx),
+                'test_mode': _flag(st.get('assist_test_mode'), False)}
 
-    def test_wake(self, text):
-        """只做唤醒词匹配测试，不调用 LLM、不发射。"""
+    def say_text(self, text, tx=True, voice=''):
+        """把**给定文本**合成后按受控发射（或只试听）。
+
+        用途：手动测试 / 文本对话里点「发射这句」——文本已经生成好了，不需要再过 LLM。
+        `tx=False` 时只合成，网页试听；两条路都记进对话记录，便于回看。
+        """
+        text = (text or '').strip()
+        if not text:
+            return {'ok': False, 'error': '文本为空'}
+        if self.tts_fn is None or self.play_fn is None:
+            return {'ok': False, 'error': 'TTS/播放未注入'}
         st = self.settings()
-        wake, hit, rest = match_wake(text, self.wake_words(st),
-                                     _flag(st.get('assist_wake_fuzzy'), True))
-        return {'words': self.wake_words(st), 'matched': wake, 'hit': hit,
-                'question': rest, 'fuzzy': _flag(st.get('assist_wake_fuzzy'), True)}
+        fname = text[:60]
+
+        def _run():
+            try:
+                self.counters['test_turns'] += 1
+                wav = self.tts_fn(text, (voice or st.get('assist_voice') or '').strip())
+                res = self._transmit(wav, st, no_tx=not tx) or {}
+                ok = bool(res.get('ok'))
+                action = 'sent' if ok else ('skipped' if res.get('skipped') else 'failed')
+                err = '' if ok else str(res.get('error') or '')
+                self._save_turn('say', '', text, action, error=err,
+                                tx_seconds=float(res.get('seconds') or 0.0))
+                if ok:
+                    self.counters['tx'] += 1
+                    self.last_tx = time.time()
+                    self.tx_last_ts = self.last_tx
+                    print('%s 手动发射完成：%s' % (LOG, fname), flush=True)
+                else:
+                    self.last_error = err or '发射失败'
+                    print('%s 手动发射未执行：%s' % (LOG, self.last_error), flush=True)
+            except Exception as e:
+                self.last_error = '%s: %s' % (type(e).__name__, e)
+                print('%s 手动发射失败：%s' % (LOG, self.last_error), flush=True)
+
+        threading.Thread(target=_run, daemon=True, name='assist-say').start()
+        return {'ok': True, 'queued': True, 'tx': bool(tx),
+                'test_mode': _flag(st.get('assist_test_mode'), False)}
+
+    def test_wake(self, text, busy=None):
+        """只做唤醒词匹配测试，不调用 LLM、不发射。
+
+        `busy` 给定时按 BUSY 唤醒模式判定「会不会真的唤醒」——不开无线电也能验双条件。
+        """
+        st = self.settings()
+        fuzzy = _flag(st.get('assist_wake_fuzzy'), True)
+        loose = _flag(st.get('assist_wake_loose'), False)
+        words = self.wake_words(st)
+        mode = self.wake_mode(st)
+        wake, hit, rest = match_wake(text, words, fuzzy, loose)
+        near, ratio = ('', 0.0)
+        if not wake:
+            near, ratio = wake_near_miss(text, words, fuzzy)
+        would, reason = bool(wake), ''
+        if wake and mode == 'busy' and busy is not None and not busy:
+            would, reason = False, 'BUSY 未触发，按 BUSY 唤醒模式跳过'
+        return {'words': words, 'matched': wake, 'hit': hit, 'question': rest,
+                'fuzzy': fuzzy, 'loose': loose, 'mode': mode,
+                'busy': busy, 'would_wake': would, 'reason': reason,
+                'near': near, 'near_ratio': ratio}
 
     def list_turns(self, day=None, limit=100, offset=0):
         day = day or datetime.now().strftime('%Y-%m-%d')
@@ -1308,6 +1464,9 @@ class AssistantService:
             'stage_seconds': round(now - self.stage_since, 1),
             'wake_words': self.wake_words(st),
             'fuzzy': _flag(st.get('assist_wake_fuzzy'), True),
+            'wake_mode': self.wake_mode(st),
+            'wake_loose': _flag(st.get('assist_wake_loose'), False),
+            'busy_now': bool(self.busy_getter()),
             'follow_up_left': round(max(0.0, self.follow_until - now), 1),
             'history_turns': hist,
             'last_tx_ago': round(now - self.last_tx, 1) if self.last_tx else -1,

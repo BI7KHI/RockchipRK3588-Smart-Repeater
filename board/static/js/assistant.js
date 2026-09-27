@@ -82,8 +82,11 @@
     {
       title: '唤醒词与交互', hint: '一句话唤醒：唤醒词与问题连在一起说即可。命中后 30 秒内可直接追问，不必再喊唤醒词。',
       items: [
+        { k: 'assist_wake_mode', f: '唤醒方式', t: 'select', tip: 'BUSY 触发 = 载波来了才识别并判唤醒词（弱信号也能收，且不会在没人说话时误唤醒）',
+          opts: [['level', '电平唤醒（原行为）'], ['busy', 'BUSY 触发 + 唤醒词（推荐）']] },
         { k: 'assist_wake_words', f: '唤醒词（逗号分隔，最多 8 个）', t: 'text', span: 2, tip: '短词误触发多、长词更稳；改完立刻生效' },
-        { k: 'assist_wake_fuzzy', f: '同音容错', t: 'bool', tip: '「中继太」也能命中「中继台」' },
+        { k: 'assist_wake_fuzzy', f: '同音容错', t: 'bool', tip: '「中继太」「中机台」「智能中记」也能命中' },
+        { k: 'assist_wake_loose', f: '宽松匹配（允许唤醒词漏一个字）', t: 'bool', tip: '「智能中继」→「智能继」也能唤醒；短词会更易误触发，默认关闭' },
         { k: 'assist_followup_seconds', f: '追问窗口（秒）', t: 'num', min: 0, max: 600, step: 5 },
         { k: 'assist_ack_reply', f: '只喊唤醒词时的应答', t: 'text' },
         { k: 'assist_use_vad', f: '用 silero VAD 收紧语音边界', t: 'bool', tip: '只做边界裁剪，不会据此丢弃唤醒词' }
@@ -550,13 +553,16 @@
     $('#btn-as-test').addEventListener('click', function () {
       var text = $('#as-test-text').value.trim();
       if (!text) { toast('请输入测试问题'); return; }
+      var tx = !!($('#as-test-tx') && $('#as-test-tx').checked);
+      if (tx && !confirm('会真的发射到无线电（占用信道，其他台能听到）。确定继续？')) return;
       this.disabled = true;
       var btn = this;
-      toast('已提交，结果稍后出现在右侧「对话记录」');
-      api('/api/assist/test', { method: 'POST', body: JSON.stringify({ text: text }) })
+      toast(tx ? '已提交：生成后走受控发射（会占用信道）' : '已提交，结果稍后出现在右侧「对话记录」');
+      api('/api/assist/test', { method: 'POST', body: JSON.stringify({ text: text, tx: tx }) })
         .then(function (d) {
           btn.disabled = false;
           if (!d.ok) toast(d.error || '提交失败');
+          else if (d.test_mode && tx) toast('全局「测试模式」开着：本次仍然只合成不发射');
           else if (d.test_mode) toast('测试模式：只合成不发射');
           setTimeout(function () { poll(); loadTurns(); }, 800);
           setTimeout(loadTurns, 4000);
@@ -566,14 +572,41 @@
 
     $('#btn-as-test-wake').addEventListener('click', function () {
       var text = $('#as-test-text').value.trim();
-      api('/api/assist/wake', { method: 'POST', body: JSON.stringify({ text: text }) })
+      var busyEl = $('#as-test-busy');
+      var body = { text: text };
+      if (busyEl) body.busy = !!busyEl.checked;
+      api('/api/assist/wake', { method: 'POST', body: JSON.stringify(body) })
         .then(function (d) {
           $('#as-wake-out').textContent = d.ok ? JSON.stringify(d, null, 2) : (d.error || '失败');
           if (d.ok) {
-            toast(d.matched ? ('命中「' + d.matched + '」，问题：' + (d.question || '（空）'))
-              : '未命中任何唤醒词');
+            if (d.matched && d.would_wake === false) {
+              toast('命中「' + d.matched + '」但 ' + (d.reason || '被唤醒方式拦下'));
+            } else {
+              toast(d.matched ? ('命中「' + d.matched + '」，问题：' + (d.question || '（空）'))
+                : (d.near ? ('未命中；最接近「' + d.near + '」相似度 ' + d.near_ratio)
+                          : '未命中任何唤醒词'));
+            }
           }
         });
+    });
+
+    // 只发射这段文本（不过 LLM）：合成 → 受控发射
+    $('#btn-as-say').addEventListener('click', function () {
+      var text = $('#as-test-text').value.trim();
+      if (!text) { toast('请输入要发射的文本'); return; }
+      var tx = !!($('#as-say-tx') && $('#as-say-tx').checked);
+      if (tx && !confirm('会真的发射到无线电（占用信道，其他台能听到）。确定继续？')) return;
+      this.disabled = true;
+      var btn = this;
+      api('/api/assist/say', { method: 'POST', body: JSON.stringify({ text: text, tx: tx }) })
+        .then(function (d) {
+          btn.disabled = false;
+          if (!d.ok) toast(d.error || '提交失败');
+          else if (d.test_mode && tx) toast('全局「测试模式」开着：本次仍然只合成不发射');
+          else toast(tx ? '已提交发射（受控：禁发时段/信道占用/间隔/上限都生效）' : '已提交试听');
+          setTimeout(function () { poll(); loadTurns(); }, 800);
+          setTimeout(loadTurns, 4000);
+        }).catch(function () { btn.disabled = false; toast('请求失败'); });
     });
 
     $$('[data-fill]').forEach(function (b) {

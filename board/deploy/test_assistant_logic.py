@@ -388,6 +388,70 @@ for k in range(3):
     if svc2.q.qsize() > before:
         ok_rounds += 1
 check('连续 3 轮「发射-静默-呼叫」都能收音', ok_rounds == 3, '%d/3 轮' % ok_rounds)
+
+# ---------------------------------------------------------------------------
+print('\n=== 12. 唤醒词模糊匹配（同音字 / 漏字 / 近似提示）===')
+W = ['智能中继', '中继台', '香香']
+for text, want in (('中继台现在风速多少', '中继台'),
+                   ('中机台电池电压', '中继台'),        # 实测：机/继 同音误识
+                   ('中继太，你好', '中继台'),
+                   ('智能中记，温度多少', '智能中继'),
+                   ('香想，讲个笑话', '香香'),
+                   ('中 继 台 ， 现在几点', '中继台'),   # 中间插标点也要命中
+                   ('智能中继站，你好', '智能中继')):   # 多字也算命中
+    got = A.match_wake(text, W, True)[0]
+    check('「%s」→ 命中 %s' % (text, want), got == want, '实得 %r' % got)
+check('非唤醒词不命中', A.match_wake('你好啊', W, True)[0] == '')
+check('容错关闭时同音字不命中', A.match_wake('中机台电压多少', W, False)[0] == '',
+      A.match_wake('中机台电压多少', W, False))
+check('漏字默认不命中（「智能继」差一个「中」）',
+      A.match_wake('智能继，现在几点', W, True)[0] == '')
+check('开宽松匹配后漏字能命中',
+      A.match_wake('智能继，现在几点', W, True, True)[0] == '智能中继')
+near, ratio = A.wake_near_miss('中继泰现在几点', W, True)
+check('未命中时给出「最像哪个词」', near == '中继台' and ratio >= 0.6,
+      '%r %.2f' % (near, ratio))
+check('差得远时不给近似提示', A.wake_near_miss('今天天气不错', W, True)[0] == '')
+
+print('\n=== 13. BUSY 唤醒方式 ===')
+svc_a, st_a = make_svc({'assist_wake_mode': 'level', 'assist_enabled': '1'})
+svc_b, st_b = make_svc({'assist_wake_mode': 'busy', 'assist_enabled': '1'})
+check('唤醒方式取值 level', svc_a.wake_mode(st_a) == 'level')
+check('唤醒方式取值 busy', svc_b.wake_mode(st_b) == 'busy')
+check('非法值回落 level',
+      svc_b.wake_mode({'assist_wake_mode': '乱写'}) == 'level')
+
+# 判定：BUSY 模式下载波没来就不唤醒（唤醒词命中也不行）
+r = svc_b.test_wake('中继台，现在几点', busy=False)
+check('busy 模式 + BUSY 未触发 → 不唤醒', r['matched'] == '中继台' and r['would_wake'] is False,
+      str(r))
+check('不唤醒时给出原因', 'BUSY' in r['reason'], r['reason'])
+r2 = svc_b.test_wake('中继台，现在几点', busy=True)
+check('busy 模式 + BUSY 有效 → 唤醒', r2['would_wake'] is True, str(r2))
+r3 = svc_a.test_wake('中继台，现在几点', busy=False)
+check('level 模式不受 BUSY 影响', r3['would_wake'] is True, str(r3))
+
+# 分段：busy 模式下载波即开段（弱信号也能收），level 模式不会
+def _seg_open(mode, busy, dbfs):
+    svc, st = make_svc({'assist_wake_mode': mode, 'assist_enabled': '1'},
+                       busy=busy)
+    svc.busy_getter = lambda: busy
+    mono = b'\x00\x00' * 1600                 # 0.1s 单声道
+    svc._segment(None, mono, 1000.0, dbfs, st)
+    return svc.seg
+
+seg = _seg_open('busy', True, -70.0)
+check('busy 模式：弱信号（-70dBFS）+ BUSY → 开段', seg is not None,
+      'seg=%r' % (seg,))
+check('开出的段被标记为 BUSY 段', bool(seg and seg.get('busy')))
+check('BUSY 计入「有声时长」（弱信号才能过最短时长）',
+      bool(seg and seg.get('voice_n', 0) > 0))
+check('level 模式：同样条件下不开段（这就是「唤不醒」的原因）',
+      _seg_open('level', True, -70.0) is None)
+check('busy 模式：BUSY 未来也不开段（不会在没人说话时误唤醒）',
+      _seg_open('busy', False, -70.0) is None)
+check('两种模式下正常语音都能开段', _seg_open('level', False, -30.0) is not None)
+
 print('\n' + '=' * 62)
 print('通过 %d 项，失败 %d 项' % (OK[0], len(FAIL)))
 if FAIL:
