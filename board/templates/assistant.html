@@ -100,6 +100,7 @@
   <button class="tab-btn active" data-atab="cfg">设置</button>
   <button class="tab-btn" data-atab="prompt">提示词与清洗</button>
   <button class="tab-btn" data-atab="test">手动测试</button>
+  <button class="tab-btn" data-atab="chat">文本对话</button>
   <button class="tab-btn" data-atab="stat">信道占用统计</button>
 </div>
 
@@ -188,6 +189,42 @@
   </div>
 </div>
 
+<div class="as-pane" data-apane="chat">
+  <div class="as-warn">
+    这就是原来「总览 → LLM 对话」那一页，现已<b>并入语音测试</b>：它与中继语音助手共用
+    <b>同一份提示词</b>（共用基础设定 + 语音播报约束）、同一条技能链路、同一套数值口语化出口，
+    所以它只是助手的<b>本地非接收测试</b> —— 全程<b>不发射</b>（不拉 PTT、不上中继）。
+    提示词请在「设置」页签里改（那里的「共用基础设定」与「语音播报约束」就是两条链路共用的那两份）。
+  </div>
+  <div class="card chat-card" style="max-width:100%">
+    <div class="chat-history" id="at-chat-history"></div>
+    <div class="chat-input">
+      <textarea id="at-chat-text" rows="3"
+        placeholder="输入消息，Enter 发送，Shift+Enter 换行；（也可按住下面的麦克风说话）"></textarea>
+      <button class="btn primary" id="btn-at-send">发送</button>
+    </div>
+    <div class="row gap small wrap">
+      <button class="btn" id="btn-at-voice"
+              title="按住说话：板端离线识别（sherpa-onnx + SenseVoice）后转文字，录音留档">🎙 按住说话</button>
+      <span id="at-voice-state" class="muted small">语音输入：就绪</span>
+      <label class="checkline"><input type="checkbox" id="at-voice-auto-send" checked> 转写后自动发送</label>
+      <span id="at-rate" class="muted small">生成速率：--</span>
+      <span id="at-tools-live" class="muted small"></span>
+    </div>
+  </div>
+
+  <div class="as-sub">语音试听（只合成到网页播放，<b>不发射</b>；音色/ICAO 跟随全局设置）</div>
+  <div class="row gap wrap" style="align-items:flex-start">
+    <textarea id="at-tts-text" class="as-field" style="flex:1;min-width:260px;min-height:64px"
+      placeholder="例如：现在是北京时间十九点整，电池电压十二点四七伏特">现在是北京时间十九点整，电池电压十二点四七伏特，机内温度四十七点二摄氏度</textarea>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <button class="btn" id="btn-at-tts-web">合成并网页试听</button>
+      <span class="muted small" id="at-tts-state">—</span>
+    </div>
+  </div>
+  <audio id="at-audio" controls preload="none" style="width:100%;max-width:520px;display:none;margin-top:8px"></audio>
+</div>
+
 <div class="as-pane" data-apane="stat">
   <div class="as-stat" id="as-stat"></div>
   <div class="as-sub">计数器（进程生命周期累计）</div>
@@ -196,5 +233,6 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/assistant.js', v='20260930b') }}"></script>
+<script src="{{ url_for('static', filename='js/assistant.js', v='20260930c') }}"></script>
+<script src="{{ url_for('static', filename='js/assistant-test.js', v='20260930a') }}"></script>
 {% endblock %}

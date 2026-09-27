@@ -485,12 +485,10 @@ def _set_default_settings(db):
         'llm_system_prompt': '',
         'llm_system_prompt_on': '1',
         'llm_prompt_vars': '1',
-        # 网页「LLM 对话」的输出约束：对话前注入，固定落在用户消息末尾
-        'llm_chat_suffix': '',
-        'llm_chat_suffix_on': '1',
-        # 约束里 {max_chars} 的取值。该占位符来自语音助手的文案，用户常把那段
-        # 原样粘到网页对话里；不替换的话模型会看到字面的「不超过 {max_chars} 字」。
-        'llm_chat_max_reply_chars': '200',
+        # 注：原来这里还有一套「网页 LLM 对话专属」的约束与字数上限
+        # （llm_chat_suffix / llm_chat_suffix_on / llm_chat_max_reply_chars）。
+        # 对话本身就是语音助手的本地非接收测试，已并入助手页并**共用**助手的
+        # 提示词与字数上限（assist_max_reply_chars），这三个键随之删除，不再读取。
         'agent_enabled': '1',
         'agent_max_iters': '3',
         'agent_tools': '',
@@ -1293,7 +1291,6 @@ def api_settings_get():
         'record_auto_play', 'site_title',
         'tts_provider', 'tts_local_voice', 'tts_en_voice', 'tts_icao', 'tts_icao_voice', 'tts_auto_speak',
         'llm_system_prompt', 'llm_system_prompt_on', 'llm_prompt_vars',
-        'llm_chat_suffix', 'llm_chat_suffix_on', 'llm_chat_max_reply_chars',
         'agent_enabled', 'agent_max_iters', 'agent_tools',
         'assist_enabled',
         'assist_wake_words',
@@ -1421,10 +1418,6 @@ def api_settings_set():
         'llm_system_prompt': lambda v: str(v)[:4000],
         'llm_system_prompt_on': lambda v: '1' if str(v) in ('1', 'true', 'True', 'on') else '0',
         'llm_prompt_vars': lambda v: '1' if str(v) in ('1', 'true', 'True', 'on') else '0',
-        # 网页对话的输出约束：与 llm_system_prompt 同样的长度上限
-        'llm_chat_suffix': lambda v: str(v)[:4000],
-        'llm_chat_suffix_on': lambda v: '1' if str(v) in ('1', 'true', 'True', 'on') else '0',
-        'llm_chat_max_reply_chars': lambda v: str(int(max(10, min(2000, int(float(v)))))),
         'agent_enabled': lambda v: '1' if str(v) in ('1', 'true', 'True', 'on') else '0',
         'agent_max_iters': lambda v: str(max(1, min(5, int(float(v))))),
         'agent_tools': lambda v: ','.join(
@@ -2185,12 +2178,12 @@ def api_agent_tools():
                   vars=({k: str(v) for k, v in _prompt_vars().items()}))
 
 
-def _shared_output_spec(limit_key='assist_max_reply_chars'):
-    """语音助手那套「输出约束」——网页对话共用同一份（用户定：同源，不许两处各写）。
+def _shared_output_spec():
+    """语音助手那套「输出约束」——助手与文本对话**共用同一份**（用户定：同源）。
 
     变量展开与 `{max_chars}` 替换都在这里做：不替换的话模型看到的是字面占位符，
-    等于白写一条字数约束。字数上限按调用方给（助手用 assist_max_reply_chars，
-    网页对话用 llm_chat_max_reply_chars）。
+    等于白写一条字数约束。字数上限用 `assist_max_reply_chars`（两条链路同一个上限，
+    不再单独给对话留一份 —— 对话本来就是助手的本地测试）。
     """
     spec = (_setting_direct('assist_prompt_suffix', '') or '').strip()
     if not spec:
@@ -2201,9 +2194,9 @@ def _shared_output_spec(limit_key='assist_max_reply_chars'):
         except Exception:
             pass
     try:
-        mc = str(int(float(_setting_direct(limit_key, '200') or 200)))
+        mc = str(int(float(_setting_direct('assist_max_reply_chars', '100') or 100)))
     except Exception:
-        mc = '200'
+        mc = '100'
     return spec.replace('{max_chars}', mc)[:2000]
 
 
@@ -2252,12 +2245,12 @@ def api_agent_chat():
             except Exception:
                 pass
     base_prompt = base_prompt[:4000]
-    # 网页对话的「输出约束」= **语音助手那一份**（用户定的：网页对话就是助手的本地
-    # 非接收测试，设置必须同源）。以前它是独立的 llm_chat_suffix，结果同一套规则在两处
-    # 各写一遍、还写岔了（一处一位小数、一处两位），所以改成共用一份。
+    # 文本对话的输出约束 = **语音助手那一份**（用户定的：对话就是助手的本地非接收测试，
+    # 设置必须同源；它现在也搬到了助手页）。以前是独立的 llm_chat_suffix，结果同一套规则
+    # 在两处各写一遍、还写岔了（一处一位小数、一处两位），所以只留一份。
     # 注入位置固定在用户消息**末尾**——实测板端 1.5B 只可靠地理会最后一条消息
     # （作为最后一条 user 消息 4/4 遵守，放进 system 轮 0/4）。
-    chat_suffix = _shared_output_spec('llm_chat_max_reply_chars')
+    chat_suffix = _shared_output_spec()
     # 总结轮要回灌的约束 = 基础设定 + 输出约束（两者都为空时不注入）
     spec_all = '\n'.join([x for x in (base_prompt, chat_suffix) if x])
     temperature = float(data.get('temperature', 0.3))

@@ -244,50 +244,6 @@
     showToast(n ? `已填入设计倍率（${n} 个通道），保存后生效` : '设计值不可用', n ? 'success' : 'error');
   }
 
-  // ---------------- 网页对话的提示词约束（发送前注入） ----------------
-  // 注入位置固定在本轮用户消息**末尾**：实测板端 1.5B 只可靠地理会最后一条
-  // 消息（作为最后一条 user 消息遵守 4/4，放进 system 轮则 0/4）。
-  //
-  // 约束**只有一份**：网页对话直接共用语音助手的「语音播报约束」（用户定的：网页对话
-  // 就是助手的本地非接收测试，设置同源，避免同一套规则两处各写一遍还写岔）。
-  // 所以这里不再有可编辑的输入框，只做「实际注入内容」的只读预览 + 建议排布。
-  const SPEC_SUGGEST = [
-    '只输出可直接朗读的纯口语：不要 Markdown、星号、井号、列表、emoji、书名号。',
-    '不超过 {max_chars} 字，一句答完，不复述问题、不解释过程。',
-    '没数据就说不知道，不要编造。',
-    '最后一行必须原样加上「喵」这个字。',
-  ].join('\n');
-
-  let specPreviewMode = 'current';
-
-  function renderConstraintState(spec) {
-    const n = (spec || '').trim().length;
-    const txt = n ? ('共用语音助手约束 · ' + n + ' 字 · 注入在用户消息末尾') : '未设置（语音助手约束为空）';
-    const st = $('#llm-constraint-state');
-    const sub = $('#llm-constraint-sub');
-    if (st) st.textContent = txt;
-    if (sub) sub.textContent = txt;
-  }
-
-  function renderSpecPreview(spec) {
-    const pre = $('#llm-spec-preview');
-    if (!pre) return;
-    const body = specPreviewMode === 'suggest' ? SPEC_SUGGEST : (spec || '');
-    pre.textContent = body.trim() || '（当前没有注入任何约束）';
-    renderConstraintState(spec);
-  }
-
-  async function loadChatSuffix() {
-    try {
-      const d = await apiFetch('/api/settings');
-      const s = d.settings || d || {};
-      window.__ELF2_ASSIST_SPEC = s.assist_prompt_suffix || '';
-      const mc = $('#llm-chat-max-chars');
-      if (mc) mc.value = s.llm_chat_max_reply_chars || '200';
-      renderSpecPreview(window.__ELF2_ASSIST_SPEC);
-    } catch (e) { /* 设置读不到不该挡住对话本身 */ }
-  }
-
   async function saveCalibration() {
     try {
       await apiFetch('/api/voltage/calibrate', {
@@ -586,10 +542,6 @@
   }
 
   // ---------------- LLM chat ----------------
-  let chatMessages = [];
-  let ttsStreamSession = null;
-  let ttsStreamBuffer = '';
-  let ttsStreamPending = Promise.resolve();
 
   async function loadProviders() {
     try {
@@ -601,248 +553,6 @@
       $('#llm-config-hint').textContent = cfg ? `${cfg.base_url || '未配置'} · ${cfg.model}` : '';
     } catch (e) {
       showToast(e.message, 'error');
-    }
-  }
-
-  function addChatBubble(roleName, content) {
-    const el = document.createElement('div');
-    el.className = 'msg ' + roleName;
-    el.textContent = content;
-    const history = $('#chat-history');
-    history.appendChild(el);
-    history.scrollTop = history.scrollHeight;
-    return el;
-  }
-
-  // 每个浏览器标签页一个 client id：板端只停同一标签页的旧流式会话，
-  // 别的标签页 / 其它设备开始朗读不会掐断当前这一路回复
-  const TTS_CLIENT_ID = (() => {
-    try {
-      let v = sessionStorage.getItem('elf2-tts-client');
-      if (!v) {
-        v = (window.crypto && crypto.randomUUID)
-          ? crypto.randomUUID()
-          : 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
-        sessionStorage.setItem('elf2-tts-client', v);
-      }
-      return v;
-    } catch (e) {
-      return '';
-    }
-  })();
-
-  async function startTtsStream() {
-    const data = await apiFetch('/api/tts/stream/start', {
-      method: 'POST', body: JSON.stringify({ client_id: TTS_CLIENT_ID }),
-    });
-    ttsStreamSession = data.session_id;
-    ttsStreamBuffer = '';
-    ttsStreamPending = Promise.resolve();
-    if ($('#tts-stream-status')) $('#tts-stream-status').textContent = '流式朗读：已启动（PTT 随音频使能）';
-  }
-
-  function enqueueTtsChunk(text) {
-    if (!ttsStreamSession || !text || !text.trim()) return;
-    const sid = ttsStreamSession;
-    const provider = 'local';   // 仅本地 Piper
-    const voice = ttsVoice();
-    // 与 speakText 保持一致：英文音色 / ICAO 开关对流式朗读同样生效
-    const body = {
-      session_id: sid, client_id: TTS_CLIENT_ID, text, provider, voice,
-      en_voice: ttsEnVoice(), icao: ttsIcao(),
-      icao_voice: $('#set-tts-icao-voice')?.value || '',
-    };
-    ttsStreamPending = ttsStreamPending
-      .then(() => postTtsChunk(body))
-      .catch(e => {
-        console.warn('TTS stream chunk failed', e);
-        if ($('#tts-stream-status')) $('#tts-stream-status').textContent = '流式朗读：片段投递失败（网络）';
-      });
-  }
-
-  // 片段投递：板端链路偶发抖动（eth0 重新协商等）时退避重试，
-  // 会话已被回收/重启则重建会话后重投这一段，避免丢字（原来失败即静默丢弃）。
-  async function postTtsChunk(body, tries = 4) {
-    let lastErr = null;
-    for (let i = 0; i < tries; i++) {
-      try {
-        return await apiFetch('/api/tts/stream/chunk', {
-          method: 'POST', body: JSON.stringify(body),
-        });
-      } catch (e) {
-        lastErr = e;
-        const msg = String((e && e.message) || e);
-        if (/不存在|已结束|不属于/.test(msg)) {
-          try {
-            const d = await apiFetch('/api/tts/stream/start', {
-              method: 'POST', body: JSON.stringify({ client_id: TTS_CLIENT_ID }),
-            });
-            ttsStreamSession = d.session_id;
-            body.session_id = d.session_id;
-          } catch (_) { /* 下一轮继续重试 */ }
-        }
-        await new Promise(r => setTimeout(r, 250 * (i + 1)));
-      }
-    }
-    throw lastErr || new Error('片段投递失败');
-  }
-
-  function pumpTtsChunks(force = false) {
-    if (!ttsStreamSession || !ttsStreamBuffer) return;
-    // 优先按句末标点切分
-    let cut = -1;
-    for (let i = ttsStreamBuffer.length - 1; i >= 0; i--) {
-      if ('。！？!?；;\n'.includes(ttsStreamBuffer[i])) { cut = i + 1; break; }
-    }
-    if (cut > 0) {
-      enqueueTtsChunk(ttsStreamBuffer.slice(0, cut));
-      ttsStreamBuffer = ttsStreamBuffer.slice(cut);
-    } else if (ttsStreamBuffer.length > 80) {
-      // 没有标点时，按逗号/空格切分，保证实时性
-      let p = Math.max(ttsStreamBuffer.lastIndexOf('，'), ttsStreamBuffer.lastIndexOf(','), ttsStreamBuffer.lastIndexOf(' '));
-      if (p < 20) p = 60;
-      enqueueTtsChunk(ttsStreamBuffer.slice(0, p + 1));
-      ttsStreamBuffer = ttsStreamBuffer.slice(p + 1);
-    }
-    if (force && ttsStreamBuffer.trim()) {
-      enqueueTtsChunk(ttsStreamBuffer);
-      ttsStreamBuffer = '';
-    }
-  }
-
-  async function finishTtsStream() {
-    if (!ttsStreamSession) return;
-    pumpTtsChunks(true);
-    if ($('#tts-stream-status')) $('#tts-stream-status').textContent = '流式朗读：播放剩余片段';
-    try {
-      await ttsStreamPending;
-      const sid = ttsStreamSession;      // 期间可能已重建会话，取最新的
-      ttsStreamSession = null;
-      const res = await apiFetch('/api/tts/stream/end', {
-        method: 'POST', body: JSON.stringify({ session_id: sid, client_id: TTS_CLIENT_ID }),
-      });
-      const err = res && res.last_error;
-      if (err) {
-        showToast('流式朗读失败：' + err, 'error');
-        if ($('#tts-stream-status')) $('#tts-stream-status').textContent = '流式朗读：失败（' + err + '）';
-      } else if ($('#tts-stream-status')) {
-        $('#tts-stream-status').textContent = '流式朗读：已完成';
-      }
-    } catch (e) {
-      console.warn('TTS stream end failed', e);
-      if ($('#tts-stream-status')) $('#tts-stream-status').textContent = '流式朗读：异常';
-    }
-  }
-
-  async function stopTtsStream() {
-    try {
-      await apiFetch('/api/tts/stream/stop', {
-        method: 'POST', body: JSON.stringify({ client_id: TTS_CLIENT_ID }),
-      });
-    } catch (e) { /* ignore */ }
-    ttsStreamSession = null;
-    ttsStreamBuffer = '';
-    ttsStreamPending = Promise.resolve();
-    if ($('#tts-stream-status')) $('#tts-stream-status').textContent = '流式朗读：已停止';
-  }
-
-  async function sendChat() {
-    const text = $('#chat-text').value.trim();
-    if (!text) return;
-    if ($('#chat-agent')?.checked) return sendChatAgent(text);   // Agent 模式：先调技能再回答
-    const provider = $('#llm-provider').value;
-    const model = $('#llm-model').value.trim();
-    chatMessages.push({ role: 'user', content: text });
-    addChatBubble('user', text);
-    $('#chat-text').value = '';
-    const autoSpeak = speakPolicyOn;
-    const streamBox = $('#chat-stream');
-    if (autoSpeak && streamBox && !streamBox.checked) streamBox.checked = true;
-    const stream = !!(streamBox && streamBox.checked);
-    const assistantEl = addChatBubble('assistant', '思考中…');
-    let assistantText = '';
-    let streamTtsActive = false;
-    llmRateReset();
-    startLlmRateTimer();
-
-    try {
-      if (stream) {
-        if (autoSpeak) {
-          try { await startTtsStream(); streamTtsActive = true; }
-          catch (e) { showToast('启动流式朗读失败，将在回复完成后朗读：' + e.message, 'error'); }
-        }
-        const resp = await fetch('/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-          body: JSON.stringify({ messages: chatMessages, provider, model, stream: true }),
-        });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = '';
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          const parts = buf.split('\n');
-          buf = parts.pop();
-          for (const line of parts) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith('data:')) continue;
-            const payload = trimmed.slice(5).trim();
-            if (payload === '[DONE]') continue;
-            try {
-              const obj = JSON.parse(payload);
-              if (obj.error) throw new Error(obj.error);
-              const delta = obj.choices?.[0]?.delta?.content;
-              if (delta) {
-                assistantText += delta;
-                assistantEl.textContent = assistantText;
-                llmRateAdd(delta);
-                if (autoSpeak && ttsStreamSession) {
-                  ttsStreamBuffer += delta;
-                  pumpTtsChunks(false);
-                }
-              }
-            } catch (err) {
-              if (err.message && !err.message.startsWith('Unexpected')) throw err;
-            }
-          }
-        }
-        if (!assistantText) assistantEl.textContent = '（空回复）';
-        chatMessages.push({ role: 'assistant', content: assistantText });
-        if (autoSpeak) {
-          if (streamTtsActive && ttsStreamSession) {
-            await finishTtsStream();
-          } else {
-            await maybeAutoSpeak(assistantText);
-          }
-        } else {
-          maybeAutoSpeak(assistantText);
-        }
-      } else {
-        const data = await apiFetch('/api/chat', {
-          method: 'POST',
-          body: JSON.stringify({ messages: chatMessages, provider, model, stream: false }),
-        });
-        assistantText = data.content || '（空回复）';
-        assistantEl.textContent = assistantText;
-        chatMessages.push({ role: 'assistant', content: assistantText });
-        maybeAutoSpeak(assistantText);
-      }
-    } catch (e) {
-      assistantEl.textContent = '错误：' + e.message;
-      showToast(e.message, 'error');
-      if (ttsStreamSession) await stopTtsStream();
-    }
-  }
-
-  async function maybeAutoSpeak(text) {
-    if (!speakPolicyOn) return;
-    try {
-      await speakText(text, 'local', ttsVoice(), true, false, ttsEnVoice(), ttsIcao());
-    } catch (e) {
-      showToast('TTS 朗读失败：' + e.message, 'error');
     }
   }
 
@@ -892,12 +602,6 @@
   function applySpeakPolicy(on) {
     speakPolicyOn = !!on;
     if ($('#set-tts-auto-speak')) $('#set-tts-auto-speak').checked = !!on;
-    if (on && $('#chat-stream')) $('#chat-stream').checked = true;
-    const st = $('#tts-stream-status');
-    if (st && !ttsStreamSession) {
-      st.textContent = on ? '流式朗读：策略已开（发送即边出字边朗读）'
-                          : '流式朗读：策略关闭（在「设置 / 校准」开启）';
-    }
   }
 
   async function loadTtsProviders() {
@@ -956,33 +660,6 @@
 
 
 
-
-  async function speakText(text, provider, voice, autoPlay = true, playInWeb = false, enVoice = '', icao = true) {
-    if (!text || !text.trim()) return showToast('朗读文本为空', 'error');
-    const data = await apiFetch('/api/tts/speak', {
-      method: 'POST',
-      body: JSON.stringify({ text, provider, voice, auto_play: autoPlay, en_voice: enVoice || '', icao: !!icao }),
-    });
-    showToast(`TTS 已合成：${data.voice}（${(data.size / 1024).toFixed(1)} KB）`, 'success');
-    if (playInWeb) playTtsInWeb(data.filename);
-    return data;
-  }
-
-  // 在网页里播放刚合成的 TTS（需要浏览器允许自动播放：由点击触发即可）
-  function playTtsInWeb(filename) {
-    const el = $('#tts-audio');
-    const tip = $('#tts-web-status');
-    if (!el || !filename) return;
-    el.src = '/recordings/' + encodeURIComponent(filename) + '?t=' + Date.now();
-    el.style.display = 'block';
-    if (tip) tip.textContent = '网页播放器：' + filename;
-    el.play().then(() => {
-      if (tip) tip.textContent = '网页播放器：播放中 ' + filename;
-    }).catch((err) => {
-      if (tip) tip.textContent = '网页播放器：已加载（浏览器拦截了自动播放，请点播放键）';
-      showToast('浏览器拦截自动播放，请点播放器上的播放键', 'error');
-    });
-  }
 
   // 带进度的上传（fetch 无法上报上传进度，这里用 XHR）
   function uploadWithProgress(url, fd, onProgress) {
@@ -2564,166 +2241,12 @@
     });
   }
 
-  // ---------------- LLM 生成速率监测 ----------------
-  let llmRateTimer = null;
-  let llmRateStart = 0;
-  let llmRateTokens = 0;
-  let llmRateFirst = 0;
-
-  function estTokens(text) {
-    let cjk = 0;
-    let other = 0;
-    for (const ch of String(text || '')) {
-      const o = ch.codePointAt(0);
-      if ((o >= 0x2e80 && o <= 0x9fff) || (o >= 0xff00 && o <= 0xffef)) cjk += 1;
-      else other += 1;
-    }
-    return cjk + Math.ceil(other / 4);
-  }
-
-  function showLlmRate(tokens, ttftMs, tps) {
-    const el = $('#llm-rate');
-    if (!el) return;
-    el.textContent = `生成速率：首字 ${Math.round(ttftMs || 0)} ms · ${(tps || 0).toFixed(1)} tok/s · ${tokens || 0} tok`;
-  }
-
-  function llmRateReset() {
-    llmRateStart = performance.now();
-    llmRateTokens = 0;
-    llmRateFirst = 0;
-    showLlmRate(0, 0, 0);
-    const t = $('#llm-tools-live');
-    if (t) t.textContent = '';
-  }
-
-  function llmRateAdd(text) {
-    if (!text) return;
-    if (!llmRateFirst) llmRateFirst = performance.now();
-    llmRateTokens += estTokens(text);
-  }
-
-  function startLlmRateTimer() {
-    if (llmRateTimer) return;
-    llmRateTimer = setInterval(() => {
-      const el = (performance.now() - llmRateStart) / 1000;
-      const ttft = llmRateFirst ? (llmRateFirst - llmRateStart) : 0;
-      const gen = Math.max(0.001, el - ttft / 1000);
-      showLlmRate(llmRateTokens, ttft, llmRateTokens / gen);
-    }, 350);
-  }
-
-  function stopLlmRateTimer() {
-    if (llmRateTimer) { clearInterval(llmRateTimer); llmRateTimer = null; }
-  }
-
-  function addToolEvent(kind, name, detail) {
-    const el = document.createElement('div');
-    el.className = 'msg tool ' + kind;
-    const icon = kind === 'start' ? '⚙ 调用技能' : (kind === 'error' ? '✖ 技能失败' : '✔ 技能返回');
-    el.textContent = icon + ' ' + name + (detail ? ' — ' + detail : '');
-    const hist = $('#chat-history');
-    if (!hist) return el;
-    hist.appendChild(el);
-    hist.scrollTop = hist.scrollHeight;
-    return el;
-  }
-
-  // ---------------- Agent 对话（技能/工具调用） ----------------
-  async function sendChatAgent(text) {
-    const provider = $('#llm-provider').value;
-    const model = $('#llm-model').value.trim();
-    chatMessages.push({ role: 'user', content: text });
-    addChatBubble('user', text);
-    $('#chat-text').value = '';
-    const autoSpeak = speakPolicyOn;
-    const el = addChatBubble('assistant', '思考中（可调用技能读取实时数据）…');
-    let answer = '';
-    llmRateReset();
-    startLlmRateTimer();
-    try {
-      const resp = await fetch('/api/agent/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
-        body: JSON.stringify({ messages: chatMessages, provider, model }),
-      });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const parts = buf.split('\n');
-        buf = parts.pop();
-        for (const line of parts) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith('data:')) continue;
-          const payload = trimmed.slice(5).trim();
-          if (!payload || payload === '[DONE]') continue;
-          let ev = null;
-          try { ev = JSON.parse(payload); } catch (e) { continue; }
-          if (ev.type === 'delta') {
-            answer += ev.content || '';
-            el.textContent = answer;
-            llmRateAdd(ev.content || '');
-          } else if (ev.type === 'final') {
-            // 服务端把模型原文换成了「将要念出来的那句」（数值口语化 + 缺喵补上）。
-            // 网页对话是语音助手的本地测试，屏幕上看到的就是要发射的那句话。
-            answer = ev.text || answer;
-            el.textContent = answer;
-            if (ev.raw && ev.raw !== answer) {
-              const d = document.createElement('details');
-              d.className = 'chat-raw';
-              const sm = document.createElement('summary');
-              sm.textContent = '模型原文';
-              const tx = document.createElement('div');
-              tx.className = 'chat-raw-text';
-              tx.textContent = ev.raw;
-              d.appendChild(sm);
-              d.appendChild(tx);
-              el.appendChild(d);
-            }
-          } else if (ev.type === 'tool_start') {
-            addToolEvent('start', ev.name, JSON.stringify(ev.arguments || {}));
-            if ($('#llm-tools-live')) $('#llm-tools-live').textContent = '技能：' + ev.name;
-          } else if (ev.type === 'tool_result') {
-            addToolEvent(ev.ok ? 'result' : 'error', ev.name,
-              (ev.ok ? '' : '失败 ') + JSON.stringify(ev.result || {}).slice(0, 150));
-          } else if (ev.type === 'notice') {
-            addToolEvent('result', '系统', ev.text || '');
-          } else if (ev.type === 'error') {
-            throw new Error(ev.error || 'Agent 出错');
-          } else if (ev.type === 'usage' || ev.type === 'usage_total') {
-            showLlmRate(ev.tokens, ev.ttft_ms, ev.tok_per_s);
-          }
-        }
-      }
-      if (!answer) el.textContent = '（没有回答）';
-      chatMessages.push({ role: 'assistant', content: answer });
-      if (autoSpeak && answer) await maybeAutoSpeak(answer);
-    } catch (e) {
-      el.textContent = '错误：' + e.message;
-      showToast(e.message, 'error');
-    } finally {
-      stopLlmRateTimer();
-      loadLlmStats();
-    }
-  }
-
-  // ---------------- 提示词注入 / Agent 设置 / 速率统计 ----------------
-  const DEFAULT_LLM_PROMPT =
-    '你是 BG7XYZ/ELF2 中继台的值班助手"小中"，回答简短、口语化、适合电台语音播报；\n' +
-    '涉及实时数据时必须先调用技能读取，不要凭记忆回答。\n' +
-    '当前参考：电池 {battery} V、光伏 {pv} V、CPU {cpu_temp}℃、时间 {time}。';
-
+  // ---------------- LLM 设置 ----------------
   async function loadLlmAgentSettings() {
     try {
       const d = await apiFetch('/api/settings');
       const s = d.settings || {};
-      if ($('#set-llm-prompt')) $('#set-llm-prompt').value = s.llm_system_prompt || '';
-      if ($('#set-llm-prompt-on')) $('#set-llm-prompt-on').checked = s.llm_system_prompt_on === '1';
-      if ($('#set-llm-prompt-vars')) $('#set-llm-prompt-vars').checked = s.llm_prompt_vars === '1';
+      // 提示词（共用基础设定 + 语音播报约束）已统一收进「中继语音助手」页，本页不再有那两个输入框
       if ($('#set-agent-enabled')) $('#set-agent-enabled').checked = s.agent_enabled === '1';
       if ($('#set-agent-max-iters')) $('#set-agent-max-iters').value = s.agent_max_iters || 3;
       await loadAgentTools(s.agent_tools || '');
@@ -2742,10 +2265,6 @@
             ` ${escapeHtml(t.title)} <span class="muted small">${escapeHtml(t.name)}${t.action ? '（会发射）' : ''}</span></label>`;
         }).join('') || '<span class="muted small">无</span>';
       }
-      const v = $('#llm-prompt-vars-live');
-      if (v && d.vars) {
-        v.textContent = '实时变量：' + Object.keys(d.vars).map(k => `{${k}}=${d.vars[k]}`).join('　');
-      }
     } catch (e) { showToast('技能列表加载失败：' + e.message, 'error'); }
   }
 
@@ -2753,16 +2272,13 @@
     const boxes = [...document.querySelectorAll('.agent-tool')];
     const on = boxes.filter(c => c.checked).map(c => c.value);
     const body = {
-      llm_system_prompt: $('#set-llm-prompt')?.value || '',
-      llm_system_prompt_on: $('#set-llm-prompt-on')?.checked ? '1' : '0',
-      llm_prompt_vars: $('#set-llm-prompt-vars')?.checked ? '1' : '0',
       agent_enabled: $('#set-agent-enabled')?.checked ? '1' : '0',
       agent_max_iters: $('#set-agent-max-iters')?.value || 3,
       agent_tools: (boxes.length && on.length !== boxes.length) ? on.join(',') : '',
     };
     try {
       await apiFetch('/api/settings', { method: 'POST', body: JSON.stringify(body) });
-      showToast('已保存提示词 / Agent 设置', 'success');
+      showToast('已保存 Agent 设置', 'success');
       loadAgentTools(body.agent_tools);
     } catch (e) { showToast('保存失败：' + e.message, 'error'); }
   }
@@ -2789,150 +2305,10 @@
   }
 
   // ---------------- 语音输入：BUSY 虚拟按键 → 录音 → 端侧 ASR → 文本 ----------------
-  let voiceStream = null;
-  let voiceCtx = null;
-  let voiceNode = null;
   let voiceSink = null;
-  let voiceChunks = [];
-  let voiceActive = false;
   let voiceT0 = 0;
   let voicePeak = 0;
   let voiceTick = null;
-  let voicePointerDown = false;
-
-  function voiceSetState(text, cls) {
-    const el = $('#voice-state');
-    if (el) el.textContent = '语音输入：' + text;
-    const b = $('#btn-voice-busy');
-    if (b) b.classList.toggle('recording', cls === 'on');
-  }
-
-  // 16k 单声道 PCM → WAV Blob
-  function encodeWav(chunks, sampleRate) {
-    let len = 0;
-    chunks.forEach((c) => { len += c.length; });
-    const view = new DataView(new ArrayBuffer(44 + len * 2));
-    const str = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
-    str(0, 'RIFF'); view.setUint32(4, 36 + len * 2, true); str(8, 'WAVE');
-    str(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true); str(36, 'data'); view.setUint32(40, len * 2, true);
-    let off = 44;
-    chunks.forEach((c) => {
-      for (let i = 0; i < c.length; i++, off += 2) view.setInt16(off, c[i], true);
-    });
-    return new Blob([view], { type: 'audio/wav' });
-  }
-
-  async function startVoiceInput() {
-    if (voiceActive) return;
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      showToast('需要 HTTPS 才能访问麦克风', 'error');
-      voiceSetState('麦克风不可用');
-      return;
-    }
-    try {
-      voiceStream = await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
-      voiceCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-      await voiceCtx.resume();
-      const src = voiceCtx.createMediaStreamSource(voiceStream);
-      voiceNode = voiceCtx.createScriptProcessor(4096, 1, 1);
-      voiceSink = voiceCtx.createGain();
-      voiceSink.gain.value = 0;
-      voiceChunks = [];
-      voicePeak = 0;
-      voiceActive = true;
-      voiceT0 = Date.now();
-      voiceNode.onaudioprocess = (ev) => {
-        if (!voiceActive) return;
-        const f = ev.inputBuffer.getChannelData(0);
-        const pcm = new Int16Array(f.length);
-        for (let i = 0; i < f.length; i++) {
-          const a = Math.abs(f[i]);
-          if (a > voicePeak) voicePeak = a;
-          let s = f[i] * 2.0;
-          if (s > 1) s = 1; else if (s < -1) s = -1;
-          pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-        }
-        voiceChunks.push(pcm);
-      };
-      src.connect(voiceNode);
-      voiceNode.connect(voiceSink);
-      voiceSink.connect(voiceCtx.destination);
-      voiceSetState('录音中…（松开结束）', 'on');
-      voiceTick = setInterval(() => {
-        const sec = (Date.now() - voiceT0) / 1000;
-        const info = $('#voice-info');
-        if (info) info.textContent = `已录 ${sec.toFixed(1)}s · 峰值 ${(voicePeak * 100).toFixed(0)}%`;
-      }, 200);
-    } catch (e) {
-      showToast('无法访问麦克风：' + e.message, 'error');
-      stopVoiceInput(true);
-    }
-  }
-
-  async function stopVoiceInput(cancel) {
-    if (!voiceActive) return;
-    voiceActive = false;
-    if (voiceTick) { clearInterval(voiceTick); voiceTick = null; }
-    try { if (voiceNode) voiceNode.disconnect(); } catch (e) {}
-    try { if (voiceSink) voiceSink.disconnect(); } catch (e) {}
-    if (voiceStream) { voiceStream.getTracks().forEach((x) => x.stop()); voiceStream = null; }
-    try { if (voiceCtx) await voiceCtx.close(); } catch (e) {}
-    voiceCtx = null; voiceNode = null; voiceSink = null;
-    const secs = (Date.now() - voiceT0) / 1000;
-    const chunks = voiceChunks;
-    voiceChunks = [];
-    if (cancel || !chunks.length || secs < 0.3) {
-      voiceSetState(chunks.length ? '太短，已取消' : '已取消');
-      return;
-    }
-    const blob = encodeWav(chunks, 16000);
-    voiceSetState(`识别中…（${secs.toFixed(1)}s 音频）`);
-    try {
-      const fd = new FormData();
-      fd.append('audio', blob, 'voice.wav');
-      const resp = await fetch('/api/asr/transcribe', {
-        method: 'POST', body: fd, credentials: 'same-origin',
-        headers: { 'X-CSRF-Token': csrfToken },
-      });
-      const d = await resp.json().catch(() => null);
-      if (!resp.ok || !d || d.ok === false) throw new Error((d && d.error) || ('HTTP ' + resp.status));
-      const text = String(d.text || '').trim();
-      if (!text) { voiceSetState('未识别到内容'); return; }
-      voiceSetState(`识别完成：${d.ms} ms（RTF ${d.rtf}，${d.seconds}s 音频）`);
-      const info = $('#voice-info');
-      if (info) info.textContent = `已留档 ${d.filename || '--'}`;
-      const ta = $('#chat-text');
-      if (ta) ta.value = ta.value ? (ta.value.trim() + ' ' + text) : text;
-      if ($('#voice-auto-send')?.checked) await sendChat();
-    } catch (e) {
-      voiceSetState('识别失败：' + e.message);
-      showToast('语音识别失败：' + e.message, 'error');
-    }
-  }
-
-  function bindVoiceInput() {
-    const btn = $('#btn-voice-busy');
-    if (!btn) return;
-    btn.style.touchAction = 'none';
-    btn.style.userSelect = 'none';
-    btn.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      voicePointerDown = true;
-      try { btn.setPointerCapture(e.pointerId); } catch (_) {}
-      startVoiceInput();
-    });
-    btn.addEventListener('pointerup', () => { voicePointerDown = false; stopVoiceInput(false); });
-    btn.addEventListener('pointercancel', () => { voicePointerDown = false; stopVoiceInput(false); });
-    btn.addEventListener('lostpointercapture', () => { if (voiceActive && !voicePointerDown) stopVoiceInput(false); });
-    window.addEventListener('pointerup', () => {
-      if (voiceActive && !voicePointerDown) stopVoiceInput(false);
-    });
-  }
 
   // ---------------- 总览：PTT / BUSY 实时状态（GPIO3_A1 拉高即 PTT 使能） ----------------
   async function updateRelayState() {
@@ -3004,38 +2380,6 @@
     bindPttSelfTest();
     $('#btn-cal-design')?.addEventListener('click', fillDesignCal);
     $('#btn-save-energy')?.addEventListener('click', saveEnergySettings);
-    $('#btn-fill-chat-suffix')?.addEventListener('click', () => {
-      specPreviewMode = specPreviewMode === 'suggest' ? 'current' : 'suggest';
-      const b = $('#btn-fill-chat-suffix');
-      if (b) b.textContent = specPreviewMode === 'suggest' ? '看当前注入内容' : '查看建议排布';
-      renderSpecPreview(window.__ELF2_ASSIST_SPEC || '');
-    });
-    $('#btn-copy-spec')?.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(SPEC_SUGGEST);
-        showToast('建议约束已复制，粘贴到「中继语音助手 → 语音播报约束」', 'success');
-      } catch (e) {
-        const pre = $('#llm-spec-preview');
-        if (pre) { specPreviewMode = 'suggest'; renderSpecPreview(window.__ELF2_ASSIST_SPEC || ''); }
-        showToast('浏览器拒绝写剪贴板，已显示在下方，请手动复制', 'error');
-      }
-    });
-    $('#llm-chat-max-chars')?.addEventListener('change', async (e) => {
-      const v = String(parseInt(e.target.value, 10) || 200);
-      try {
-        await apiFetch('/api/settings', {
-          method: 'POST',
-          body: JSON.stringify({ llm_chat_max_reply_chars: v }),
-        });
-        e.target.value = v;
-        window.__ELF2_ASSIST_SPEC = (await apiFetch('/api/settings')).settings
-          ?.assist_prompt_suffix || window.__ELF2_ASSIST_SPEC;
-        renderSpecPreview(window.__ELF2_ASSIST_SPEC || '');
-        showToast('对话字数上限已保存为 ' + v, 'success');
-      } catch (err) { showToast(err.message, 'error'); }
-    });
-    bindVoiceInput();
-    $('#btn-save-prompt')?.addEventListener('click', saveLlmAgentSettings);
     $('#btn-save-agent')?.addEventListener('click', saveLlmAgentSettings);
     $('#btn-refresh-tools')?.addEventListener('click', () => loadAgentTools(''));
     $('#btn-refresh-stats')?.addEventListener('click', loadLlmStats);
@@ -3043,40 +2387,11 @@
       try { await apiFetch('/api/llm/stats', { method: 'DELETE' }); loadLlmStats(); }
       catch (e) { showToast(e.message, 'error'); }
     });
-    $('#btn-insert-prompt')?.addEventListener('click', () => {
-      const t = $('#set-llm-prompt');
-      if (t) { t.value = DEFAULT_LLM_PROMPT; showToast('已填入推荐提示词，记得点保存', 'success'); }
-    });
     $('#btn-add-user')?.addEventListener('click', addUser);
     $('#btn-save-settings')?.addEventListener('click', saveLlmSettings);
     $('#btn-change-pass')?.addEventListener('click', changeOwnPassword);
     $('#btn-llm-refresh')?.addEventListener('click', loadProviders);
     $('#llm-provider')?.addEventListener('change', loadProviders);
-    $('#btn-chat-send')?.addEventListener('click', sendChat);
-    $('#btn-tts-stop')?.addEventListener('click', stopTtsStream);
-    $('#chat-text')?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendChat();
-      }
-    });
-    $('#btn-tts-test')?.addEventListener('click', async () => {
-      try {
-        await speakText($('#tts-test-text')?.value || 'TTS 测试', 'local', ttsVoice(), true,
-                        false, ttsEnVoice(), ttsIcao());
-      } catch (e) { showToast(e.message, 'error'); }
-    });
-    $('#btn-tts-test-web')?.addEventListener('click', async () => {
-      try {
-        // 只合成、不在板端播放，直接在网页播放器里播放
-        await speakText($('#tts-test-text')?.value || 'TTS 测试', 'local', ttsVoice(), false, true,
-                        ttsEnVoice(), ttsIcao());
-      } catch (e) { showToast(e.message, 'error'); }
-    });
-    $('#tts-audio')?.addEventListener('play', () => {
-      const tip = $('#tts-web-status');
-      if (tip) tip.textContent = '网页播放器：播放中';
-    });
     $('#set-tts-icao-voice')?.addEventListener('change', (e) => {
       if (e.target) e.target.dataset.saved = e.target.value || '';
     });
@@ -3227,9 +2542,7 @@
       loadLlmAgentSettings();
       loadLlmStats();
       loadEnergySettings();
-      loadChatSuffix();
     }
-    loadCalibration();
     // 全部改成 ELF2Poll.loop：上一次 settle 之后再排下一次，绝不并发叠加。
     // 原来用 setInterval 时不接口变慢（板端单次可到 10~27s）就会重叠堆积，
     // 把 Flask 的 GIL 抢死 —— 见 static/js/poll.js 顶部说明。

@@ -10,7 +10,6 @@
   #llm-rate, #llm-tools-live { font-variant-numeric: tabular-nums; }
   .kv-list b.on { color: #f5a623; }           /* PTT 使能 / 占用 */
   .kv-list b.rec { color: #2ecc71; }          /* 本地录音中 */
-  #btn-voice-busy.recording { background: #e74c3c; border-color: #e74c3c; color: #fff; }
   #agent-tool-list label { margin: 2px 0; }
   /* 总览页子选项卡（运行概览 / 能量统计） */
   .sub-tabs { display: flex; gap: 6px; margin: 0 0 14px; border-bottom: 1px solid var(--border); }
@@ -252,10 +251,10 @@
   </div>
 </section>
 
-<!-- LLM 对话 -->
+<!-- LLM 提供方（对话测试已并入中继语音助手页） -->
 <section id="tab-llm" class="tab-panel">
   <div class="panel-head">
-    <h2>LLM 对话</h2>
+    <h2>LLM 提供方</h2>
     <div class="row gap">
       <select id="llm-provider">
         <option value="local">本地模型（RKNPU / llama.cpp）</option>
@@ -265,85 +264,19 @@
       <button class="btn ghost" id="btn-llm-refresh">刷新配置</button>
     </div>
   </div>
-  <details class="acc admin-only" id="llm-constraint-card" open>
-    <summary><b>提示词约束（发送前注入）</b><span class="acc-sub" id="llm-constraint-sub">未设置</span></summary>
-    <div class="card">
-      <div class="row gap" style="align-items:center">
-        <button class="btn ghost" id="btn-fill-chat-suffix">查看建议排布</button>
-        <button class="btn ghost" id="btn-copy-spec">复制建议文本</button>
-        <label class="muted small" style="display:flex;align-items:center;gap:6px">
-          对话字数上限
-          <input type="number" id="llm-chat-max-chars" min="10" max="2000" step="10"
-                 style="width:92px" title="替换约束里的 {max_chars}；语音助手那边用 assist_max_reply_chars">
-        </label>
-        <span class="muted small" id="llm-constraint-state">--</span>
-      </div>
-      <p class="muted small">
-        <b>网页对话与语音助手共用同一份输出约束</b>（它就是助手的本地非接收测试，设置必须同源）。
-        实际注入的内容如下，只读 —— 要改请去
-        <a href="{{ url_for('assistant_page') }}">中继语音助手</a> 页的「语音播报约束」。
-      </p>
-      <pre class="llm-spec-preview" id="llm-spec-preview">--</pre>
-      <p class="muted small">
-        注入位置固定在<b>末尾</b>，不是排版偏好：实测板端 1.5B 只可靠地理会最后一条消息
-        —— 同一份约束作为最后一条用户消息遵守 <b>4/4</b>，放进 <code>system</code> 轮（其后
-        还有用户消息）则 <b>0/4</b>。多项规则时也是<b>最后一条最受重视</b>，所以把最要紧的
-        格式规则写在最后一段。
-      </p>
-      <p class="muted small">
-        <b>角色设定/通联范式不要写在约束里</b>：实测把范式（含「…这里是中继助手，抄收你的信号
-        为 59，喵」这种<b>完整例句</b>）放进约束后，1.5B 会<b>照抄例句</b>——问「电池电压是多少」
-        两次都答「早上好，友台，呼叫信号为59，喵」。<b>注意这是间歇性的</b>：同一份约束下
-        也有答对的时候（另一轮实测 4/4 答对、线上实测约 1/3 被劫持），所以它不是「一定坏」，
-        而是「不可靠」。人格与范式属于设定，建议放到<b>共用基础设定</b>，约束里只留格式规则；
-        范式要写成规则而不是可直接抄的答案。
-      </p>
-      <p class="muted small">
-        数值读法已由后端<b>确定性</b>处理（<code>speech_text.speakable</code>）：电压/温度/内存等
-        展开后会变成「十二点二四伏特」这种能念出来的口语，并保留两位小数。所以约束里
-        <b>不需要</b>再要求模型转换数字——实测它只会照抄，不会转换。
-      </p>
-      <p class="muted small">
-        旧的「网页对话专属约束」（<code>llm_chat_suffix</code>）<b>已停止注入</b>，内容仍留在
-        设置里没有删除；它要表达的规则请合并到语音助手那一份里，只留一份才不会再写岔。
-      </p>
-    </div>
-  </details>
-  <div class="chat-layout">
-    <div class="card chat-card">
-      <div class="chat-history" id="chat-history"></div>
-      <div class="chat-input">
-        <textarea id="chat-text" rows="3" placeholder="输入消息，Enter 发送，Shift+Enter 换行；（也可按 BUSY 语音输入）"></textarea>
-        <button class="btn primary" id="btn-chat-send">发送</button>
-      </div>
-      <div class="row gap small">
-        <button class="btn" id="btn-voice-busy" title="按住说话：板端离线识别（sherpa-onnx + SenseVoice）后转文字">🎙 BUSY（按住说话）</button>
-        <span id="voice-state" class="muted small">语音输入：就绪</span>
-        <label class="checkline"><input type="checkbox" id="voice-auto-send" checked> 转写后自动发送</label>
-        <span id="voice-info" class="muted small">录音留档：/www/asr_recordings</span>
-      </div>
-      <div class="row gap small muted">
-        <label><input type="checkbox" id="chat-stream" checked> 流式输出</label>
-        <label class="checkline" title="开启后：端侧 LLM 会先调用技能/工具读取实时数据（电压/温度/气象/发射状态）再回答">
-          <input type="checkbox" id="chat-agent" checked> Agent 技能调用</label>
-        <span id="llm-rate" class="muted small">生成速率：--</span>
-        <span id="llm-tools-live" class="muted small"></span>
-        <span id="llm-config-hint">--</span>
-      </div>
-      <div class="row gap tts-bar">
-        <span class="badge">本地 Piper（离线）</span>
-        <span class="muted small">音色 / 英文音色 / ICAO / 流式朗读策略统一在「设置 / 校准」配置，全局生效</span>
-        <input id="tts-test-text" placeholder="TTS 测试文本" value="呼号 BG7XYZ，这里是 ELF2 中继站，Radio check five nine，how copy？">
-        <button class="btn ghost" id="btn-tts-test">测试朗读（板端 AUX）</button>
-        <button class="btn primary" id="btn-tts-test-web">朗读到网页</button>
-        <button class="btn ghost" id="btn-tts-stop">停止朗读</button>
-        <span id="tts-stream-status" class="muted small">流式朗读：{% if tts_auto_speak %}策略已开{% else %}策略关闭{% endif %}</span>
-      </div>
-      <div class="row gap mt">
-        <audio id="tts-audio" controls preload="none" style="width:100%;max-width:520px"></audio>
-        <span class="muted small" id="tts-web-status">网页播放器：空闲</span>
-      </div>
-    </div>
+  <div class="card">
+    <div class="card-title">对话测试已并入中继语音助手</div>
+    <p class="muted small">
+      原来这里的「LLM 对话」与它的提示词约束，本质是<b>语音助手的本地非接收测试</b>：
+      两条链路共用同一份提示词、同一条技能链路、同一套数值口语化出口。为避免同一套规则
+      两处各写一遍，它已整体并入
+      <a href="{{ url_for('assistant_page') }}">中继语音助手</a> 页的<b>「文本对话」</b>页签
+      （含按住说话、技能调用、模型原文对照与网页试听，全程不发射）。
+    </p>
+    <p class="muted small">
+      提示词（共用基础设定 + 语音播报约束）与回复字数上限收在同页「设置」里，
+      Agent 技能开关与生成速率统计在「设置 / 校准」页；本页只保留提供方与模型选择。
+    </p>
   </div>
 </section>
 
@@ -971,17 +904,11 @@
       </div>
     </div>
     <div class="card" id="llm-agent-card">
-      <div class="card-title">LLM 提示词注入 / Agent 技能 / 生成速率</div>
-      <label class="checkline"><input type="checkbox" id="set-llm-prompt-on"> 启用系统提示词注入</label>
-      <textarea id="set-llm-prompt" rows="4" placeholder="例：你是 BG7XYZ 中继台值班助手，回答简短口语化。当前电池 {battery} V、光伏 {pv} V、CPU {cpu_temp}℃。"></textarea>
-      <label class="checkline"><input type="checkbox" id="set-llm-prompt-vars"> 展开实时变量（{battery} {pv} {cpu_temp} {wind} {rain_today} {date} {time} {site}）</label>
-      <div class="muted small" id="llm-prompt-vars-live">--</div>
-      <div class="row gap mt">
-        <button class="btn primary" id="btn-save-prompt">保存提示词</button>
-        <button class="btn ghost" id="btn-insert-prompt">填入推荐提示词</button>
-      </div>
-      <p class="muted small">说明：这里填的是**共用基础设定**（网页对话与语音助手都会用）。板端 1.5B 对 <code>system</code> 角色几乎不理，后台一律把它并入用户消息下发；而且它只可靠地理会**最后一条消息**，所以最要紧的规则要写在末尾。网页对话另有独立的「提示词约束」在 LLM 对话页。</p>
-      <div class="muted small">──────</div>
+      <div class="card-title">Agent 技能 / 生成速率</div>
+      <p class="muted small">
+        提示词已统一收进 <a href="{{ url_for('assistant_page') }}">中继语音助手</a> 页的「设置」
+        （共用基础设定 + 语音播报约束就那两份，助手与文本对话共用），本页只留技能与统计。
+      </p>
       <label class="checkline"><input type="checkbox" id="set-agent-enabled"> 启用 Agent 技能/工具调用</label>
       <label class="checkline">最大技能轮次 <input type="number" id="set-agent-max-iters" min="1" max="5" step="1" style="width:80px;margin-left:6px"></label>
       <div id="agent-tool-list" class="kv-list mt"><span class="muted small">--</span></div>

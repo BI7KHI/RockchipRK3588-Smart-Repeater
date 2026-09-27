@@ -117,6 +117,8 @@ input, select, textarea { margin-bottom: 2px; }
 
 /* chat */
 .chat-layout { display: grid; grid-template-columns: 1fr; }
+/* 按住说话按钮的录音中状态（文本对话页签） */
+#btn-at-voice.recording { background: #e74c3c; border-color: #e74c3c; color: #fff; }
 .chat-card { display: flex; flex-direction: column; min-height: 62vh; }
 .chat-history { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 6px 2px; }
 .msg { max-width: 85%; padding: 10px 12px; border-radius: 12px; white-space: pre-wrap; line-height: 1.5; }
@@ -127,16 +129,8 @@ input, select, textarea { margin-bottom: 2px; }
 .chat-raw { margin-top: 8px; border-top: 1px dashed var(--border); padding-top: 6px; }
 .chat-raw > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .chat-raw-text { margin-top: 6px; color: var(--muted); font-size: 12px; white-space: pre-wrap; }
-/* 网页对话那张卡里「实际注入的约束」只读预览 */
-.llm-spec-preview {
-  margin: 8px 0; padding: 10px 12px; max-height: 220px; overflow: auto;
-  background: #0b1220; border: 1px solid var(--border); border-radius: 8px;
-  color: var(--text); font-size: 12px; line-height: 1.55; white-space: pre-wrap;
-}
 .chat-input { display: flex; gap: 8px; margin-top: 10px; align-items: flex-end; }
 .chat-input textarea { resize: vertical; min-height: 54px; }
-.tts-bar { margin-top: 10px; }
-.tts-bar select, .tts-bar input { width: auto; min-width: 130px; }
 .sep { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
 
 /* login */
