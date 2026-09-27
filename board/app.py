@@ -1968,6 +1968,25 @@ def _llm_headers(key):
     return headers
 
 
+def _llm_oneshot(cfg, model, msgs, temperature=0.3, max_tokens=256, timeout=180):
+    """非流式一次调用（「答非所据」重试用）。返回文本，失败返回 ''。"""
+    try:
+        r = requests.post(cfg['url'],
+                          json={'model': model or 'qwen2.5-1.5b', 'messages': msgs,
+                                'temperature': float(temperature),
+                                'max_tokens': int(max_tokens), 'stream': False},
+                          headers=_llm_headers(cfg.get('api_key')),
+                          timeout=(5, timeout))
+        if r.status_code != 200:
+            print('[LLM] 重试 HTTP %s: %s' % (r.status_code, r.text[:120]), flush=True)
+            return ''
+        return ((r.json().get('choices') or [{}])[0].get('message', {}).get('content')
+                or '').strip()
+    except Exception as e:
+        print('[LLM] 重试失败：%s: %s' % (type(e).__name__, e), flush=True)
+        return ''
+
+
 @app.route('/api/chat/providers')
 @login_required
 def api_chat_providers():
@@ -2372,14 +2391,32 @@ def api_agent_chat():
                                 'arguments': c['arguments'], 'result': res})
             for r in results:
                 collected.append({r['name']: r.get('result')})
-        # 收尾：把模型原文换成**将要念出来的那句**（数值口语化 + 缺「喵」补上），
-        # 前端用这一条替换气泡内容。网页对话是助手的本地非接收测试，屏幕上看到的
-        # 就该是发出去的那句话；模型原文一起带上，方便对照约束到底管不管用。
+        # 「答非所据」检测 + 带数据重试一次：板端 1.5B 有约 1/3 的概率把约束里的范式
+        # 例句当答案照抄，或数据在手却答「不确定」。判定是纯函数（agent_service），
+        # 重试用非流式再问一次；**重试没变好就保留原文**，不会把回答弄丢。
+        retried, retry_why = False, ''
+        try:
+            need, retry_why = agent_service.needs_data_retry(text, collected, question)
+        except Exception as e:
+            need, retry_why = False, '检测异常：%s' % e
+            print('[AGENT] 答非所据检测异常：%s: %s' % (type(e).__name__, e), flush=True)
+        if need:
+            yield _sse({'type': 'notice',
+                        'text': '模型没用到刚查到的数据（%s），带数据重试一次…' % retry_why})
+            alt = _llm_oneshot(cfg, model,
+                               agent_service.retry_messages(collected, question),
+                               temperature, max_tokens)
+            ok_alt, why_alt = agent_service.answer_grounded(alt, collected)
+            print('[AGENT] 答非所据重试：%s → %s' % (retry_why, why_alt), flush=True)
+            if alt and ok_alt:
+                text = alt
+                retried = True
         raw_text = (text or '').strip()
         final_text = agent_service.ensure_meow(
             tts_service.clean_for_tts(raw_text), spec_all) if raw_text else ''
         if final_text:
-            yield _sse({'type': 'final', 'text': final_text, 'raw': raw_text})
+            yield _sse({'type': 'final', 'text': final_text, 'raw': raw_text,
+                        'retried': retried, 'retry_reason': retry_why if need else ''})
         snap = meter_all.snapshot({'provider': cfg['provider'], 'model': model,
                                    'tools': ','.join(used), 'iters': len(used)})
         _llm_stat_record('agent', cfg, model, snap, ok=ok, note=note,
@@ -6632,6 +6669,23 @@ def _assist_ask(prompt, question='', max_tokens=256, temperature=0.3,
                     out['iters'] = int(out['iters']) + 1
                 except Exception:
                     pass
+        # 「答非所据」检测 + 带数据重试一次（与网页对话同一套判定）。
+        # 语音助手是**自动发射**，答成问候语比答错更糟：宁可多花一次 prefill（约 2s），
+        # 也要让这段上中继的话用上刚查到的数据。重试没变好就保留原文。
+        if collected and text:
+            need, why = agent_service.needs_data_retry(text, collected, q_short or prompt)
+            if need:
+                # 重试消息**不带那份输出约束**（人格/范式压最后会把回答带偏），
+                # 只给格式要求 + 数据 + 问题，数据与问题放最后。
+                alt = _llm_oneshot(cfg, cfg.get('model'),
+                                   agent_service.retry_messages(
+                                       collected, q_short or prompt),
+                                   temperature, max_tokens)
+                ok_alt, why_alt = agent_service.answer_grounded(alt, collected)
+                print('[ASSIST] 答非所据重试：%s → %s' % (why, why_alt), flush=True)
+                if alt and ok_alt:
+                    text = alt
+                    out['iters'] = int(out['iters']) + 1
         out['reply'] = text
         out['ok'] = bool(text)
         if not text:

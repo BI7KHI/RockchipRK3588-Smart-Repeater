@@ -253,6 +253,125 @@ def ensure_meow(text, spec='', mark='喵'):
     return s + mark
 
 
+# ---------------------------------------------------------------------------
+# 「答非所据」检测：拿到工具数据却没用上时，带数据重试一次
+#
+# 为什么需要它（板端实测）：1.5B 有约 1/3 的概率把约束里的**范式例句**当成答案照抄
+# （问「电池电压是多少」答「早上好，友台，呼叫信号为59，喵」），也有答「不确定。喵」
+# 而数据明明在手里的情况。提示词层面已经被证明不可靠（同一份约束下时好时坏），
+# 所以这里做成**可判定 + 可重试**：回复里既没有数据里的任何事实、又没有明确说
+# 「不知道」，就带上数据再问一次，并要求把数值原样说出来。重试只有一次，且
+# **重试没变好就保留原文**，不会把回答弄丢。
+# ---------------------------------------------------------------------------
+REFUSAL_WORDS = ('不知道', '不确定', '无法确定', '没有数据', '没数据', '查不到',
+                 '暂无', '不清楚', '无法获取', '没有收到', '未收到')
+
+# 重试**不**再带上那份输出约束：约束里的人格/通联范式一旦压在最末（板端 1.5B 只
+# 理最后一段），它就会去写问候语而不是报数 —— 线上实测正是如此（两条 [AGENT] 记录
+# 显示重试后依然「一个工具数据都没用上」）。所以重试只给一条紧凑的格式要求，
+# 并把**数据与问题放在最后**。对照实测（同一台 1.5B、同一份数据、各 2 次）：
+#   约束压最后（现状）  → 12.3867喵      （这一次对了，但线上两次都没用上数据）
+#   极简 + 数据问题在最后 → 当前电池电压是12.3867伏。（2/2）
+RETRY_RULES = ('【重试】上一次回答没有用上实时数据。只输出一句可直接朗读的中文口语，'
+               '必须把下面数据里的数值原样说出来，末尾加「喵」；'
+               '数据里确实没有的，才说不知道。')
+
+
+def retry_messages(collected, question, data_cap=280):
+    """「答非所据」重试用的消息体：格式要求在前，**数据与问题在最后**。"""
+    data = '设备实时数据：' + json.dumps(collected, ensure_ascii=False)[:int(data_cap)]
+    return [{'role': 'user',
+             'content': RETRY_RULES + '\n' + data
+                        + '\n现在只回答这个问题（不要复述、不要解释）：'
+                        + (question or '')}]
+
+
+def data_facts(collected, cap=60):
+    """把工具数据里「可以被复述的事实」抽出来。
+
+    数值给两种形态：原样数字串（54.5）与中文口语（五十四点五），因为板端 TTS 与
+    模型都可能用任一种写法。位数太短的值（0、9 这种单字）不参与判定 ——
+    「零」几乎出现在任何句子里，那会把判定变成永远为真。
+    """
+    facts = []
+
+    def walk(obj, depth=0):
+        if depth > 3 or len(facts) >= cap:
+            return
+        if isinstance(obj, dict):
+            for v in obj.values():
+                walk(v, depth + 1)
+        elif isinstance(obj, (list, tuple)):
+            for v in list(obj)[:8]:
+                walk(v, depth + 1)
+        elif isinstance(obj, bool) or obj is None:
+            return
+        elif isinstance(obj, (int, float)):
+            s = ('%.4f' % float(obj)).rstrip('0').rstrip('.') or '0'
+            if len(s) >= 2:
+                facts.append(s)
+            try:
+                import speech_text
+                cn = speech_text.cn_number(s)
+            except Exception:
+                cn = None
+            if cn and len(cn) >= 2:
+                facts.append(cn)
+        elif isinstance(obj, str):
+            t = obj.strip()
+            if len(t) >= 2:
+                facts.append(t)
+
+    for item in (collected or []):
+        if isinstance(item, dict):
+            for res in item.values():
+                walk(res)
+        else:
+            walk(item)
+    seen, out = set(), []
+    for f in facts:
+        if f not in seen:
+            seen.add(f)
+            out.append(f)
+    return out[:cap]
+
+
+def answer_grounded(reply, collected):
+    """回复有没有「用上数据」。返回 (是否算过关, 原因)。
+
+    过关的三种情况：复述了数据里的某个事实、明确说不知道、压根没有可核对的事实。
+    判断不了时一律算过关 —— 宁可放过，也不要为了判定而重试。
+    """
+    text = str(reply or '').strip()
+    if not text:
+        return (False, '空回复')
+    for w in REFUSAL_WORDS:
+        if w in text:
+            return (True, '明确表示不知道：%s' % w)
+    facts = data_facts(collected)
+    if not facts:
+        return (True, '没有可核对的事实')
+    try:
+        import speech_text
+        spoken = speech_text.speakable(text)
+    except Exception:
+        spoken = text
+    for f in facts:
+        if f in text or f in spoken:
+            return (True, '复述了 %s' % f)
+    return (False, '一个工具数据都没用上')
+
+
+def needs_data_retry(reply, collected, question=''):
+    """要不要带数据重试一次。返回 (bool, 原因)。非数据类问题一律不重试。"""
+    if not collected:
+        return (False, '没有工具数据')
+    if question and not wants_realtime(question):
+        return (False, '不是实时数据类问题')
+    ok, why = answer_grounded(reply, collected)
+    return ((not ok), why)
+
+
 def summary_spec(spec='', provider='local', mode='auto', cap=1200):
     """决定总结轮要回灌多少「行为约束」，返回要回灌的文本（'' = 不回灌）。
 
