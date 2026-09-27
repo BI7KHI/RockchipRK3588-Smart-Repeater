@@ -244,6 +244,55 @@
     showToast(n ? `已填入设计倍率（${n} 个通道），保存后生效` : '设计值不可用', n ? 'success' : 'error');
   }
 
+  // ---------------- 网页对话的提示词约束（发送前注入） ----------------
+  // 注入位置固定在本轮用户消息**末尾**：实测板端 1.5B 只可靠地理会最后一条
+  // 消息（作为最后一条 user 消息遵守 4/4，放进 system 轮则 0/4）。
+  const CHAT_SUFFIX_TEMPLATE = [
+    '只输出可直接朗读的纯口语，不要 Markdown、星号、井号、列表、emoji。',
+    '没数据就说不知道，不要编造。',
+    '（下面这条是注入自检用的标记，验证完可以删掉）回答的末尾必须原样加上「喵」这个字。',
+  ].join('\n');
+
+  function renderChatSuffixState() {
+    const on = $('#llm-chat-suffix-on');
+    const ta = $('#llm-chat-suffix');
+    const enabled = !on || on.checked;
+    const n = ((ta && ta.value) || '').trim().length;
+    const txt = !enabled ? '已关闭'
+      : (n ? ('已启用 · ' + n + ' 字 · 注入在用户消息末尾') : '未设置');
+    const st = $('#llm-constraint-state');
+    const sub = $('#llm-constraint-sub');
+    if (st) st.textContent = txt;
+    if (sub) sub.textContent = txt;
+  }
+
+  async function loadChatSuffix() {
+    try {
+      const d = await apiFetch('/api/settings');
+      const s = d.settings || d || {};
+      if ($('#llm-chat-suffix')) $('#llm-chat-suffix').value = s.llm_chat_suffix || '';
+      if ($('#llm-chat-suffix-on')) {
+        $('#llm-chat-suffix-on').checked = String(s.llm_chat_suffix_on ?? '1') !== '0';
+      }
+      renderChatSuffixState();
+    } catch (e) { /* 设置读不到不该挡住对话本身 */ }
+  }
+
+  async function saveChatSuffix() {
+    try {
+      await apiFetch('/api/settings', {
+        method: 'POST',
+        body: JSON.stringify({
+          llm_chat_suffix: ($('#llm-chat-suffix') && $('#llm-chat-suffix').value) || '',
+          llm_chat_suffix_on: ($('#llm-chat-suffix-on') && $('#llm-chat-suffix-on').checked)
+            ? '1' : '0',
+        }),
+      });
+      showToast('提示词约束已保存（下一次发送即生效）', 'success');
+      renderChatSuffixState();
+    } catch (e) { showToast(e.message, 'error'); }
+  }
+
   async function saveCalibration() {
     try {
       await apiFetch('/api/voltage/calibrate', {
@@ -2943,6 +2992,16 @@
     bindPttSelfTest();
     $('#btn-cal-design')?.addEventListener('click', fillDesignCal);
     $('#btn-save-energy')?.addEventListener('click', saveEnergySettings);
+    $('#btn-save-chat-suffix')?.addEventListener('click', saveChatSuffix);
+    $('#btn-fill-chat-suffix')?.addEventListener('click', () => {
+      const ta = $('#llm-chat-suffix');
+      if (!ta) return;
+      ta.value = CHAT_SUFFIX_TEMPLATE;
+      renderChatSuffixState();
+      showToast('已填入推荐约束，确认后点「保存约束」', 'success');
+    });
+    $('#llm-chat-suffix')?.addEventListener('input', renderChatSuffixState);
+    $('#llm-chat-suffix-on')?.addEventListener('change', renderChatSuffixState);
     bindVoiceInput();
     $('#btn-save-prompt')?.addEventListener('click', saveLlmAgentSettings);
     $('#btn-save-agent')?.addEventListener('click', saveLlmAgentSettings);
@@ -3136,6 +3195,7 @@
       loadLlmAgentSettings();
       loadLlmStats();
       loadEnergySettings();
+      loadChatSuffix();
     }
     loadCalibration();
     // 全部改成 ELF2Poll.loop：上一次 settle 之后再排下一次，绝不并发叠加。

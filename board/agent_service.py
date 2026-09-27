@@ -13,7 +13,6 @@ app.py 解析后执行对应读取函数，把结果回灌给模型，再让模�
 """
 import json
 import math
-import os
 import re
 import time
 
@@ -164,13 +163,21 @@ def tools_prompt(enabled=None):
     ])
 
 
-def compose_user_prompt(base_prompt='', question='', enabled=None):
-    """把（可选）用户自定义提示词、工具协议、实际问题合成一条 user 消息。"""
+def compose_user_prompt(base_prompt='', question='', enabled=None, suffix=''):
+    """把（可选）用户自定义提示词、工具协议、实际问题合成一条 user 消息。
+
+    `suffix`（网页对话的**输出约束**）固定放在**末尾**，这不是排版偏好：
+    实测板端 1.5B 只可靠地理会最后一条消息 —— 同一份约束作为最后一条用户消息
+    遵守 4/4，放进 system 轮（后面跟 user）则 0/4。多项规则时也是**最后一条
+    最受重视**，所以最要紧的规则应当写在约束文本的最后一行。
+    """
     parts = []
     if base_prompt and base_prompt.strip():
         parts.append('【系统设定】\n' + base_prompt.strip())
     parts.append(tools_prompt(enabled))
     parts.append('【用户问题】\n' + (question or '').strip())
+    if suffix and suffix.strip():
+        parts.append('【输出要求（必须遵守）】\n' + suffix.strip())
     return '\n\n'.join(parts)
 
 
@@ -246,14 +253,22 @@ def summary_spec(spec='', provider='local', mode='auto', cap=1200):
 
 
 def summary_messages(collected, question, spec='', provider='local',
-                     mode='auto', cap=1200, data_cap=280, tail=None,
-                     inline_spec=None):
+                     mode='auto', cap=1200, data_cap=280, tail=None):
     """拼「总结轮」的消息体：拿到工具数据 → 要一句最终回答。
 
-    约束放进**真正的 system 轮**：权威性高，也不会被前面的数据段冲淡。
-    这要求 rkllm-server 打过 deploy/patch_rkllm_chat.py —— 未打补丁的服务端会
-    静默丢弃 system，那样约束就白给了。若确实还在跑未打补丁的服务端，设
-    RELAY_LOCAL_INLINE_SPEC=1（或显式传 inline_spec=True）退回内联。
+    约束放哪儿是**实测定的**（板端 Qwen2.5-1.5B，同一份 283 字规范，各 4 次）：
+
+        规范作为**最后一条 user 消息**        → 4/4 遵守
+        同内容放进 system 轮（后面跟着 user） → 0/4 遵守
+        system 轮、但「喵」恰好是规范最后一行 → 4/4 遵守
+
+    也就是说 1.5B 只可靠地理会**最后一条消息**，system 槽位对它几乎不起作用；
+    放进 system 时会退化成「只遵守最后一行」。所以：
+
+      * 外部云模型 —— 走真正的 system 轮（权威、不被数据段冲淡）；
+      * 板端本地   —— 内联进用户消息，且必须落在**末尾**。
+
+    这个差别就是「约束写得好好的却总不生效」的根因，别改回去。
     """
     tail = tail or SUMMARY_TAIL_ASSIST
     data = ('设备实时数据：'
@@ -262,13 +277,11 @@ def summary_messages(collected, question, spec='', provider='local',
     sp = summary_spec(spec, provider, mode=mode, cap=cap)
     if not sp:
         return [{'role': 'user', 'content': user}]
-    if inline_spec is None:
-        inline_spec = os.environ.get('RELAY_LOCAL_INLINE_SPEC', '') in ('1', 'true', 'on')
-    if str(provider) == 'external' or not inline_spec:
+    if str(provider) == 'external':
         return [{'role': 'system', 'content': sp},
                 {'role': 'user', 'content': user}]
-    # 兜底：未打补丁的服务端不认 system，把约束并进同一条用户消息（旧行为）
-    return [{'role': 'user', 'content': '【播报要求】' + sp + '\n' + user}]
+    return [{'role': 'user',
+             'content': user + '\n\n【输出要求（必须遵守）】\n' + sp}]
 
 
 def build_agent_prompt(base_prompt='', enabled=None):

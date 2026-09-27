@@ -482,6 +482,9 @@ def _set_default_settings(db):
         'llm_system_prompt': '',
         'llm_system_prompt_on': '1',
         'llm_prompt_vars': '1',
+        # 网页「LLM 对话」的输出约束：对话前注入，固定落在用户消息末尾
+        'llm_chat_suffix': '',
+        'llm_chat_suffix_on': '1',
         'agent_enabled': '1',
         'agent_max_iters': '3',
         'agent_tools': '',
@@ -1260,6 +1263,7 @@ def api_settings_get():
         'record_auto_play', 'site_title',
         'tts_provider', 'tts_local_voice', 'tts_en_voice', 'tts_icao', 'tts_icao_voice', 'tts_auto_speak',
         'llm_system_prompt', 'llm_system_prompt_on', 'llm_prompt_vars',
+        'llm_chat_suffix', 'llm_chat_suffix_on',
         'agent_enabled', 'agent_max_iters', 'agent_tools',
         'assist_enabled',
         'assist_wake_words',
@@ -1362,6 +1366,9 @@ def api_settings_set():
         'llm_system_prompt': lambda v: str(v)[:4000],
         'llm_system_prompt_on': lambda v: '1' if str(v) in ('1', 'true', 'True', 'on') else '0',
         'llm_prompt_vars': lambda v: '1' if str(v) in ('1', 'true', 'True', 'on') else '0',
+        # 网页对话的输出约束：与 llm_system_prompt 同样的长度上限
+        'llm_chat_suffix': lambda v: str(v)[:4000],
+        'llm_chat_suffix_on': lambda v: '1' if str(v) in ('1', 'true', 'True', 'on') else '0',
         'agent_enabled': lambda v: '1' if str(v) in ('1', 'true', 'True', 'on') else '0',
         'agent_max_iters': lambda v: str(max(1, min(5, int(float(v))))),
         'agent_tools': lambda v: ','.join(
@@ -2115,6 +2122,20 @@ def api_agent_chat():
             except Exception:
                 pass
     base_prompt = base_prompt[:4000]
+    # 网页对话专属的「输出约束」：与共用基础设定分开存，改它不影响语音助手。
+    # 注入位置固定在用户消息**末尾**——实测板端 1.5B 只可靠地理会最后一条消息
+    # （作为最后一条 user 消息 4/4 遵守，放进 system 轮 0/4）。
+    chat_suffix = ''
+    if _setting_direct('llm_chat_suffix_on', '1') in ('1', 'true', 'True', 'on'):
+        chat_suffix = (_setting_direct('llm_chat_suffix', '') or '').strip()
+        if chat_suffix and _setting_direct('llm_prompt_vars', '1') in ('1', 'true', 'True', 'on'):
+            try:
+                chat_suffix = _expand_vars(chat_suffix)
+            except Exception:
+                pass
+    chat_suffix = chat_suffix[:2000]
+    # 总结轮要回灌的约束 = 基础设定 + 输出约束（两者都为空时不注入）
+    spec_all = '\n'.join([x for x in (base_prompt, chat_suffix) if x])
     temperature = float(data.get('temperature', 0.3))
     max_tokens = int(data.get('max_tokens', 1024))
     # 总结轮要不要回灌基础设定：见 agent_service.summary_spec（auto = 只给外部云模型）
@@ -2142,7 +2163,8 @@ def api_agent_chat():
         question = last_user
         _warn_long_prompt('网页对话',
                           agent_service.compose_user_prompt(base_prompt, question,
-                                                            enabled), cfg['provider'])
+                                                            enabled, chat_suffix),
+                          cfg['provider'])
         collected = []          # 累积的紧凑读取结果（回灌给模型的唯一数据源）
         # 数据类问句：第一轮强制先取数（提示词里再加一条硬性要求，且该轮不向用户输出文字）
         force_first = agent_service.wants_realtime(last_user)
@@ -2151,7 +2173,8 @@ def api_agent_chat():
             yield _sse({'type': 'iter', 'iter': it + 1, 'max': max_iters + 1,
                         'force_tool': force})
             if it == 0:
-                content = agent_service.compose_user_prompt(base_prompt, question, enabled)
+                content = agent_service.compose_user_prompt(base_prompt, question,
+                                                            enabled, chat_suffix)
                 if force:
                     content += '\n现在只输出一行读取指令（格式 READ 名称 {}），不要回答用户。'
                 msgs = [{'role': 'user', 'content': content}]
@@ -2159,7 +2182,7 @@ def api_agent_chat():
                 # 数据已拿到：让模型只做总结。约束必须在这一轮重新出现——
                 # **这一轮产出的字才是用户真正看到的**（第一轮被要求只输出读取指令）。
                 msgs = agent_service.summary_messages(
-                    collected, question[:100], base_prompt, provider,
+                    collected, question[:100], spec_all, provider,
                     mode=sp_mode, cap=sp_cap,
                     tail='请用中文 1~3 句回答：')
             payload = {'model': model, 'messages': msgs, 'stream': True,

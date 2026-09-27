@@ -186,18 +186,26 @@ m_local = G.summary_messages([{'get_power': {'battery': 12.6}}], '电池电压',
 # 4615 字符仍正常输出，真正的约束变成延时，所以 auto 现在也给板端回灌。
 check('auto 下板端 RKLLM 也回灌（旧结论已作废）',
       any(MARK in (m.get('content') or '') for m in m_local))
-check('板端走 system 轮（服务端已打 patch_rkllm_chat.py）',
-      m_local[0].get('role') == 'system' and MARK in m_local[0]['content'])
+# 板端必须内联进用户消息、且落在末尾。实测（同一份 283 字规范，各 4 次）：
+#   作为最后一条 user 消息 → 4/4 遵守；放进 system 轮（后面跟 user）→ 0/4 遵守。
+check('板端约束内联在用户消息里（**不走** system 轮）',
+      len(m_local) == 1 and m_local[0]['role'] == 'user'
+      and MARK in m_local[0]['content'], str([x['role'] for x in m_local]))
+_i_sp = m_local[0]['content'].find('【输出要求')
+_i_q = m_local[0]['content'].find('电池电压')
+check('板端约束落在用户消息**末尾**（近因）',
+      _i_sp > _i_q >= 0, '问题@%d 约束@%d' % (_i_q, _i_sp))
 check('板端约束按延时预算限量（<=600 字）',
       len(G.summary_spec('规' * 5000, 'local')) <= G.LOCAL_SPEC_CAP,
       str(len(G.summary_spec('规' * 5000, 'local'))))
 check('外部仍按大 cap 回灌',
       len(G.summary_spec('规' * 5000, 'external')) > G.LOCAL_SPEC_CAP)
 
-m_legacy = G.summary_messages([{'get_power': {'battery': 12.6}}], '电池电压',
-                              SPEC, 'local', mode='auto', inline_spec=True)
-check('未打补丁的服务端可用 inline_spec 退回内联',
-      m_legacy[0]['role'] == 'user' and '【播报要求】' in m_legacy[0]['content'])
+m_ext = G.summary_messages([{'get_power': {'battery': 12.6}}], '电池电压',
+                           SPEC, 'external', mode='auto')
+check('外部模型仍走 system 轮（它吃 system，板端不吃）',
+      m_ext[0]['role'] == 'system' and MARK in m_ext[0]['content'],
+      str([x['role'] for x in m_ext]))
 
 check('cap 生效', len(G.summary_spec('规' * 5000, 'external', cap=300)) == 300)
 check('空规范不注入', G.summary_spec('', 'external') == '')
@@ -215,6 +223,31 @@ check('网页总结轮带基础设定', m_web[0]['role'] == 'system'
 check('网页总结轮用自己的收尾语', '请用中文 1~3 句回答：' in m_web[-1]['content'])
 check('默认收尾语仍是助手那一句',
       G.SUMMARY_TAIL_ASSIST in G.summary_messages([], 'q', SPEC, 'external')[-1]['content'])
+
+# --- 4c. 网页对话的「输出约束」注入（对话前，落在用户消息末尾）-----------------
+print('\n=== 4c. 网页对话输出约束注入 ===')
+SUF = '回答的末尾必须原样加上「喵」这个字。'
+p_c = G.compose_user_prompt('你是中继助手。', '电池电压是多少', None, SUF)
+check('约束出现在合成后的用户消息里', SUF in p_c)
+check('约束落在**末尾**（其后不再有其他段落）',
+      p_c.rstrip().endswith(SUF), p_c[-60:])
+check('约束排在【用户问题】之后',
+      p_c.find('【输出要求') > p_c.find('【用户问题】'),
+      '问题@%d 约束@%d' % (p_c.find('【用户问题】'), p_c.find('【输出要求')))
+check('约束排在工具协议之后',
+      p_c.find('【输出要求') > p_c.find('READ'),
+      '工具@%d 约束@%d' % (p_c.find('READ'), p_c.find('【输出要求')))
+p_n0 = G.compose_user_prompt('你是中继助手。', '电池电压是多少', None, '')
+check('空约束不产生空段落',
+      '【输出要求' not in p_n0, p_n0[-40:])
+p_n1 = G.compose_user_prompt('你是中继助手。', '电池电压是多少', None, '   ')
+check('纯空白约束也不注入', '【输出要求' not in p_n1)
+# 基础设定为空时不该出现空的「系统设定」段，但约束仍要在
+p_n2 = G.compose_user_prompt('', '电池电压是多少', None, SUF)
+check('无基础设定时仍注入约束且无空段落',
+      '【系统设定】' not in p_n2 and SUF in p_n2, p_n2[:60])
+check('三段顺序：工具 → 问题 → 约束',
+      p_n2.find('READ') < p_n2.find('【用户问题】') < p_n2.find('【输出要求'))
 
 # ---------------------------------------------------------------------------
 print('\n=== 5. 能量分段状态机 ===')

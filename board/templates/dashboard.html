@@ -265,6 +265,25 @@
       <button class="btn ghost" id="btn-llm-refresh">刷新配置</button>
     </div>
   </div>
+  <details class="acc admin-only" id="llm-constraint-card" open>
+    <summary><b>提示词约束（发送前注入）</b><span class="acc-sub" id="llm-constraint-sub">未设置</span></summary>
+    <div class="card">
+      <div class="row gap" style="align-items:center">
+        <label class="checkline"><input type="checkbox" id="llm-chat-suffix-on" checked> 启用注入</label>
+        <button class="btn primary" id="btn-save-chat-suffix">保存约束</button>
+        <button class="btn ghost" id="btn-fill-chat-suffix">填入推荐约束</button>
+        <span class="muted small" id="llm-constraint-state">--</span>
+      </div>
+      <textarea id="llm-chat-suffix" rows="5" spellcheck="false"
+                placeholder="这段文字会在每次发送时注入到本轮用户消息的末尾"></textarea>
+      <p class="muted small">
+        注入位置固定在<b>末尾</b>，不是排版偏好：实测板端 1.5B 只可靠地理会最后一条消息
+        —— 同一份约束作为最后一条用户消息遵守 <b>4/4</b>，放进 <code>system</code> 轮（其后
+        还有用户消息）则 <b>0/4</b>。多项规则时也是<b>最后一条最受重视</b>，所以把最要紧的
+        规则写在最后一行。这段只影响网页对话；语音助手用它自己的「播报约束」。
+      </p>
+    </div>
+  </details>
   <div class="chat-layout">
     <div class="card chat-card">
       <div class="chat-history" id="chat-history"></div>
@@ -936,7 +955,7 @@
         <button class="btn primary" id="btn-save-prompt">保存提示词</button>
         <button class="btn ghost" id="btn-insert-prompt">填入推荐提示词</button>
       </div>
-      <p class="muted small">说明：板端 RKLLM 会忽略 <code>system</code> 角色，后台已自动把提示词并入用户消息下发（实测唯一生效方式）。</p>
+      <p class="muted small">说明：这里填的是**共用基础设定**（网页对话与语音助手都会用）。板端 1.5B 对 <code>system</code> 角色几乎不理，后台一律把它并入用户消息下发；而且它只可靠地理会**最后一条消息**，所以最要紧的规则要写在末尾。网页对话另有独立的「提示词约束」在 LLM 对话页。</p>
       <div class="muted small">──────</div>
       <label class="checkline"><input type="checkbox" id="set-agent-enabled"> 启用 Agent 技能/工具调用</label>
       <label class="checkline">最大技能轮次 <input type="number" id="set-agent-max-iters" min="1" max="5" step="1" style="width:80px;margin-left:6px"></label>
