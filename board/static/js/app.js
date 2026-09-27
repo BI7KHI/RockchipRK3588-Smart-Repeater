@@ -64,10 +64,19 @@
       hour: '2-digit', minute: '2-digit', second: '2-digit',
       hour12: false,
     });
+    // 日期与时间拆成两个 span：手机端 CSS 只隐藏 .clock-date。
+    // 桌面渲染结果与原来逐字符一致（date + 空格 + time）。
+    const dateEl = document.createElement('span');
+    dateEl.className = 'clock-date';
+    const timeEl = document.createElement('span');
+    timeEl.className = 'clock-time';
+    el.textContent = '';
+    el.append(dateEl, document.createTextNode(' '), timeEl);
     const tick = () => {
       const parts = fmt.formatToParts(new Date());
       const get = (t) => parts.find(p => p.type === t)?.value || '';
-      el.textContent = `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
+      dateEl.textContent = `${get('year')}-${get('month')}-${get('day')}`;
+      timeEl.textContent = `${get('hour')}:${get('minute')}:${get('second')}`;
     };
     tick();
     setInterval(tick, 1000);
@@ -87,11 +96,47 @@
         btn.classList.add('active');
         const p = $('#tab-' + btn.dataset.tab);
         if (p) p.classList.add('active');
+        updateMoreState();
       });
     });
     if (role !== 'admin') {
       $$('.admin-only').forEach(el => { el.style.display = 'none'; });
     }
+    updateMoreState();
+  }
+
+  // ---------------- 手机底部导航（≤720px 生效，桌面无副作用） ----------------
+  // 选中的 tab 不在底栏里（气象/用户管理/设置）时点亮「更多」，
+  // 让用户知道当前功能收在上拉面板里。
+  function updateMoreState() {
+    const more = $('.nav-more');
+    if (!more) return;
+    const barHasActive = $$('.nav-bar .tab-btn').some(b => b.classList.contains('active'));
+    more.classList.toggle('active', !barHasActive);
+  }
+
+  function initNavSheet() {
+    const more = $('.nav-more');
+    const sheet = $('#nav-sheet');
+    if (!more || !sheet) return;
+    const setOpen = (open) => {
+      sheet.classList.toggle('open', open);
+      more.classList.toggle('open', open);
+      more.setAttribute('aria-expanded', open ? 'true' : 'false');
+    };
+    more.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setOpen(!sheet.classList.contains('open'));
+    });
+    // 面板里点了任意一项（切 tab 或跳页）就收起
+    $$('.tab-btn', sheet).forEach(b => b.addEventListener('click', () => setOpen(false)));
+    // 点面板外、或按 Esc 收起
+    document.addEventListener('click', (e) => {
+      if (sheet.classList.contains('open') && !sheet.contains(e.target)) setOpen(false);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') setOpen(false);
+    });
   }
 
   // ---------------- 总览页子选项卡（运行概览 / 能量统计） ----------------
@@ -3069,6 +3114,7 @@
   document.addEventListener('DOMContentLoaded', () => {
     startBeijingClock();
     initTabs();
+    initNavSheet();
     initOverviewSubtabs();
     initEnergy();
     initAccordions();

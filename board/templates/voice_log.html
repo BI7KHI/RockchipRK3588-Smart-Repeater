@@ -1,4 +1,6 @@
 {% extends "base.html" %}
+{# 子页面只有「返回控制台 + 当前页」，沿用顶部导航，不启用手机底部栏 #}
+{% set body_class = 'page-sub' %}
 {% block title %}中继语音日志 - ELF2 智能中继控制中心{% endblock %}
 
 {% block nav %}
