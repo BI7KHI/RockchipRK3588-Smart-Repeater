@@ -87,6 +87,15 @@
       </div>
     </div>
   </div>
+  {# 开发板存储：eMMC（系统 / 与用户区）与 NVMe 数据盘，卡片由 JS 按实际挂载点渲染 #}
+  <div class="grid grid-3" id="disk-cards">
+    <div class="card">
+      <div class="card-title">开发板存储</div>
+      <div class="metric">-- %</div>
+      <div class="sub">读取中…</div>
+      <div class="bar"><span style="width:0%"></span></div>
+    </div>
+  </div>
   </div><!-- /#ov-run -->
 
   <div class="sub-panel" id="ov-energy">

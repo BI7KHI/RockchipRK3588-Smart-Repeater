@@ -1015,6 +1015,86 @@ def read_memory():
     }
 
 
+# ---------------------------------------------------------------------------
+# 存储用量（总览页「开发板存储」卡片）
+#
+# 板端两块盘：eMMC 29.1G（根分区 / + 用户区 /userdata）与 NVMe 117G（/opt/ai，
+# 模型、语音日志、录像都在这儿）。用 stdlib 的 statvfs 就够，不引 psutil ——
+# 板端只跑这一个进程，少一个依赖少一份风险。
+# ---------------------------------------------------------------------------
+DISK_MOUNTS = ('/', '/userdata', '/opt/ai')
+
+
+def _mount_device(mount):
+    """挂载点在 /proc/mounts 里的来源（可能是 /dev/root 这种别名）。"""
+    try:
+        for line in Path('/proc/mounts').read_text().splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == mount:
+                return parts[0]
+    except Exception:
+        pass
+    return ''
+
+
+def _mount_block_name(mount):
+    """挂载点背后的**内核块设备名**（mmcblk0p8 / nvme0n1p1 …）。
+
+    不能只看 /proc/mounts：根分区那里写的是 `/dev/root`，光看名字分不出 eMMC 还是
+    NVMe（实测第一版就把 eMMC 根分区显示成了「存储」）。这里用 stat 取设备号，
+    再到 /sys/dev/block/<maj>:<min> 查真实名字。
+    """
+    try:
+        st = os.stat(mount)
+        link = Path('/sys/dev/block/%d:%d' % (os.major(st.st_dev),
+                                              os.minor(st.st_dev)))
+        if link.exists():
+            return link.resolve().name
+    except Exception:
+        pass
+    dev = _mount_device(mount)
+    return Path(dev).name if dev else ''
+
+
+def _disk_kind(name):
+    n = (name or '')
+    if n.startswith('mmcblk'):
+        return 'eMMC'
+    if n.startswith('nvme'):
+        return 'NVMe'
+    if n.startswith('sd') or n.startswith('usb'):
+        return 'SATA/USB'
+    return '存储'
+
+
+def read_disks():
+    """各挂载点的用量。拿不到的挂载点直接跳过（比如板子没插 NVMe）。"""
+    out = []
+    for mount in DISK_MOUNTS:
+        p = Path(mount)
+        if not p.is_dir():
+            continue
+        try:
+            st = os.statvfs(str(p))
+            total = st.f_blocks * st.f_frsize
+            free = st.f_bavail * st.f_frsize
+            if total <= 0:
+                continue
+            used = max(0, total - free)
+            blk = _mount_block_name(mount)
+            out.append({
+                'mount': mount,
+                'kind': _disk_kind(blk),
+                'device': blk,                     # 内核名：mmcblk0p8 / nvme0n1p1
+                'source': _mount_device(mount),    # /proc/mounts 里的来源，排查用
+                'total': total, 'used': used, 'free': free,
+                'percent': round(100.0 * used / total, 1),
+            })
+        except Exception:
+            continue
+    return out
+
+
 def adc_channel_no(channel_key):
     """该通道占用的 SARADC 编号（0~7），可用设置 <key>_adc_channel 覆盖。"""
     ch = ADC_CHANNELS[channel_key]
@@ -1238,6 +1318,7 @@ def api_status():
         cpu_percent=read_cpu_percent(),
         loadavg={'1m': loadavg[0], '5m': loadavg[1], '15m': loadavg[2]},
         memory=read_memory(),
+        disks=read_disks(),
         temperatures=read_temperature(),
         uptime_seconds=read_uptime(),
         voltages=voltage_payload(),

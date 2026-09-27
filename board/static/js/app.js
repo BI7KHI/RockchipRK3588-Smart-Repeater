@@ -188,10 +188,38 @@
         }
       }
       $('#uptime').textContent = fmtUptime(data.uptime_seconds);
+      renderDisks(data.disks);
       $('#last-update').textContent = '更新于 ' + (data.time || '');
     } catch (e) {
       console.warn('status error', e);
     }
+  }
+
+  // 开发板存储卡片（eMMC / NVMe）：与其它卡片同一套 card/metric/sub/bar 结构
+  function renderDisks(disks) {
+    const box = $('#disk-cards');
+    if (!box) return;
+    const list = disks || [];
+    if (!list.length) {
+      box.innerHTML = '<div class="card"><div class="card-title">开发板存储</div>'
+        + '<div class="metric">-- %</div>'
+        + '<div class="sub">未读到磁盘信息（挂载点 / /userdata /opt/ai 都不存在？）</div>'
+        + '<div class="bar"><span style="width:0%"></span></div></div>';
+      return;
+    }
+    const gib = n => (Number(n || 0) / 1073741824).toFixed(1);
+    box.innerHTML = list.map(d => {
+      const pct = Math.max(0, Math.min(100, Number(d.percent) || 0));
+      const warn = pct >= 90 ? ' class="warn"' : '';
+      return '<div class="card">'
+        + '<div class="card-title">' + escapeHtml(d.kind || '存储')
+        + ' · ' + escapeHtml(d.mount || '') + '</div>'
+        + '<div class="metric">' + (d.percent ?? '--') + ' %</div>'
+        + '<div class="sub" title="' + escapeHtml(d.device || '') + '">已用 '
+        + gib(d.used) + ' / ' + gib(d.total) + ' GiB · 可用 ' + gib(d.free) + ' GiB</div>'
+        + '<div class="bar"><span' + warn + ' style="width:' + pct + '%"></span></div>'
+        + '</div>';
+    }).join('');
   }
 
   function escapeHtml(s) {
