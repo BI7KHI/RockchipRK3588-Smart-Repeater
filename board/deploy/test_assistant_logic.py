@@ -431,26 +431,42 @@ check('busy 模式 + BUSY 有效 → 唤醒', r2['would_wake'] is True, str(r2))
 r3 = svc_a.test_wake('中继台，现在几点', busy=False)
 check('level 模式不受 BUSY 影响', r3['would_wake'] is True, str(r3))
 
-# 分段：busy 模式下载波即开段（弱信号也能收），level 模式不会
-def _seg_open(mode, busy, dbfs):
+# 分段：busy 模式**只有载波**才算「检测到语音」——电平触发完全关闭
+def _seg_open(mode, busy, dbfs, pre=None):
     svc, st = make_svc({'assist_wake_mode': mode, 'assist_enabled': '1'},
                        busy=busy)
     svc.busy_getter = lambda: busy
     mono = b'\x00\x00' * 1600                 # 0.1s 单声道
+    if pre is not None:
+        svc._push_pre(900.0, mono, pre)
     svc._segment(None, mono, 1000.0, dbfs, st)
     return svc.seg
 
 seg = _seg_open('busy', True, -70.0)
-check('busy 模式：弱信号（-70dBFS）+ BUSY → 开段', seg is not None,
+check('busy 模式：弱信号（-70dBFS）+ BUSY → 开段（弱信号也能收）', seg is not None,
       'seg=%r' % (seg,))
 check('开出的段被标记为 BUSY 段', bool(seg and seg.get('busy')))
-check('BUSY 计入「有声时长」（弱信号才能过最短时长）',
+check('BUSY 计入「有声时长」（弱信号才过得了最短时长）',
       bool(seg and seg.get('voice_n', 0) > 0))
-check('level 模式：同样条件下不开段（这就是「唤不醒」的原因）',
-      _seg_open('level', True, -70.0) is None)
-check('busy 模式：BUSY 未来也不开段（不会在没人说话时误唤醒）',
-      _seg_open('busy', False, -70.0) is None)
-check('两种模式下正常语音都能开段', _seg_open('level', False, -30.0) is not None)
+seg2 = _seg_open('busy', True, -70.0, pre=400.0)
+check('busy 模式开段时带上 pre-roll（不吃掉第一个字）',
+      bool(seg2 and seg2.get('pre')), 'pre=%r' % ((seg2 or {}).get('pre'),))
+
+# 用户实测反馈：切到 BUSY 后「没有 BUSY 高电平也会被识别到语音触发」。根因是上一版
+# 把电平门限也留着当开段条件。现在 busy 模式**电平完全不参与判定**：
+check('busy 模式：无 BUSY，即使 -30dBFS 的响亮语音也**不开段**（电平触发已关闭）',
+      _seg_open('busy', False, -30.0) is None)
+check('busy 模式：无 BUSY，弱信号同样不开段', _seg_open('busy', False, -70.0) is None)
+check('level 模式：正常语音照旧开段（原行为未变）',
+      _seg_open('level', False, -30.0) is not None)
+check('level 模式：无 BUSY 无语音不开段', _seg_open('level', False, -70.0) is None)
+
+print('\n=== 14. BUSY 模式的处理闸门（不依赖 ASR）===')
+check('busy 模式 + 无载波 → 拦住', A.AssistantService.busy_gate('busy', False) != '')
+check('拦下时写明原因', 'BUSY' in A.AssistantService.busy_gate('busy', False))
+check('busy 模式 + 有载波 → 放行', A.AssistantService.busy_gate('busy', True) == '')
+check('level 模式永远放行（不受 BUSY 影响）',
+      A.AssistantService.busy_gate('level', False) == '')
 
 print('\n' + '=' * 62)
 print('通过 %d 项，失败 %d 项' % (OK[0], len(FAIL)))

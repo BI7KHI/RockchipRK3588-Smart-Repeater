@@ -509,12 +509,23 @@ class AssistantService:
     def wake_mode(self, st=None):
         """唤醒方式：level（电平分段，现状）/ busy（BUSY 触发 + 唤醒词）。
 
-        busy 模式下 BUSY 有效即开段（弱信号也能收），且**只有 BUSY 段**才允许唤醒 ——
-        用户要的是「BUSY 触发且检测到唤醒词才唤醒」，两个条件同时满足。
+        busy 模式下**电平触发完全关闭**：只有载波有效时才算「检测到语音」，也才会
+        开段送 ASR；唤醒与否再由唤醒词决定（两个条件都要满足）。
         """
         st = st or self.settings()
         v = str(st.get('assist_wake_mode') or 'level').strip().lower()
         return v if v in WAKE_MODES else 'level'
+
+    @staticmethod
+    def busy_gate(mode, busy_seg):
+        """busy 模式下「这一段该不该处理」的判定；返回空串表示放行。
+
+        抽成独立函数是为了**不用 ASR 也能自测**（处理链路本身依赖识别模型，
+        板端才有）。判定规则：busy 模式下没有载波 → 整段丢弃，不唤醒、不追问。
+        """
+        if mode == 'busy' and not busy_seg:
+            return 'BUSY 未触发，整段丢弃（BUSY 唤醒模式）'
+        return ''
 
     def max_chars(self, st=None):
         st = st or self.settings()
@@ -662,15 +673,76 @@ class AssistantService:
         silence = max(0.15, _f(st.get('assist_silence_ms'), 450.0)) / 1000.0
         min_speech = max(0.1, _f(st.get('assist_min_speech_ms'), 350.0)) / 1000.0
         max_utt = max(2.0, _f(st.get('assist_max_utterance'), 15.0))
-        # BUSY 唤醒模式：**载波即触发**。弱信号常常压根到不了起判电平，按电平分段会
-        # 「根本没开段 → 没跑 ASR → 永远唤不醒」；BUSY 有效说明确实有人在发射，
-        # 这时开段并让 BUSY 计入「有声时长」，弱信号才有机会被识别到。
         busy_wake = self.wake_mode(st) == 'busy'
         busy_now = bool(self.busy_getter())
 
+        # ------------------------------------------------------------------
+        # BUSY 唤醒模式：**电平触发完全关闭**，只有载波才算「检测到语音」。
+        #
+        # 为什么必须这么硬（用户实测反馈 + 现场原因）：上一版把「电平过门限」也留着
+        # 当开段条件（本意是照顾本地调试），结果**没有 BUSY 时说的话照样开段、照样
+        # 送 ASR、照样被追问窗口当成一轮对话**。用户的要求很明确：检测到语音的逻辑
+        # 就是「BUSY 触发」。所以这里整段逻辑与电平模式分开，两个门限（open/close）
+        # 在 busy 模式下**完全不参与**开段与收段。
+        # ------------------------------------------------------------------
+        if busy_wake:
+            if self.seg is None:
+                if not busy_now:
+                    # 载波没来：只维持 pre-roll 缓冲（开段时补进去，避免吃掉第一个字）
+                    self._push_pre(ts, mono, preroll_ms)
+                    self._set_stage('idle', '监听中（等 BUSY）')
+                    return
+                seg = {'start': ts, 'last_voice': ts, 'buf': [], 'n': 0,
+                       'pre': list(self.pre), 'busy': True,
+                       'peak': dbfs, 'voice_n': 0}
+                seg['buf'].append(mono)
+                seg['n'] += len(mono)
+                seg['voice_n'] += len(mono)     # 载波就是「有声」
+                self.seg = seg
+                self._set_stage('speech', 'BUSY 触发')
+                return
+
+            seg = self.seg
+            seg['buf'].append(mono)
+            seg['n'] += len(mono)
+            if dbfs > seg['peak']:
+                seg['peak'] = dbfs
+            if busy_now:
+                seg['busy'] = True
+                seg['last_voice'] = ts
+                seg['voice_n'] += len(mono)
+
+            too_long = (ts - seg['start']) >= max_utt
+            silent = (ts - seg['last_voice']) >= silence
+            if not (too_long or silent):
+                return
+            self.seg = None
+            data = b''.join([m for (_t, m) in seg['pre']] + seg['buf'])
+            seconds = len(data) / float(SAMPLE_RATE * FRAME_BYTES)
+            voice_seconds = seg['voice_n'] / float(SAMPLE_RATE * FRAME_BYTES)
+            if voice_seconds < min_speech or len(data) < int(0.15 * SAMPLE_RATE) * FRAME_BYTES:
+                self._set_stage('idle', '载波过短丢弃（%.2fs）' % voice_seconds)
+                return
+            self.counters['segments'] += 1
+            self.counters['busy_segments'] = int(self.counters.get('busy_segments', 0)) + 1
+            try:
+                self.q.put_nowait({'data': data, 'ts': seg['start'],
+                                   'seconds': seconds, 'voice_seconds': voice_seconds,
+                                   'dbfs': seg['peak'], 'busy': True})
+            except queue.Full:
+                self.counters['ignored'] += 1
+                try:
+                    self.q.get_nowait()
+                    self.q.put_nowait({'data': data, 'ts': seg['start'],
+                                       'seconds': seconds, 'voice_seconds': voice_seconds,
+                                       'dbfs': seg['peak'], 'busy': True})
+                except Exception:
+                    pass
+            return
+
+        # ------------------------- 电平模式（原行为，一字未改）-------------------------
         if self.seg is None:
-            # level 模式：完全维持原行为（只认电平）；busy 模式：载波也算触发条件
-            if dbfs >= open_db or (busy_wake and busy_now):
+            if dbfs >= open_db:
                 seg = {'start': ts, 'last_voice': ts, 'buf': [], 'n': 0,
                        'pre': list(self.pre), 'busy': busy_now,
                        'peak': dbfs, 'voice_n': 0}
@@ -693,8 +765,8 @@ class AssistantService:
         if dbfs > seg['peak']:
             seg['peak'] = dbfs
         if busy_now:
-            seg['busy'] = True                  # 段内任一时刻有载波 → 记成 BUSY 段
-        if dbfs >= close_db or (busy_wake and busy_now):
+            seg['busy'] = True
+        if dbfs >= close_db or busy_now:
             seg['last_voice'] = ts
             seg['voice_n'] += len(mono)
 
@@ -826,21 +898,21 @@ class AssistantService:
         fuzzy = _flag(st.get('assist_wake_fuzzy'), True)
         loose = _flag(st.get('assist_wake_loose'), False)
         words = self.wake_words(st)
-        wake, hit, rest = match_wake(text, words, fuzzy, loose)
         mode = self.wake_mode(st)
         busy_seg = bool(item.get('busy'))
-        # BUSY 唤醒模式的核心判定：**BUSY 触发 且 命中唤醒词** 才算唤醒。
-        # 只满足唤醒词（例如有人在本地对着麦克风说话、或静噪抖动被识别出近音字）
-        # 不唤醒 —— 这一段仍然进实况流，便于看清「为什么没唤醒」。
-        if wake and mode == 'busy' and not busy_seg:
+        # BUSY 唤醒模式：**一切**都要先有载波才算数 —— 唤醒词、追问窗口、
+        # 纯唤醒词应答都不例外。这一条是硬的：用户反馈「未有 BUSY 高电平也会被
+        # 识别到语音触发」，根因就是只有命中唤醒词那条路被拦了，追问窗口那条没拦。
+        gate = self.busy_gate(mode, busy_seg)
+        if gate:
             rec['action'] = 'ignored'
-            rec['wake'] = hit
-            rec['note'] = 'BUSY 未触发，按 BUSY 唤醒模式跳过'
+            rec['note'] = gate
             self.counters['busy_skipped'] = int(self.counters.get('busy_skipped', 0)) + 1
-            keep('ignored', hit)
+            keep('ignored')
             self._push_recent(rec)
-            self._set_stage('idle', 'BUSY 未触发，跳过唤醒')
+            self._set_stage('idle', gate)
             return
+        wake, hit, rest = match_wake(text, words, fuzzy, loose)
         in_window = now <= self.follow_until
         if wake:
             rec['wake'] = hit
