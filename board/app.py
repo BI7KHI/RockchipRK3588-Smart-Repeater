@@ -55,6 +55,7 @@ import aprs_service
 import energy_service
 import announce_service
 import weather_api
+import speech_text
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / 'relay.db'
@@ -2165,6 +2166,28 @@ def api_agent_tools():
                   vars=({k: str(v) for k, v in _prompt_vars().items()}))
 
 
+def _shared_output_spec(limit_key='assist_max_reply_chars'):
+    """语音助手那套「输出约束」——网页对话共用同一份（用户定：同源，不许两处各写）。
+
+    变量展开与 `{max_chars}` 替换都在这里做：不替换的话模型看到的是字面占位符，
+    等于白写一条字数约束。字数上限按调用方给（助手用 assist_max_reply_chars，
+    网页对话用 llm_chat_max_reply_chars）。
+    """
+    spec = (_setting_direct('assist_prompt_suffix', '') or '').strip()
+    if not spec:
+        return ''
+    if _setting_direct('llm_prompt_vars', '1') in ('1', 'true', 'True', 'on'):
+        try:
+            spec = _expand_vars(spec)
+        except Exception:
+            pass
+    try:
+        mc = str(int(float(_setting_direct(limit_key, '200') or 200)))
+    except Exception:
+        mc = '200'
+    return spec.replace('{max_chars}', mc)[:2000]
+
+
 @app.route('/api/agent/chat', methods=['POST'])
 @login_required
 def api_agent_chat():
@@ -2210,26 +2233,12 @@ def api_agent_chat():
             except Exception:
                 pass
     base_prompt = base_prompt[:4000]
-    # 网页对话专属的「输出约束」：与共用基础设定分开存，改它不影响语音助手。
+    # 网页对话的「输出约束」= **语音助手那一份**（用户定的：网页对话就是助手的本地
+    # 非接收测试，设置必须同源）。以前它是独立的 llm_chat_suffix，结果同一套规则在两处
+    # 各写一遍、还写岔了（一处一位小数、一处两位），所以改成共用一份。
     # 注入位置固定在用户消息**末尾**——实测板端 1.5B 只可靠地理会最后一条消息
     # （作为最后一条 user 消息 4/4 遵守，放进 system 轮 0/4）。
-    chat_suffix = ''
-    if _setting_direct('llm_chat_suffix_on', '1') in ('1', 'true', 'True', 'on'):
-        chat_suffix = (_setting_direct('llm_chat_suffix', '') or '').strip()
-        if chat_suffix and _setting_direct('llm_prompt_vars', '1') in ('1', 'true', 'True', 'on'):
-            try:
-                chat_suffix = _expand_vars(chat_suffix)
-            except Exception:
-                pass
-    chat_suffix = chat_suffix[:2000]
-    # {max_chars} 来自语音助手那套文案，用户常整段粘过来。不替换的话模型看到的
-    # 是字面占位符，等于白写一条字数约束。
-    if chat_suffix:
-        try:
-            _mc = str(int(float(_setting_direct('llm_chat_max_reply_chars', '200') or 200)))
-        except Exception:
-            _mc = '200'
-        chat_suffix = chat_suffix.replace('{max_chars}', _mc)
+    chat_suffix = _shared_output_spec('llm_chat_max_reply_chars')
     # 总结轮要回灌的约束 = 基础设定 + 输出约束（两者都为空时不注入）
     spec_all = '\n'.join([x for x in (base_prompt, chat_suffix) if x])
     temperature = float(data.get('temperature', 0.3))
@@ -2363,6 +2372,14 @@ def api_agent_chat():
                                 'arguments': c['arguments'], 'result': res})
             for r in results:
                 collected.append({r['name']: r.get('result')})
+        # 收尾：把模型原文换成**将要念出来的那句**（数值口语化 + 缺「喵」补上），
+        # 前端用这一条替换气泡内容。网页对话是助手的本地非接收测试，屏幕上看到的
+        # 就该是发出去的那句话；模型原文一起带上，方便对照约束到底管不管用。
+        raw_text = (text or '').strip()
+        final_text = agent_service.ensure_meow(
+            tts_service.clean_for_tts(raw_text), spec_all) if raw_text else ''
+        if final_text:
+            yield _sse({'type': 'final', 'text': final_text, 'raw': raw_text})
         snap = meter_all.snapshot({'provider': cfg['provider'], 'model': model,
                                    'tools': ','.join(used), 'iters': len(used)})
         _llm_stat_record('agent', cfg, model, snap, ok=ok, note=note,
@@ -3837,8 +3854,12 @@ def _announce_text(now=None):
                                     * 100, 1)
     except Exception:
         pass
-    return announce_service.compose(flags, tpl, vals,
+    text = announce_service.compose(flags, tpl, vals,
                                     expand=lambda t, v=None: _expand_vars(t, v))
+    # 数值口语化：模板里写的是「电池电压{battery}伏特」，展开后是「12.2446伏特」，
+    # 而 Piper 不念小数点（实测会念成「十二万一千九百五十七」）。预览、播报日志、
+    # 语音日志里存的都该是**将要念出来的那句话**，所以在这里统一转成口语。
+    return speech_text.speakable(text)
 
 
 def _announce_busy_now():

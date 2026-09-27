@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>{% block title %}{{ site_title or 'ELF2 智能中继控制中心' }}{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css', v='20260930e') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css', v='20260930f') }}">
   {# 空 favicon：抑制浏览器自动请求 /favicon.ico 产生的 404（控制台不再有噪声） #}
   <link rel="icon" href="data:,">
   {% block head_extra %}{% endblock %}
@@ -67,7 +67,7 @@
      {% block app_js %}{% endblock %} 整个覆盖掉那个块 #}
   <script src="{{ url_for('static', filename='js/poll.js', v='20260930b') }}"></script>
   {% block app_js %}
-  <script src="{{ url_for('static', filename='js/app.js', v='20260930f') }}"></script>
+  <script src="{{ url_for('static', filename='js/app.js', v='20260930g') }}"></script>
   {% endblock %}
   {% block scripts %}{% endblock %}
 </body>

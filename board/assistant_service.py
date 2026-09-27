@@ -50,6 +50,8 @@ from pathlib import Path
 
 import numpy as np
 
+import agent_service
+
 LOG = '[ASSIST]'
 
 SAMPLE_RATE = 16000
@@ -884,6 +886,13 @@ class AssistantService:
             return
         limit = self.max_chars(st)
         speak, truncated = clamp_reply(reply, limit)
+        # 「句末加喵」这类关键标记不能赌模型（实测同一份约束下 2 次里丢 1 次），而它是
+        # 本项目验证工具注入是否生效的探针，所以出口确定性补上；约束里没写喵就不补。
+        if speak:
+            try:
+                speak = agent_service.ensure_meow(speak, self._spec_text(st))
+            except Exception:
+                pass
         if not speak:
             self.last_error = '回复清洗后为空'
             self._save_turn(kind, heard, reply, 'error', error=self.last_error, wake=wake,

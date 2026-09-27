@@ -235,6 +235,24 @@ SUMMARY_TAIL_ASSIST = ('直接给结论，不要说「根据数据」「根据�
 LOCAL_SPEC_CAP = 600
 
 
+def ensure_meow(text, spec='', mark='喵'):
+    """回复末尾缺关键标记就补上（**只在这条要求确实写在约束里时**才补）。
+
+    板端 1.5B 对「句末加喵」的遵守并不稳（实测同一份约束下会丢），而「喵」在本项目里
+    是**验证工具注入是否生效的探针**：掉了就看不出注入到底有没有工作。所以这里做确定性
+    兜底 —— 与数值口语化同一个思路：格式正确性不赌模型，放在出口保证。
+    """
+    s = str(text or '').strip()
+    if not s or mark not in str(spec or ''):
+        return s
+    if s.rstrip('。！？!?…~～. ').endswith(mark):
+        return s
+    m = re.search(r'[。！？!?…]+$', s)          # 插在句末标点前：「…喵。」
+    if m:
+        return s[:m.start()] + mark + s[m.start():]
+    return s + mark
+
+
 def summary_spec(spec='', provider='local', mode='auto', cap=1200):
     """决定总结轮要回灌多少「行为约束」，返回要回灌的文本（'' = 不回灌）。
 

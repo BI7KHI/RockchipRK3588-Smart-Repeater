@@ -16,6 +16,8 @@ from pathlib import Path
 
 import requests
 
+import speech_text
+
 log = logging.getLogger('tts_service')
 
 PIPER_DIR = Path('/opt/ai/piper')
@@ -85,6 +87,10 @@ def clean_for_tts(text):
     # 收敛重复标点与破折号：**** → 空、。。。 → 。、！！！ → ！
     s = re.sub(r'([,、。！？；：.!?;:])\1{1,}', r'\1', s)
     s = re.sub(r'[-—–]{2,}', '—', s)
+    # 数值口语化：Piper/espeak-ng 前端**不念小数点**（实测「12.1957伏特」合成出来再用
+    # 板端 ASR 反听是「121957伏特」），所以把它们改写成「十二点二伏特」这类中文口语。
+    # 这一步是所有朗读路径的总入口（助手回复、网页朗读、定时播报、试听），放这里兜底。
+    s = speech_text.speakable(s)
     # 空白收敛
     s = re.sub(r'[ \t]+', ' ', s)
     s = re.sub(r' *\n *', '\n', s)

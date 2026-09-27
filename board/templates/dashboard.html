@@ -269,25 +269,41 @@
     <summary><b>提示词约束（发送前注入）</b><span class="acc-sub" id="llm-constraint-sub">未设置</span></summary>
     <div class="card">
       <div class="row gap" style="align-items:center">
-        <label class="checkline"><input type="checkbox" id="llm-chat-suffix-on" checked> 启用注入</label>
-        <button class="btn primary" id="btn-save-chat-suffix">保存约束</button>
-        <button class="btn ghost" id="btn-fill-chat-suffix">填入推荐约束</button>
+        <button class="btn ghost" id="btn-fill-chat-suffix">查看建议排布</button>
+        <button class="btn ghost" id="btn-copy-spec">复制建议文本</button>
+        <label class="muted small" style="display:flex;align-items:center;gap:6px">
+          对话字数上限
+          <input type="number" id="llm-chat-max-chars" min="10" max="2000" step="10"
+                 style="width:92px" title="替换约束里的 {max_chars}；语音助手那边用 assist_max_reply_chars">
+        </label>
         <span class="muted small" id="llm-constraint-state">--</span>
       </div>
-      <textarea id="llm-chat-suffix" rows="5" spellcheck="false"
-                placeholder="这段文字会在每次发送时注入到本轮用户消息的末尾"></textarea>
+      <p class="muted small">
+        <b>网页对话与语音助手共用同一份输出约束</b>（它就是助手的本地非接收测试，设置必须同源）。
+        实际注入的内容如下，只读 —— 要改请去
+        <a href="{{ url_for('assistant_page') }}">中继语音助手</a> 页的「语音播报约束」。
+      </p>
+      <pre class="llm-spec-preview" id="llm-spec-preview">--</pre>
       <p class="muted small">
         注入位置固定在<b>末尾</b>，不是排版偏好：实测板端 1.5B 只可靠地理会最后一条消息
         —— 同一份约束作为最后一条用户消息遵守 <b>4/4</b>，放进 <code>system</code> 轮（其后
         还有用户消息）则 <b>0/4</b>。多项规则时也是<b>最后一条最受重视</b>，所以把最要紧的
-        规则写在最后一行。
+        格式规则写在最后一段。
       </p>
       <p class="muted small">
-        <b>这里只写「输出格式」要求</b>（口语化、不要 Markdown、全中文单位…）。
-        别把<b>角色设定</b>写进来——实测把语音助手那段「你是中继台的语音助手，
-        回复会被合成语音发射出去」粘到这里，模型会跑去答电台问候语而<b>无视刚查到的数据</b>。
-        角色设定请放到「设置 / 校准 → LLM 提示词注入」的<b>共用基础设定</b>里。
-        占位符 <code>{max_chars}</code> 会被替换成上面的回复字数上限。
+        <b>角色设定/通联范式不要写在约束里</b>：实测把范式（含「…这里是中继助手，抄收你的信号
+        为 59，喵」这种<b>完整例句</b>）放进约束后，1.5B 会<b>照抄例句</b>——问「电池电压是多少」
+        两次都答「早上好，友台，呼叫信号为59，喵」。人格与范式属于设定，请放到
+        <b>共用基础设定</b>，约束里只留格式规则；范式也请写成规则而不是可直接抄的答案。
+      </p>
+      <p class="muted small">
+        数值读法已由后端<b>确定性</b>处理（<code>speech_text.speakable</code>）：电压/温度/内存等
+        展开后会变成「十二点二四伏特」这种能念出来的口语，并保留两位小数。所以约束里
+        <b>不需要</b>再要求模型转换数字——实测它只会照抄，不会转换。
+      </p>
+      <p class="muted small">
+        旧的「网页对话专属约束」（<code>llm_chat_suffix</code>）<b>已停止注入</b>，内容仍留在
+        设置里没有删除；它要表达的规则请合并到语音助手那一份里，只留一份才不会再写岔。
       </p>
     </div>
   </details>

@@ -247,50 +247,45 @@
   // ---------------- 网页对话的提示词约束（发送前注入） ----------------
   // 注入位置固定在本轮用户消息**末尾**：实测板端 1.5B 只可靠地理会最后一条
   // 消息（作为最后一条 user 消息遵守 4/4，放进 system 轮则 0/4）。
-  const CHAT_SUFFIX_TEMPLATE = [
-    '只输出可直接朗读的纯口语，不要 Markdown、星号、井号、列表、emoji。',
+  //
+  // 约束**只有一份**：网页对话直接共用语音助手的「语音播报约束」（用户定的：网页对话
+  // 就是助手的本地非接收测试，设置同源，避免同一套规则两处各写一遍还写岔）。
+  // 所以这里不再有可编辑的输入框，只做「实际注入内容」的只读预览 + 建议排布。
+  const SPEC_SUGGEST = [
+    '只输出可直接朗读的纯口语：不要 Markdown、星号、井号、列表、emoji、书名号。',
+    '不超过 {max_chars} 字，一句答完，不复述问题、不解释过程。',
     '没数据就说不知道，不要编造。',
-    '（下面这条是注入自检用的标记，验证完可以删掉）回答的末尾必须原样加上「喵」这个字。',
+    '最后一行必须原样加上「喵」这个字。',
   ].join('\n');
 
-  function renderChatSuffixState() {
-    const on = $('#llm-chat-suffix-on');
-    const ta = $('#llm-chat-suffix');
-    const enabled = !on || on.checked;
-    const n = ((ta && ta.value) || '').trim().length;
-    const txt = !enabled ? '已关闭'
-      : (n ? ('已启用 · ' + n + ' 字 · 注入在用户消息末尾') : '未设置');
+  let specPreviewMode = 'current';
+
+  function renderConstraintState(spec) {
+    const n = (spec || '').trim().length;
+    const txt = n ? ('共用语音助手约束 · ' + n + ' 字 · 注入在用户消息末尾') : '未设置（语音助手约束为空）';
     const st = $('#llm-constraint-state');
     const sub = $('#llm-constraint-sub');
     if (st) st.textContent = txt;
     if (sub) sub.textContent = txt;
   }
 
+  function renderSpecPreview(spec) {
+    const pre = $('#llm-spec-preview');
+    if (!pre) return;
+    const body = specPreviewMode === 'suggest' ? SPEC_SUGGEST : (spec || '');
+    pre.textContent = body.trim() || '（当前没有注入任何约束）';
+    renderConstraintState(spec);
+  }
+
   async function loadChatSuffix() {
     try {
       const d = await apiFetch('/api/settings');
       const s = d.settings || d || {};
-      if ($('#llm-chat-suffix')) $('#llm-chat-suffix').value = s.llm_chat_suffix || '';
-      if ($('#llm-chat-suffix-on')) {
-        $('#llm-chat-suffix-on').checked = String(s.llm_chat_suffix_on ?? '1') !== '0';
-      }
-      renderChatSuffixState();
+      window.__ELF2_ASSIST_SPEC = s.assist_prompt_suffix || '';
+      const mc = $('#llm-chat-max-chars');
+      if (mc) mc.value = s.llm_chat_max_reply_chars || '200';
+      renderSpecPreview(window.__ELF2_ASSIST_SPEC);
     } catch (e) { /* 设置读不到不该挡住对话本身 */ }
-  }
-
-  async function saveChatSuffix() {
-    try {
-      await apiFetch('/api/settings', {
-        method: 'POST',
-        body: JSON.stringify({
-          llm_chat_suffix: ($('#llm-chat-suffix') && $('#llm-chat-suffix').value) || '',
-          llm_chat_suffix_on: ($('#llm-chat-suffix-on') && $('#llm-chat-suffix-on').checked)
-            ? '1' : '0',
-        }),
-      });
-      showToast('提示词约束已保存（下一次发送即生效）', 'success');
-      renderChatSuffixState();
-    } catch (e) { showToast(e.message, 'error'); }
   }
 
   async function saveCalibration() {
@@ -2672,6 +2667,23 @@
             answer += ev.content || '';
             el.textContent = answer;
             llmRateAdd(ev.content || '');
+          } else if (ev.type === 'final') {
+            // 服务端把模型原文换成了「将要念出来的那句」（数值口语化 + 缺喵补上）。
+            // 网页对话是语音助手的本地测试，屏幕上看到的就是要发射的那句话。
+            answer = ev.text || answer;
+            el.textContent = answer;
+            if (ev.raw && ev.raw !== answer) {
+              const d = document.createElement('details');
+              d.className = 'chat-raw';
+              const sm = document.createElement('summary');
+              sm.textContent = '模型原文';
+              const tx = document.createElement('div');
+              tx.className = 'chat-raw-text';
+              tx.textContent = ev.raw;
+              d.appendChild(sm);
+              d.appendChild(tx);
+              el.appendChild(d);
+            }
           } else if (ev.type === 'tool_start') {
             addToolEvent('start', ev.name, JSON.stringify(ev.arguments || {}));
             if ($('#llm-tools-live')) $('#llm-tools-live').textContent = '技能：' + ev.name;
@@ -2992,16 +3004,36 @@
     bindPttSelfTest();
     $('#btn-cal-design')?.addEventListener('click', fillDesignCal);
     $('#btn-save-energy')?.addEventListener('click', saveEnergySettings);
-    $('#btn-save-chat-suffix')?.addEventListener('click', saveChatSuffix);
     $('#btn-fill-chat-suffix')?.addEventListener('click', () => {
-      const ta = $('#llm-chat-suffix');
-      if (!ta) return;
-      ta.value = CHAT_SUFFIX_TEMPLATE;
-      renderChatSuffixState();
-      showToast('已填入推荐约束，确认后点「保存约束」', 'success');
+      specPreviewMode = specPreviewMode === 'suggest' ? 'current' : 'suggest';
+      const b = $('#btn-fill-chat-suffix');
+      if (b) b.textContent = specPreviewMode === 'suggest' ? '看当前注入内容' : '查看建议排布';
+      renderSpecPreview(window.__ELF2_ASSIST_SPEC || '');
     });
-    $('#llm-chat-suffix')?.addEventListener('input', renderChatSuffixState);
-    $('#llm-chat-suffix-on')?.addEventListener('change', renderChatSuffixState);
+    $('#btn-copy-spec')?.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(SPEC_SUGGEST);
+        showToast('建议约束已复制，粘贴到「中继语音助手 → 语音播报约束」', 'success');
+      } catch (e) {
+        const pre = $('#llm-spec-preview');
+        if (pre) { specPreviewMode = 'suggest'; renderSpecPreview(window.__ELF2_ASSIST_SPEC || ''); }
+        showToast('浏览器拒绝写剪贴板，已显示在下方，请手动复制', 'error');
+      }
+    });
+    $('#llm-chat-max-chars')?.addEventListener('change', async (e) => {
+      const v = String(parseInt(e.target.value, 10) || 200);
+      try {
+        await apiFetch('/api/settings', {
+          method: 'POST',
+          body: JSON.stringify({ llm_chat_max_reply_chars: v }),
+        });
+        e.target.value = v;
+        window.__ELF2_ASSIST_SPEC = (await apiFetch('/api/settings')).settings
+          ?.assist_prompt_suffix || window.__ELF2_ASSIST_SPEC;
+        renderSpecPreview(window.__ELF2_ASSIST_SPEC || '');
+        showToast('对话字数上限已保存为 ' + v, 'success');
+      } catch (err) { showToast(err.message, 'error'); }
+    });
     bindVoiceInput();
     $('#btn-save-prompt')?.addEventListener('click', saveLlmAgentSettings);
     $('#btn-save-agent')?.addEventListener('click', saveLlmAgentSettings);
