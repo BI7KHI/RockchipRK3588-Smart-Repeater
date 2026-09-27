@@ -26,7 +26,6 @@
       <div class="nav-bar">
         <button class="tab-btn active" data-tab="overview" data-icon="📊" data-short="总览"><span class="tl">总览</span></button>
         <button class="tab-btn" data-tab="intercom" data-icon="🎙" data-short="对讲"><span class="tl">网页对讲</span></button>
-        <button class="tab-btn" data-tab="llm" data-icon="💬" data-short="对话"><span class="tl">LLM 对话</span></button>
         <button class="tab-btn" data-tab="camera" data-icon="📷" data-short="监控"><span class="tl">摄像头</span></button>
         {# 仅手机出现的「更多」入口：桌面 display:none，不参与桌面布局 #}
         <button class="nav-more" type="button" data-icon="☰" data-short="更多"
@@ -67,7 +66,7 @@
      {% block app_js %}{% endblock %} 整个覆盖掉那个块 #}
   <script src="{{ url_for('static', filename='js/poll.js', v='20260930b') }}"></script>
   {% block app_js %}
-  <script src="{{ url_for('static', filename='js/app.js', v='20260930h') }}"></script>
+  <script src="{{ url_for('static', filename='js/app.js', v='20260930i') }}"></script>
   {% endblock %}
   {% block scripts %}{% endblock %}
 </body>

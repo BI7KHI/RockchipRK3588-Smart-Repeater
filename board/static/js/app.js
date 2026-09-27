@@ -384,7 +384,6 @@
       showToast('LLM / 页面设置已保存', 'success');
       clearDirty('#llm-save-state');
       loadSettings();
-      loadProviders();
     } catch (e) { showToast(e.message, 'error'); }
   }
 
@@ -541,20 +540,9 @@
     } catch (e) { showToast(e.message, 'error'); }
   }
 
-  // ---------------- LLM chat ----------------
-
-  async function loadProviders() {
-    try {
-      const data = await apiFetch('/api/chat/providers');
-      const sel = $('#llm-provider');
-      sel.value = data.current || 'local';
-      const cfg = data.providers[sel.value];
-      $('#llm-model').value = cfg ? cfg.model : '';
-      $('#llm-config-hint').textContent = cfg ? `${cfg.base_url || '未配置'} · ${cfg.model}` : '';
-    } catch (e) {
-      showToast(e.message, 'error');
-    }
-  }
+  // ---------------- LLM ----------------
+  // 「LLM 对话」页与它的提供方下拉已删除：对话并入「中继语音助手 → 文本对话」，
+  // 提供方/模型/Base URL/Key 统一在「设置 / 校准 → LLM / 页面设置」里改（loadSettings）。
 
   // ---------------- TTS ----------------
   // 语音音色 / ICAO / 流式朗读策略的唯一来源是「设置 / 校准」页。
@@ -2390,8 +2378,6 @@
     $('#btn-add-user')?.addEventListener('click', addUser);
     $('#btn-save-settings')?.addEventListener('click', saveLlmSettings);
     $('#btn-change-pass')?.addEventListener('click', changeOwnPassword);
-    $('#btn-llm-refresh')?.addEventListener('click', loadProviders);
-    $('#llm-provider')?.addEventListener('change', loadProviders);
     $('#set-tts-icao-voice')?.addEventListener('change', (e) => {
       if (e.target) e.target.dataset.saved = e.target.value || '';
     });
@@ -2526,7 +2512,6 @@
     initAccordions();
     initEvents();
     loadStatus();
-    loadProviders();
     loadTtsProviders();
     loadReservedPages();
     loadCameraStatus();

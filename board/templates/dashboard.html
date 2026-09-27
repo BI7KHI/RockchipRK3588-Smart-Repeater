@@ -251,35 +251,6 @@
   </div>
 </section>
 
-<!-- LLM 提供方（对话测试已并入中继语音助手页） -->
-<section id="tab-llm" class="tab-panel">
-  <div class="panel-head">
-    <h2>LLM 提供方</h2>
-    <div class="row gap">
-      <select id="llm-provider">
-        <option value="local">本地模型（RKNPU / llama.cpp）</option>
-        <option value="external">外部 API</option>
-      </select>
-      <input id="llm-model" placeholder="模型名称">
-      <button class="btn ghost" id="btn-llm-refresh">刷新配置</button>
-    </div>
-  </div>
-  <div class="card">
-    <div class="card-title">对话测试已并入中继语音助手</div>
-    <p class="muted small">
-      原来这里的「LLM 对话」与它的提示词约束，本质是<b>语音助手的本地非接收测试</b>：
-      两条链路共用同一份提示词、同一条技能链路、同一套数值口语化出口。为避免同一套规则
-      两处各写一遍，它已整体并入
-      <a href="{{ url_for('assistant_page') }}">中继语音助手</a> 页的<b>「文本对话」</b>页签
-      （含按住说话、技能调用、模型原文对照与网页试听，全程不发射）。
-    </p>
-    <p class="muted small">
-      提示词（共用基础设定 + 语音播报约束）与回复字数上限收在同页「设置」里，
-      Agent 技能开关与生成速率统计在「设置 / 校准」页；本页只保留提供方与模型选择。
-    </p>
-  </div>
-</section>
-
 <!-- 摄像头 -->
 <section id="tab-camera" class="tab-panel cam-modern">
   <div class="panel-head">
