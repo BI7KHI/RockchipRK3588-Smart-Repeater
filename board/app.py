@@ -53,6 +53,8 @@ import voice_service
 import assistant_service
 import aprs_service
 import energy_service
+import announce_service
+import weather_api
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / 'relay.db'
@@ -485,6 +487,9 @@ def _set_default_settings(db):
         # 网页「LLM 对话」的输出约束：对话前注入，固定落在用户消息末尾
         'llm_chat_suffix': '',
         'llm_chat_suffix_on': '1',
+        # 约束里 {max_chars} 的取值。该占位符来自语音助手的文案，用户常把那段
+        # 原样粘到网页对话里；不替换的话模型会看到字面的「不超过 {max_chars} 字」。
+        'llm_chat_max_reply_chars': '200',
         'agent_enabled': '1',
         'agent_max_iters': '3',
         'agent_tools': '',
@@ -641,6 +646,27 @@ def _set_default_settings(db):
         'reboot_times': '',
         'reboot_notice_sec': '30',
         'reboot_text': '中继台即将重启，请稍候。',
+        # 定时播报：整点播报，三类内容各自独立开关 + 各自一段可编辑模板。
+        # 模板变量由 _expand_vars 展开（含 {time_cn} 中文时间与 {wx_*} 天气）。
+        'announce_enabled': '0',
+        'announce_hours': '8,10,12,14,16,18,20',
+        'announce_mod_time': '1',
+        'announce_mod_status': '1',
+        'announce_mod_weather': '0',
+        'announce_text_time': announce_service.DEFAULTS['time'],
+        'announce_text_status': announce_service.DEFAULTS['status'],
+        'announce_text_weather': announce_service.DEFAULTS['weather'],
+        'announce_quiet_hours': '',
+        # 0 = 信道忙就立即取消本次播报（作者选定）；>0 则允许最多等这么多秒
+        'announce_busy_wait': '0',
+        # 天气 API。默认 Open-Meteo：**无需注册、无需 key**，填经纬度即可用；
+        # 换和风天气要填控制台里那个项目专属 API Host + API Key。
+        'weather_api_provider': 'openmeteo',
+        'weather_api_key': '',
+        'weather_api_host': '',
+        # 留空则回落到 APRS 的本站坐标（那个位置已经在 APRS 页填过了，不必填两遍）
+        'weather_lat': '',
+        'weather_lon': '',
     }
     for k, v in defaults.items():
         db.execute('INSERT OR IGNORE INTO settings(key, value) VALUES(?,?)', (k, v))
@@ -1263,7 +1289,7 @@ def api_settings_get():
         'record_auto_play', 'site_title',
         'tts_provider', 'tts_local_voice', 'tts_en_voice', 'tts_icao', 'tts_icao_voice', 'tts_auto_speak',
         'llm_system_prompt', 'llm_system_prompt_on', 'llm_prompt_vars',
-        'llm_chat_suffix', 'llm_chat_suffix_on',
+        'llm_chat_suffix', 'llm_chat_suffix_on', 'llm_chat_max_reply_chars',
         'agent_enabled', 'agent_max_iters', 'agent_tools',
         'assist_enabled',
         'assist_wake_words',
@@ -1319,6 +1345,13 @@ def api_settings_get():
         'aprs_map_layers', 'aprs_map_cache_mb', 'aprs_track_points',
         'reboot_enabled', 'reboot_times', 'reboot_notice_sec', 'reboot_text',
         'energy_log_enabled', 'energy_sample_sec', 'energy_retention_days',
+        # 定时播报
+        'announce_enabled', 'announce_hours', 'announce_mod_time',
+        'announce_mod_status', 'announce_mod_weather', 'announce_text_time',
+        'announce_text_status', 'announce_text_weather', 'announce_quiet_hours',
+        'announce_busy_wait',
+        # 天气 API（key 不回传，只回传是否已配置）
+        'weather_api_provider', 'weather_api_host', 'weather_lat', 'weather_lon',
     ]
     out = {k: get_setting(k) for k in keys}
     out['local_api_key_set'] = bool(out.get('local_api_key'))
@@ -1362,6 +1395,24 @@ def api_settings_set():
             and 0 <= int(x.split(':')[0]) <= 23 and 0 <= int(x.split(':')[1]) <= 59)[:120],
         'reboot_notice_sec': lambda v: str(max(0, min(600, int(float(v))))),
         'reboot_text': lambda v: (str(v).strip()[:80] or '中继台即将重启，请稍候。'),
+        # 定时播报
+        'announce_enabled': _bool_caster,
+        'announce_hours': lambda v: announce_service.hours_to_str(
+            announce_service.parse_hours(v)),
+        'announce_mod_time': _bool_caster,
+        'announce_mod_status': _bool_caster,
+        'announce_mod_weather': _bool_caster,
+        'announce_text_time': lambda v: str(v)[:300],
+        'announce_text_status': lambda v: str(v)[:300],
+        'announce_text_weather': lambda v: str(v)[:300],
+        'announce_quiet_hours': lambda v: str(v).strip()[:80],
+        'announce_busy_wait': lambda v: str(int(max(0, min(120, int(float(v) or 0))))),
+        # 天气 API
+        'weather_api_provider': lambda v: (v if v in weather_api.PROVIDERS else 'off'),
+        'weather_api_key': lambda v: str(v).strip()[:80],
+        'weather_api_host': lambda v: str(v).strip()[:120],
+        'weather_lat': lambda v: str(v).strip()[:20],
+        'weather_lon': lambda v: str(v).strip()[:20],
         'tts_provider': lambda v: 'local',   # 外部 TTS 已下线，强制 local
         'llm_system_prompt': lambda v: str(v)[:4000],
         'llm_system_prompt_on': lambda v: '1' if str(v) in ('1', 'true', 'True', 'on') else '0',
@@ -1369,6 +1420,7 @@ def api_settings_set():
         # 网页对话的输出约束：与 llm_system_prompt 同样的长度上限
         'llm_chat_suffix': lambda v: str(v)[:4000],
         'llm_chat_suffix_on': lambda v: '1' if str(v) in ('1', 'true', 'True', 'on') else '0',
+        'llm_chat_max_reply_chars': lambda v: str(int(max(10, min(2000, int(float(v)))))),
         'agent_enabled': lambda v: '1' if str(v) in ('1', 'true', 'True', 'on') else '0',
         'agent_max_iters': lambda v: str(max(1, min(5, int(float(v))))),
         'agent_tools': lambda v: ','.join(
@@ -1675,11 +1727,18 @@ def _prompt_vars():
     return v
 
 
-def _expand_vars(text):
-    """把 {var} 换成实时值；未知变量原样保留。"""
+def _expand_vars(text, extra=None):
+    """把 {var} 换成实时值；未知变量原样保留。
+
+    `extra` 用来叠加**非全局**变量（定时播报要的 {time_cn} 中文时间、天气的
+    {wx_temp} 等），这样播报模板能复用同一套展开器，而不必把天气塞进全局
+    变量表——那会让所有提示词都多出一堆无关变量。
+    """
     if not text:
         return ''
     vals = _prompt_vars()
+    if extra:
+        vals.update(extra)
 
     def rep(m):
         val = vals.get(m.group(1))
@@ -1739,7 +1798,9 @@ def _agent_ctx():
     正常输出（24~31s），而 ≈4.7 ms/字符意味着工具结果每多 100 字就多 0.47 s
     prefill。所以仍旧要「只给模型需要的数值，不要整段 JSON」：理由换了，结论一样。
     """
-    def get_weather():
+    def get_wind():
+        """本地气象站的**风速风向**。注意别再叫 get_weather —— 那个名字会让模型
+        把「今天天气怎么样」也路由到这里（实测），预报在 get_forecast。"""
         st = weather_service_instance.realtime()
         return {'wind_ms': st.get('last_speed'), 'running': bool(st.get('running')),
                 'error': (st.get('last_error') or '')[:40]}
@@ -1801,6 +1862,26 @@ def _agent_ctx():
         now = datetime.now()
         return {'datetime': now.strftime('%Y-%m-%d %H:%M:%S'),
                 'weekday': '星期' + '一二三四五六日'[now.weekday()]}
+
+    def get_forecast():
+        """联网天气预报。本地气象站测不到预报，所以这一项必须走天气 API。
+
+        取不到时返回 error 让模型如实说「查不到」，不要编 —— 天气是最容易被
+        编造的一类数据。变量名与播报模板保持一致（{wx_*}）。
+        """
+        try:
+            w = _weather_now()
+        except Exception as e:
+            return {'error': '%s: %s' % (type(e).__name__, e)}
+        if not w.get('ok'):
+            return {'error': w.get('error') or '天气 API 不可用'}
+        keep = ('condition', 'temp_c', 'temp_max', 'temp_min', 'humidity',
+                'wind_ms', 'precip_day_mm', 'precip_mm', 'pressure_hpa',
+                'day_condition', 'source', 'fetched_at')
+        out = {k: w.get(k) for k in keep if w.get(k) is not None}
+        if w.get('day_condition') and w.get('day_condition') != w.get('condition'):
+            out['today_condition'] = w.get('day_condition')
+        return out
 
     def get_home_position():
         """本站自身位置。坐标没配就问不出来——必须返回一句人话，别给空字典。"""
@@ -1865,11 +1946,12 @@ def _agent_ctx():
         play_audio_async(out, ptt=True)
         return {'spoken': body[:30], 'file': name}
 
-    return {'get_weather': get_weather, 'get_rain': get_rain, 'get_power': get_power,
+    return {'get_wind': get_wind, 'get_rain': get_rain, 'get_power': get_power,
             'get_system': get_system, 'get_radio': get_radio, 'get_camera': get_camera,
             'get_time': get_time, 'get_home_position': get_home_position,
             'get_station_position': get_station_position,
-            'get_nearby_stations': get_nearby_stations, 'speak': speak}
+            'get_nearby_stations': get_nearby_stations,
+            'get_forecast': get_forecast, 'speak': speak}
 
 
 def _llm_headers(key):
@@ -2134,6 +2216,14 @@ def api_agent_chat():
             except Exception:
                 pass
     chat_suffix = chat_suffix[:2000]
+    # {max_chars} 来自语音助手那套文案，用户常整段粘过来。不替换的话模型看到的
+    # 是字面占位符，等于白写一条字数约束。
+    if chat_suffix:
+        try:
+            _mc = str(int(float(_setting_direct('llm_chat_max_reply_chars', '200') or 200)))
+        except Exception:
+            _mc = '200'
+        chat_suffix = chat_suffix.replace('{max_chars}', _mc)
     # 总结轮要回灌的约束 = 基础设定 + 输出约束（两者都为空时不注入）
     spec_all = '\n'.join([x for x in (base_prompt, chat_suffix) if x])
     temperature = float(data.get('temperature', 0.3))
@@ -2352,6 +2442,14 @@ aprs_service_instance.configure(
 @login_required
 def voice_log_page():
     return render_template('voice_log.html', user=session.get('username'),
+                           role=session.get('role'))
+
+
+@app.route('/broadcast')
+@login_required
+def broadcast_page():
+    """定时播报：整点播报时间 / 中继台状态 / 气象。"""
+    return render_template('broadcast.html', user=session.get('username'),
                            role=session.get('role'))
 
 
@@ -3547,7 +3645,14 @@ def _reboot_helper(args=None):
 
 
 def _reboot_announce(text):
-    """阻塞播报（AUX + PTT），返回 (ok, err)。重启前通告必须等它播完。"""
+    """阻塞播报（AUX + PTT），返回 (ok, err)。重启前通告必须等它播完。
+
+    **信道被占用时放弃播报，但不停下重启**：重启是既定动作，而盖着别人的通话
+    念通告是更严重的问题。这条占用检查是后补的 —— 此前该路径完全没有判断，
+    正在通联的人会被直接盖掉。
+    """
+    if _announce_busy_now():
+        return False, '信道正被占用，跳过重启前播报'
     try:
         path = tts_service.synthesize_multilingual(
             text,
@@ -3604,6 +3709,237 @@ def _reboot_scheduler():
 
 
 threading.Thread(target=_reboot_scheduler, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# 定时播报：整点播报北京时间 / 中继台状态 / 气象
+# ---------------------------------------------------------------------------
+# 安全逻辑的立场（作者选定）：**信道被占用就立即取消本次播报**，不排队、不盖台。
+# 这不是保守，而是中继台的基本礼貌 —— 盖掉一次正在进行的通联，比少播一次严重得多。
+ANNOUNCE_GRACE = 90          # 整点后只补播这么久，服务重启不会把今天错过的整点全补出来
+_announce_fired = set()      # 已播过的 'YYYY-MM-DD HH'
+_announce_log = deque(maxlen=40)
+
+
+def _truthy(key, default='0'):
+    return str(_setting_direct(key, default)) in ('1', 'true', 'True', 'on')
+
+
+def _weather_cfg():
+    """天气 API 配置。经纬度留空时**回落到 APRS 的本站坐标** —— 那个位置用户
+    已经在 APRS 页填过了，没必要让他填两遍。"""
+    lat = ((_setting_direct('weather_lat', '') or '').strip()
+           or (_setting_direct('aprs_lat', '') or '').strip())
+    lon = ((_setting_direct('weather_lon', '') or '').strip()
+           or (_setting_direct('aprs_lon', '') or '').strip())
+    return {
+        'provider': (_setting_direct('weather_api_provider', 'openmeteo')
+                     or 'openmeteo').strip(),
+        'key': (_setting_direct('weather_api_key', '') or '').strip(),
+        'host': (_setting_direct('weather_api_host', '') or '').strip(),
+        'lat': lat, 'lon': lon,
+    }
+
+
+def _weather_now(ttl=600, force=False):
+    """取天气（带 TTL 缓存，整点播报不该每次都打网络）。失败返回 ok=False。"""
+    if force:
+        weather_api.reset_cache()
+    c = _weather_cfg()
+    return weather_api.get_weather(c['provider'], c['lat'], c['lon'],
+                                   api_host=c['host'], api_key=c['key'], ttl=ttl)
+
+
+def _announce_flags():
+    return {'time': _truthy('announce_mod_time', '1'),
+            'status': _truthy('announce_mod_status', '1'),
+            'weather': _truthy('announce_mod_weather', '0')}
+
+
+def _announce_text(now=None):
+    """组装本次要播的文本。只拼装 —— 不合成、不发射，便于「预览」按钮复用。"""
+    now = now or datetime.now()
+    flags = _announce_flags()
+    tpl = {}
+    for k in ('time', 'status', 'weather'):
+        tpl[k] = ((_setting_direct('announce_text_' + k, '') or '').strip()
+                  or announce_service.DEFAULTS[k])
+    w = _weather_now() if flags.get('weather') else {}
+    vals = dict(_prompt_vars())
+    vals.update(announce_service.clock_vars(now))
+    vals.update(weather_api.weather_vars(w))
+    # 状态播报常要念负载与运行时长，_prompt_vars 里没有，这里补上
+    try:
+        vals['load1'] = round(os.getloadavg()[0], 2)
+        vals['uptime_h'] = round(read_uptime() / 3600.0, 1)
+    except Exception:
+        pass
+    try:
+        mem = read_memory() or {}
+        vals['mem_percent'] = round(mem.get('used', 0) / max(1, mem.get('total', 1))
+                                    * 100, 1)
+    except Exception:
+        pass
+    return announce_service.compose(flags, tpl, vals,
+                                    expand=lambda t, v=None: _expand_vars(t, v))
+
+
+def _announce_busy_now():
+    """信道是否正被占用。直接复用助手的判据：BUSY 有效 / PTT 压着 / 有播放进程。"""
+    try:
+        return bool(_assist_channel_busy())
+    except Exception:
+        return False
+
+
+def _announce_play(text, dry=False):
+    """受控播报。
+
+    dry=True：只合成并在本地放音、**不拉 PTT**（电台不发射），用于试听。
+    否则先查禁发时段与信道占用；占用则按 announce_busy_wait 处理，
+    默认 0 秒 = **立即取消本次**。
+    """
+    if not str(text or '').strip():
+        return {'ok': False, 'skipped': True, 'error': '没有启用任何播报内容'}
+    if not dry:
+        qh = (_setting_direct('announce_quiet_hours', '') or '').strip()
+        if qh and announce_service.in_quiet_hours(qh):
+            return {'ok': False, 'skipped': True,
+                    'error': '处于禁发时段（%s）' % qh}
+        try:
+            wait = max(0, int(float(_setting_direct('announce_busy_wait', '0') or 0)))
+        except Exception:
+            wait = 0
+        t0 = time.time()
+        while _announce_busy_now():
+            if wait <= 0 or (time.time() - t0) >= wait:
+                return {'ok': False, 'skipped': True,
+                        'error': '信道正被占用，已取消本次播报'}
+            time.sleep(0.2)
+    try:
+        path = tts_service.synthesize_multilingual(
+            text,
+            _setting_direct('tts_local_voice', 'zh_CN-huayan-medium'),
+            en_voice=(_setting_direct('tts_en_voice', '') or None),
+            icao=str(_setting_direct('tts_icao', '1')) in ('1', 'true', 'True', 'on'),
+            icao_voice=(_setting_direct('tts_icao_voice', '') or None))
+    except Exception as e:
+        return {'ok': False, 'error': '合成失败：%s' % e}
+    # 合成要一两秒，期间信道可能被别人占上：按 PTT 前再确认一次
+    if not dry and _announce_busy_now():
+        return {'ok': False, 'skipped': True,
+                'error': '合成期间信道被占用，已取消本次播报'}
+    if not dry:
+        _ptt_retain()
+    try:
+        proc = _play_file_locked(path)
+        if proc:
+            try:
+                proc.wait(timeout=90)
+            except Exception:
+                _stop_proc(proc)
+    finally:
+        if not dry:
+            _ptt_release()
+    return {'ok': True, 'text': text, 'dry': bool(dry), 'wav': str(path)}
+
+
+def _announce_record(hour_key, text, res):
+    """播报留痕。成功与**取消**都要记 —— 否则「到底播没播、为什么没播」
+    只能靠翻日志猜，而取消是这套安全逻辑的常态结果。"""
+    row = {'ts': now_iso(), 'hour': hour_key or '',
+           'ok': bool(res.get('ok')), 'skipped': bool(res.get('skipped')),
+           'text': str(text or '')[:160],
+           'error': str(res.get('error') or '')[:160],
+           'dry': bool(res.get('dry'))}
+    _announce_log.appendleft(row)
+    print('[ANNOUNCE] %s %s %s%s' % (
+        hour_key or '-', 'OK' if row['ok'] else ('SKIP' if row['skipped'] else 'FAIL'),
+        (row['error'] + ' ') if row['error'] else '', row['text'][:60]), flush=True)
+    return row
+
+
+def _announce_scheduler():
+    time.sleep(25)             # 等服务起来，别在启动风暴里抢资源
+    while True:
+        try:
+            if _truthy('announce_enabled', '0'):
+                now = datetime.now()
+                hours = announce_service.parse_hours(
+                    _setting_direct('announce_hours', ''))
+                key = announce_service.due_hour(now, hours, _announce_fired,
+                                                grace=ANNOUNCE_GRACE)
+                if key:
+                    # 先记已播再干活：中途抛异常也不会在同一分钟内反复重试
+                    _announce_fired.add(key)
+                    text = _announce_text(now)
+                    _announce_record(key, text, _announce_play(text))
+                today = now.strftime('%Y-%m-%d')
+                for k in [k for k in _announce_fired if not k.startswith(today)]:
+                    _announce_fired.discard(k)
+        except Exception as e:
+            print('[ANNOUNCE] 调度异常: %s' % e, flush=True)
+        time.sleep(20)
+
+
+threading.Thread(target=_announce_scheduler, daemon=True, name='announce').start()
+
+
+@app.route('/api/announce/status')
+@login_required
+def api_announce_status():
+    """定时播报状态：开关、整点表、模块开关、预览文本、最近记录。"""
+    st = _setting_direct
+    wc = _weather_cfg()
+    return api_ok(
+        enabled=_truthy('announce_enabled', '0'),
+        hours=list(announce_service.parse_hours(st('announce_hours', ''))),
+        flags=_announce_flags(),
+        templates={k: (st('announce_text_' + k, '') or announce_service.DEFAULTS[k])
+                   for k in ('time', 'status', 'weather')},
+        defaults=dict(announce_service.DEFAULTS),
+        quiet_hours=(st('announce_quiet_hours', '') or ''),
+        busy_wait=(st('announce_busy_wait', '0') or '0'),
+        preview=_announce_text(),
+        busy_now=_announce_busy_now(),
+        grace=ANNOUNCE_GRACE,
+        log=list(_announce_log),
+        weather={'provider': wc['provider'], 'host': wc['host'],
+                 'lat': wc['lat'], 'lon': wc['lon'],
+                 'lat_from_aprs': not (st('weather_lat', '') or '').strip(),
+                 'key_set': bool(wc['key'])},
+    )
+
+
+@app.route('/api/announce/preview')
+@login_required
+def api_announce_preview():
+    """只组装文本，不合成不发射 —— 调模板时用它，秒回。"""
+    return api_ok(text=_announce_text())
+
+
+@app.route('/api/announce/run', methods=['POST'])
+@login_required
+@admin_required
+def api_announce_run():
+    """立即播报一次。默认走完整安全逻辑（会真发射）；dry=true 只本地试听。"""
+    data = request.get_json(silent=True) or {}
+    dry = bool(data.get('dry'))
+    text = (data.get('text') or '').strip() or _announce_text()
+    audit('announce_run', 'dry=%s %s' % (dry, text[:60]))
+    row = _announce_record('manual', text, _announce_play(text, dry=dry))
+    return api_ok(**row)
+
+
+@app.route('/api/weather/api/test')
+@login_required
+@admin_required
+def api_weather_api_test():
+    """实测天气 API 连通性（强制绕过缓存）。板端能不能出网、key 对不对，
+    只能真打一次才算数 —— 这个按钮就是干这个的。"""
+    w = _weather_now(force=True)
+    return api_ok(ok=bool(w.get('ok')), weather=w,
+                  vars=weather_api.weather_vars(w))
 
 
 @app.route('/api/reboot/check')

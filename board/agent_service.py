@@ -21,7 +21,7 @@ import time
 # ---------------------------------------------------------------------------
 TOOL_SPECS = [
     {
-        'name': 'get_weather',
+        'name': 'get_wind',
         'title': '风速风向',
         'desc': '读取当前风速、风向与气象采集服务状态（含最后一次 Modbus 原始报文、错误计数）。注意：风速风向属于本工具，与降雨量无关。',
         'params': {},
@@ -92,6 +92,14 @@ TOOL_SPECS = [
             'km': {'required': False, 'desc': '搜索半径公里，默认 50'},
             'limit': {'required': False, 'desc': '最多返回几个，默认 5，最大 20'},
         },
+        'action': False,
+    },
+    {
+        'name': 'get_forecast',
+        'title': '天气预报气温湿度',
+        'desc': ('读取联网天气预报：天气现象、当前气温、今日最高最低气温、湿度、'
+                 '风速、今日降水量。本地气象站只能测当下，预报要问这个工具。'),
+        'params': {},
         'action': False,
     },
     {
@@ -189,6 +197,8 @@ DATA_KEYWORDS = (
     # 位置类：命中就走一轮工具，否则模型会凭想象编坐标
     '位置', '经纬度', '坐标', '在哪', '哪里', '哪儿', '附近', '距离', '方位',
     '多远', '呼号', 'aprs', '定位', 'gps', '导航', '引导',
+    # 预报类：本地气象站测不到预报，必须走联网天气 API
+    '预报', '气温', '最高温', '最低温', '多云', '晴天', '阴天', '会不会下雨',
 )
 
 
@@ -371,8 +381,16 @@ ALIASES = {
     'get_cpu_temperature': 'get_system', 'get_temperature': 'get_system',
     'get_temp': 'get_system', 'get_cpu': 'get_system', 'get_cpu_temp': 'get_system',
     'get_system_status': 'get_system', 'get_load': 'get_system',
-    'get_wind_speed': 'get_weather', 'get_wind': 'get_weather',
-    'get_weather_data': 'get_weather', 'get_weather_status': 'get_weather',
+    'get_wind_speed': 'get_wind', 'get_wind_dir': 'get_wind',
+    # 旧名 get_weather 保留为别名：它只读**本地**风速风向，叫 weather 会让模型
+    # 把「今天天气怎么样」也路由到它（实测：改名后同一问题才落到 get_forecast）。
+    'get_weather': 'get_wind', 'get_weather_data': 'get_wind',
+    'get_weather_status': 'get_wind', 'get_wind': 'get_wind',
+    'get_meteorology': 'get_wind',
+    # 预报类
+    'get_weather_forecast': 'get_forecast', 'get_forecast_weather': 'get_forecast',
+    'weather_forecast': 'get_forecast', 'get_today_weather': 'get_forecast',
+    'get_temperature_forecast': 'get_forecast', 'get_forecast_temperature': 'get_forecast',
     'get_rainfall': 'get_rain', 'get_rain_data': 'get_rain',
     'get_precipitation': 'get_rain',
     'get_ptt': 'get_radio', 'get_ptt_status': 'get_radio',
@@ -387,7 +405,8 @@ ALIASES = {
 KEYWORDS = (
     (('battery', 'pv', 'voltage', 'volt', 'power', 'electric'), 'get_power'),
     (('temp', 'cpu', 'load', 'memory', 'disk', 'system', 'uptime'), 'get_system'),
-    (('wind', 'weather', 'meteor'), 'get_weather'),
+    (('wind', 'meteor'), 'get_wind'),
+    (('forecast',), 'get_forecast'),
     (('rain', 'precip'), 'get_rain'),
     (('ptt', 'radio', 'transmit', 'tx'), 'get_radio'),
     (('camera', 'video', 'record'), 'get_camera'),
