@@ -124,6 +124,9 @@
 .tag.asr-pending { background: #1e3a5f; color: #93c5fd; }
 .tag.asr-running { background: #78350f; color: #fdba74; }
 .tag.asr-error { background: #7f1d1d; color: #fca5a5; }
+/* 本机发射：文字取自 TTS 合成原文（未走 ASR）/ 没有原文则跳过识别 */
+.tag.asr-tx { background: #0f3f5c; color: #93c5fd; }
+.tag.asr-skip { background: #3f3f46; color: #d4d4d8; }
 
 /* ---------- 详情 ---------- */
 .vlog-detail-card { position: sticky; top: 74px; }

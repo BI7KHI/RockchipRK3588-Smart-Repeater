@@ -553,6 +553,9 @@ def _set_default_settings(db):
         'vlog_llm_idle_unload': '300',
         'vlog_callsign_whitelist': 'BI7KHI',
         'vlog_callsign_max_dist': '0',
+        # 本机发射（tx）段的文字来源：auto=有发射原文用原文、只有网页对讲这类
+        # 「文本未知的人工实时发射」才送 ASR；off=tx 段一律不送 ASR；on=老行为
+        'vlog_tx_asr': 'auto',
         # APRS 收发（自研 1200bps Bell202 软件 TNC）
         'aprs_enabled': '1',
         'aprs_mycall': 'BI7KHI',
@@ -1328,7 +1331,7 @@ def api_settings_get():
         'vlog_retention_days', 'vlog_retention_mb',
         'vlog_summary_enabled', 'vlog_summary_time', 'vlog_summary_provider',
         'vlog_llm_on_demand', 'vlog_llm_idle_unload',
-        'vlog_callsign_whitelist', 'vlog_callsign_max_dist',
+        'vlog_callsign_whitelist', 'vlog_callsign_max_dist', 'vlog_tx_asr',
         'aprs_enabled', 'aprs_mycall', 'aprs_ssid', 'aprs_dest', 'aprs_path',
         'aprs_lat', 'aprs_lon', 'aprs_alt_m', 'aprs_pos_source', 'aprs_gps_port',
         'aprs_gps_baud', 'aprs_symbol_table', 'aprs_symbol_code', 'aprs_comment',
@@ -1480,6 +1483,8 @@ def api_settings_set():
         'vlog_callsign_max_dist': lambda v: str(max(0, min(3, int(float(v))))),
         'vlog_enabled': _bool_caster,
         'vlog_asr_enabled': _bool_caster,
+        'vlog_tx_asr': lambda v: (str(v).strip().lower()
+            if str(v).strip().lower() in ('off', 'auto', 'on') else 'auto'),
         'vlog_vad_enabled': _bool_caster,
         'vlog_enhance': _bool_caster,
         'vlog_keep_transient': _bool_caster,
@@ -1943,6 +1948,7 @@ def _agent_ctx():
         name = 'tts_%s_agent.wav' % datetime.now().strftime('%Y%m%d_%H%M%S')
         out = RECORDINGS_DIR / name
         shutil.copyfile(wav, out)
+        _tx_note_wav(out, body)          # 发射文本登记：语音日志直接引用，不再 ASR
         play_audio_async(out, ptt=True)
         return {'spoken': body[:30], 'file': name}
 
@@ -3567,9 +3573,59 @@ def ptt_diag():
     }
 
 
+# ---------------------------------------------------------------------------
+# 本机发射文本登记：合成出来的 WAV 对应哪段文字
+#
+# 语音日志里 kind='tx'（本机发射）的段，记的是**我们自己的声音** —— 文字就该是
+# 合成时输入的那一段。让人回头对回录音频再跑一遍 ASR 既费资源又必然出错：实测
+# 同一段播报「电池电压 12.8 伏特…温度 47.2 摄氏度」被识别成「1156伏特…472摄氏度」。
+#
+# 这里只登记「路径 → 文本」；真正抛给语音日志是在**上发射机那一刻**
+# （_play_file_locked，且 PTT 已拉起），这样本地试听不会被误记成发射。
+# ---------------------------------------------------------------------------
+_TX_WAV_TEXTS = {}
+_TX_WAV_LOCK = threading.Lock()
+_TX_WAV_KEEP = 80
+
+
+def _tx_note_wav(path, text):
+    """登记「这个 WAV 要发射，文本是这一段」，供语音日志直接引用。"""
+    s = str(text or '').strip()
+    if not path or not s:
+        return
+    with _TX_WAV_LOCK:
+        _TX_WAV_TEXTS[str(path)] = (s, time.time())
+        if len(_TX_WAV_TEXTS) > _TX_WAV_KEEP:
+            for k, _v in sorted(_TX_WAV_TEXTS.items(),
+                                key=lambda kv: kv[1][1])[:len(_TX_WAV_TEXTS) - _TX_WAV_KEEP]:
+                _TX_WAV_TEXTS.pop(k, None)
+
+
+def _tx_note_play(path):
+    """PTT 已拉起、音频即将出声时调用：把已知文本登记进语音日志的时间窗匹配表。"""
+    if not path:
+        return
+    with _TX_WAV_LOCK:
+        item = _TX_WAV_TEXTS.pop(str(path), None)
+    if not item:
+        return
+    try:
+        # ts 用「此刻」而不是合成时刻：登记表是按发射时间窗匹配录音段的
+        voice_service.note_tx_text(item[0], seconds=_wav_seconds(path),
+                                   ts=time.time(), source='tts')
+    except Exception as e:
+        print('[VLOG] 登记本机发射文本失败：%s: %s' % (type(e).__name__, e), flush=True)
+
+
 def _play_file_locked(path):
     global CURRENT_PLAY_PROC
     _ensure_audio_unmuted()
+    # 发射意图（PTT 已拉起）+ 是我们自己合成的音频 → 把文本交给语音日志
+    try:
+        if PTT_HOLD_COUNT > 0:
+            _tx_note_play(path)
+    except Exception:
+        pass
     with PLAY_LOCK:
         # 结束上一个播放（含流式朗读片段）：声卡同一时刻只允许一路 aplay，
         # 否则第二路会因设备忙直接失败，表现为「播放错误」/声音断续
@@ -3662,6 +3718,7 @@ def _reboot_announce(text):
             icao_voice=(_setting_direct('tts_icao_voice', '') or None))
     except Exception as e:
         return False, f'合成失败：{e}'
+    _tx_note_wav(path, text)             # 发射文本登记：语音日志直接引用，不再 ASR
     _ptt_retain()
     try:
         proc = _play_file_locked(path)
@@ -3830,6 +3887,7 @@ def _announce_play(text, dry=False):
         return {'ok': False, 'skipped': True,
                 'error': '合成期间信道被占用，已取消本次播报'}
     if not dry:
+        _tx_note_wav(path, text)         # 发射文本登记：语音日志直接引用，不再 ASR
         _ptt_retain()
     try:
         proc = _play_file_locked(path)
@@ -4542,6 +4600,10 @@ def api_intercom_push():
             st['ptt'] = True
             st['bytes'] = 0
             st['started'] = time.time()
+        if st.get('ptt'):
+            # 网页对讲是「文本未知的人工实时发射」：留心跳标记，语音日志才允许送 ASR
+            # （本机合成的语音走 _tx_note_wav，两者在 voice_service.tx_decision 合流）
+            voice_service.note_tx_live(hold=20.0, source='intercom')
         if data:
             try:
                 st['proc'].stdin.write(data)
@@ -4671,6 +4733,7 @@ def api_tts_speak():
     except Exception:
         pass
     if auto_play:
+        _tx_note_wav(out_path, text)     # 发射文本登记：语音日志直接引用，不再 ASR
         play_audio_async(out_path, ptt=True)
     audit('tts_speak', f'{provider} voice={voice} len={len(text)}')
     return api_ok(filename=out_name, provider=provider, voice=voice,
@@ -4875,6 +4938,7 @@ def _tts_stream_synth_worker(sess):
         try:
             path = tts_service.synthesize_multilingual(
                 text, voice, en_voice=en_voice, icao=icao, icao_voice=icao_voice)
+            _tx_note_wav(path, text)     # 发射文本登记：语音日志直接引用，不再 ASR
             sess['play_q'].put(path)
             sess['last_activity'] = time.time()
         except Exception as e:
@@ -6571,8 +6635,11 @@ def _assist_tts(text, voice=''):
     en_voice = (_setting_direct('tts_en_voice', '') or '').strip() or None
     icao_voice = (_setting_direct('tts_icao_voice', '') or '').strip() or None
     icao = _setting_direct('tts_icao', '1') in ('1', 'true', 'True', 'on')
-    return tts_service.synthesize_multilingual(text, voice, en_voice=en_voice,
+    path = tts_service.synthesize_multilingual(text, voice, en_voice=en_voice,
                                                icao=icao, icao_voice=icao_voice)
+    # 语音助手回复同样登记发射文本：语音日志的「本机发射」段直接用它，不再 ASR
+    _tx_note_wav(path, text)
+    return path
 
 
 def _assist_play(wav_path, max_seconds=30.0):

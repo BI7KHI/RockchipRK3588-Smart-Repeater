@@ -9,7 +9,7 @@
 {% endblock %}
 
 {% block head_extra %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/voice-log.css', v='20260930c') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/voice-log.css', v='20260930d') }}">
 {% endblock %}
 
 {% block content %}
@@ -188,5 +188,5 @@
 
 {% block scripts %}
 <script>window.VLOG_CSRF = document.querySelector('meta[name="csrf-token"]')?.content || '';</script>
-<script src="{{ url_for('static', filename='js/voice-log.js', v='20260930c') }}"></script>
+<script src="{{ url_for('static', filename='js/voice-log.js', v='20260930d') }}"></script>
 {% endblock %}
