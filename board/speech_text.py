@@ -166,11 +166,23 @@ def _unit_cn(u):
 
 
 def _never(pre):
-    return any(pre.rstrip().endswith(w) for w in NEVER_BEFORE)
+    """前文出现过「北纬/频率/第…」→ 这是编号/坐标，不动。
+
+    看**最后 8 个字**而不是「正好以它结尾」：真机上模型写「当前频率是 438.500」这类
+    中间夹一个「是/为/约」的句式很常见，只匹配结尾会漏。
+    """
+    tail = pre[-8:]
+    return any(w in tail for w in NEVER_BEFORE)
 
 
 def _triggered(pre):
-    return any(pre.rstrip().endswith(w) for w in TRIGGERS)
+    """前文出现过「电压/温度/负载…」→ 这个数字是计量值，读中文。
+
+    同样看最后 8 个字：实测模型常写「当前电池电压是10.8362」（**不带单位**），
+    只认「以量词结尾」会漏掉，最终 final 里还留着阿拉伯小数。
+    """
+    tail = pre[-8:]
+    return any(w in tail for w in TRIGGERS)
 
 
 def speakable(text, max_dp=2):
