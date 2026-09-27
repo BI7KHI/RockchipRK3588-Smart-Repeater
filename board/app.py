@@ -1728,8 +1728,9 @@ def _llm_stat_record(mode, cfg, model, snap, ok=True, note='', iters=0, tools=''
 def _agent_ctx():
     """技能（工具）实现：返回**紧凑**结果。
 
-    注意：板端 RKLLM 在提示词过长（>约 400 字）时会直接空输出，
-    因此工具结果必须精简——只给模型需要的数值，不要整段 JSON。
+    注意：板端 RKLLM 的瓶颈是**延时**不是容量——2026-09-27 实测 4615 字符仍能
+    正常输出（24~31s），而 ≈4.7 ms/字符意味着工具结果每多 100 字就多 0.47 s
+    prefill。所以仍旧要「只给模型需要的数值，不要整段 JSON」：理由换了，结论一样。
     """
     def get_weather():
         st = weather_service_instance.realtime()
@@ -2136,8 +2137,12 @@ def api_agent_chat():
                 last_user = _m.get('content') or ''
                 break
         valid_tools = [t['name'] for t in agent_service.enabled_tools(enabled)]
-        # 指令（含工具协议）并入用户消息：实测板端模型只有这样才能照做
+        # 指令（含工具协议）并入用户消息：服务端打过 patch_rkllm_chat.py 后 system
+        # 轮已可用，但工具协议是照用户消息调过的，不在这一轮改动，避免动到命中率。
         question = last_user
+        _warn_long_prompt('网页对话',
+                          agent_service.compose_user_prompt(base_prompt, question,
+                                                            enabled), cfg['provider'])
         collected = []          # 累积的紧凑读取结果（回灌给模型的唯一数据源）
         # 数据类问句：第一轮强制先取数（提示词里再加一条硬性要求，且该轮不向用户输出文字）
         force_first = agent_service.wants_realtime(last_user)
@@ -6012,6 +6017,21 @@ def _assist_channel_busy():
     return False
 
 
+# 板端 RKLLM 实测 ≈4.7 ms/字符 prefill。超预算只记日志、**不截断**——截断会把
+# 排在末尾的行为约束切掉，那比慢一点更糟（见 assistant_service._build_prompt）。
+LLM_PROMPT_WARN_CHARS = 2500
+
+
+def _warn_long_prompt(tag, text, provider):
+    """本地模型提示词过长时留痕：慢要慢得有据可查。"""
+    if str(provider) == 'external':
+        return
+    n = len(text or '')
+    if n > LLM_PROMPT_WARN_CHARS:
+        print('[LLM] %s 提示词 %d 字（阈值 %d），本地模型 prefill 约需 %.1fs'
+              % (tag, n, LLM_PROMPT_WARN_CHARS, n * 0.0047), flush=True)
+
+
 def _assist_ask(prompt, question='', max_tokens=256, temperature=0.3,
                 use_tools=True, max_iters=2, sysprompt=''):
     """阻塞式 LLM 调用（可选 Agent 工具循环），供中继语音助手后台线程使用。
@@ -6046,6 +6066,7 @@ def _assist_ask(prompt, question='', max_tokens=256, temperature=0.3,
             return out
         out['provider'] = cfg.get('provider') or provider
         out['model'] = cfg.get('model') or ''
+        _warn_long_prompt('助手', prompt, provider)
         if (cfg.get('provider') or provider) == 'local':
             ok, msg = voice_service_instance.ensure_llm_ready(
                 wait=float(_setting_direct('assist_llm_wait', '25') or 25))
@@ -6074,7 +6095,7 @@ def _assist_ask(prompt, question='', max_tokens=256, temperature=0.3,
         q_short = (question or '').strip() or (prompt or '')[:120]
         q_short = q_short[:120]
         # 总结轮要不要回灌约束、回灌多少：见 agent_service.summary_spec 的说明。
-        # auto = 只给外部云模型（板端 RKLLM 提示词一长就空输出）。
+        # auto = 所有 provider 都回灌（板端按延时预算单独限量，不再是「不回灌」）。
         sp_mode = (os.environ.get('RELAY_ASSIST_SUMMARY_SPEC') or 'auto').strip().lower()
         if sp_mode not in agent_service.SUMMARY_SPEC_MODES:
             sp_mode = 'auto'

@@ -13,6 +13,7 @@ app.py 解析后执行对应读取函数，把结果回灌给模型，再让模�
 """
 import json
 import math
+import os
 import re
 import time
 
@@ -136,8 +137,10 @@ def enabled_tools(enabled=None):
 def tools_prompt(enabled=None):
     """工具清单 + READ 协议（**务必保持精简**）。
 
-    实测两条硬约束：
-      1. 板端 RKLLM（Qwen2.5-1.5B）提示词过长（>约 400 字）会直接空输出；
+    实测两条约束：
+      1. 板端 RKLLM 的瓶颈是**延时**而不是容量——2026-09-27 实测 4615 字符仍能
+         正常输出（24~31s），而 ≈4.7 ms/字符意味着这份清单每多 100 字就多 0.47 s
+         prefill。所以「精简」的理由从「超了会空输出」变成「超了会变慢」。
       2. **示例一多，模型会去照抄示例而不是按标题匹配工具**——曾给出 6 条
          「关键词→READ」示例，探针命中率反而从 6/7 掉到 5/9（问「在发射吗」
          输出 `发射→READ get_power {}`）。因此只保留一条示例。
@@ -200,22 +203,30 @@ def wants_realtime(text):
 # 里的「全中文单位（伏特/摄氏度）」「每句输出后加喵」全部未执行，回复仍是
 # 「当前电池电压为 10.8006 V。」——因为总结轮的消息体里一个字的约束都没有。
 #
-# 板端 RKLLM（Qwen2.5-1.5B）是另一套约束：实测提示词 >约 400 字直接空输出，
-# 而数据段本身已接近该上限，所以默认（auto）只回灌给外部云模型。
+# 板端 RKLLM 一度被记为「>约 400 字直接空输出」，据此 auto 只回灌外部云模型。
+# 2026-09-27 板端实测推翻了这条：max_context_len 从 512 提到 4096 后，4615 字符
+# 仍正常输出（24~31s）。真正的约束是**延时**（≈4.7 ms/字符），不是容量。
+# 另外还查明「RKLLM 忽略 system 角色」的真因是服务端只取最后一条消息
+# （见 deploy/patch_rkllm_chat.py），不是模型不吃 system。
 SUMMARY_SPEC_MODES = ('auto', 'on', 'off')
 
 # 总结轮收尾语（中继语音助手用；网页 Agent 对话传自己的）
 SUMMARY_TAIL_ASSIST = ('直接给结论，不要说「根据数据」「根据您提供的数据」这类开场白，'
                        '不要复述问题，用中文 1~2 句回答：')
 
+# 板端 RKLLM 的延时预算（字符）：≈4.7 ms/字，600 字约 2.8 s prefill。
+LOCAL_SPEC_CAP = 600
+
 
 def summary_spec(spec='', provider='local', mode='auto', cap=1200):
     """决定总结轮要回灌多少「行为约束」，返回要回灌的文本（'' = 不回灌）。
 
     mode:
-      auto（默认）—— 只回灌给外部云模型；板端 RKLLM 不回灌（见上）。
+      auto（默认）—— 所有 provider 都回灌，只按 provider 给不同上限。
       on / off    —— 强制回灌 / 强制不回灌。
-    cap: 回灌字符上限，防止长规范把板端模型顶到空输出。
+    cap: 回灌字符上限。
+
+    板端不是不能回灌，而是要按**延时**预算限量，所以 local 另给一个小 cap。
     """
     s = (spec or '').strip()
     if not s:
@@ -223,34 +234,41 @@ def summary_spec(spec='', provider='local', mode='auto', cap=1200):
     m = str(mode or 'auto').strip().lower()
     if m not in SUMMARY_SPEC_MODES:
         m = 'auto'
-    if m == 'off' or (m == 'auto' and str(provider) != 'external'):
+    if m == 'off':
         return ''
     try:
         cap = max(120, min(4000, int(cap)))
-    except Exception:
+    except (TypeError, ValueError):
         cap = 1200
+    if str(provider) != 'external':
+        cap = min(cap, LOCAL_SPEC_CAP)
     return s[:cap]
 
 
 def summary_messages(collected, question, spec='', provider='local',
-                     mode='auto', cap=1200, data_cap=280, tail=None):
+                     mode='auto', cap=1200, data_cap=280, tail=None,
+                     inline_spec=None):
     """拼「总结轮」的消息体：拿到工具数据 → 要一句最终回答。
 
-    外部云模型把约束放进**真正的 system 轮**：权威性高，也不会被前面的数据段
-    冲淡；板端 RKLLM 实测不认 system 轮（所以第一轮才把指令并进用户消息），
-    在它身上只能把约束并进同一条用户消息。
+    约束放进**真正的 system 轮**：权威性高，也不会被前面的数据段冲淡。
+    这要求 rkllm-server 打过 deploy/patch_rkllm_chat.py —— 未打补丁的服务端会
+    静默丢弃 system，那样约束就白给了。若确实还在跑未打补丁的服务端，设
+    RELAY_LOCAL_INLINE_SPEC=1（或显式传 inline_spec=True）退回内联。
     """
     tail = tail or SUMMARY_TAIL_ASSIST
     data = ('设备实时数据：'
             + json.dumps(collected, ensure_ascii=False)[:int(data_cap)])
+    user = data + '\n' + tail + (question or '')
     sp = summary_spec(spec, provider, mode=mode, cap=cap)
     if not sp:
-        return [{'role': 'user', 'content': data + '\n' + tail + (question or '')}]
-    if str(provider) == 'external':
+        return [{'role': 'user', 'content': user}]
+    if inline_spec is None:
+        inline_spec = os.environ.get('RELAY_LOCAL_INLINE_SPEC', '') in ('1', 'true', 'on')
+    if str(provider) == 'external' or not inline_spec:
         return [{'role': 'system', 'content': sp},
-                {'role': 'user', 'content': data + '\n' + tail + (question or '')}]
-    return [{'role': 'user',
-             'content': '【播报要求】' + sp + '\n' + data + '\n' + tail + (question or '')}]
+                {'role': 'user', 'content': user}]
+    # 兜底：未打补丁的服务端不认 system，把约束并进同一条用户消息（旧行为）
+    return [{'role': 'user', 'content': '【播报要求】' + sp + '\n' + user}]
 
 
 def build_agent_prompt(base_prompt='', enabled=None):

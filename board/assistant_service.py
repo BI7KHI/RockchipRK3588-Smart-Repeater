@@ -969,24 +969,24 @@ class AssistantService:
         return suffix.replace('{max_chars}', str(self.max_chars(st)))
 
     def _build_prompt(self, question, st, base=''):
-        """拼提示词并逐级降配，保证输入不超上限（防止挤爆本地上下文）。"""
+        """拼提示词：基础设定在前，**行为约束在问题之后**。
+
+        顺序不是随手排的，是板端实测出来的：同一份播报规范、同一个问题，长提示词
+        下把规范放在**开头**模型直接无视——答「哈喽！中继台的电池电压是 12.6 伏。」，
+        规范要求的句尾标记一个字都没出现；放到**结尾**就遵守——「好的，电池电压是
+        12.6 伏，喵。」。短提示词两种都行，但一旦有基础设定/对话历史/工具数据，
+        放前面的约束就守不住了。
+
+        逐级降配：先砍历史 → 再砍基础设定；**规范与问题永远活到最后**，因为规范
+        决定这句话能不能播出去。
+        """
         suffix = self._spec_text(st)
-        head_full = '\n'.join([x for x in (base, suffix) if x])
-        # 降配版头部：**优先保住规范**，宁可砍共用基础设定。
-        # 旧实现是 head_full[:600]，只要基础设定本身 ≥600 字，这一刀就把规范
-        # 整段切掉（规范在基础设定之后），模型等于完全没被约束过。
-        if suffix:
-            room = max(0, 600 - len(suffix) - 1)
-            head_short = '\n'.join(
-                [x for x in ((base[:room] if room else ''), suffix) if x])
-        else:
-            head_short = base[:600]
         max_in = max(400, int(_f(st.get('assist_max_input_chars'), 3000)))
         n = self.hist_turns(st)
         q = (question or '').strip()[:400]
         variants = []
         for hist_n in (n, min(n, 3), min(n, 1), 0):
-            for head in (head_full, head_short, suffix, ''):
+            for head in (base, base[:600], ''):
                 parts = []
                 if head:
                     parts.append('【系统设定】\n' + head)
@@ -994,11 +994,18 @@ class AssistantService:
                 if h:
                     parts.append('【对话历史】\n' + h)
                 parts.append('【当前问题】\n' + q)
+                if suffix:
+                    parts.append('【播报要求（必须遵守）】\n' + suffix)
                 variants.append('\n\n'.join(parts))
         for p in variants:
             if len(p) <= max_in:
                 return p, len(p)
-        return variants[-1][:max_in], max_in
+        # 兜底：只留问题与规范。截断只许砍问题，绝不能把规范切掉。
+        room = max(0, max_in - len(suffix) - 40)
+        tail = ('【当前问题】\n' + q[:room]) if room else '【当前问题】\n'
+        if suffix:
+            tail += '\n\n【播报要求（必须遵守）】\n' + suffix
+        return tail, len(tail)
 
     def _history_text(self, st, turns):
         if turns <= 0 or not self.history:

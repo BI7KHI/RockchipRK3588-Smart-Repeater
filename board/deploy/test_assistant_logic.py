@@ -138,6 +138,21 @@ p4, n4 = svc4._build_prompt('风速多少', st4, long_base)
 check('长基础设定下仍保留播报规范', MARK in p4, '规范被切掉了')
 check('长基础设定下仍不超上限', len(p4) <= 3000, 'len=%d' % len(p4))
 
+# 顺序回归（2026-09-27 板端实测）：长提示词下行为约束放**开头**不被遵守
+# （答「哈喽！中继台的电池电压是 12.6 伏。」，句尾标记一个字没有），放**结尾**
+# 才遵守（「好的，电池电压是 12.6 伏，喵。」）。所以规范必须排在问题之后。
+i_q = p4.find('【当前问题】')
+i_s = p4.find('【播报要求')
+check('提示词含播报要求段', i_s > 0, 'idx=%d' % i_s)
+check('播报要求排在当前问题**之后**（近因）', i_q >= 0 and i_s > i_q,
+      '问题@%d 规范@%d' % (i_q, i_s))
+check('规范段是最后一段（其后不再有别的段落标题）',
+      p4.rfind('【') == i_s, '最后标题@%d 规范@%d' % (p4.rfind('【'), i_s))
+p_short = svc._build_prompt('风速多少', st, '')[0]
+check('无基础设定时规范依然在问题之后',
+      p_short.find('【播报要求') > p_short.find('【当前问题】'))
+check('无基础设定时不再出现空的系统设定段', '【系统设定】' not in p_short, p_short[:40])
+
 # 再挤：把上限压到刚好放不下「基础设定 + 规范」，规范仍要活着
 svc5, st5 = make_svc({'assist_max_input_chars': '600'})
 p5, n5 = svc5._build_prompt('风速多少', st5, long_base)
@@ -167,13 +182,22 @@ check('mode=off 时完全不回灌（板端保命开关）',
 
 m_local = G.summary_messages([{'get_power': {'battery': 12.6}}], '电池电压',
                              SPEC, 'local', mode='auto')
-check('auto 下板端 RKLLM 不回灌（>400 字会空输出）',
-      all(MARK not in (m.get('content') or '') for m in m_local))
+# 2026-09-27 实测推翻了「板端 >400 字空输出」：max_context_len 提到 4096 后
+# 4615 字符仍正常输出，真正的约束变成延时，所以 auto 现在也给板端回灌。
+check('auto 下板端 RKLLM 也回灌（旧结论已作废）',
+      any(MARK in (m.get('content') or '') for m in m_local))
+check('板端走 system 轮（服务端已打 patch_rkllm_chat.py）',
+      m_local[0].get('role') == 'system' and MARK in m_local[0]['content'])
+check('板端约束按延时预算限量（<=600 字）',
+      len(G.summary_spec('规' * 5000, 'local')) <= G.LOCAL_SPEC_CAP,
+      str(len(G.summary_spec('规' * 5000, 'local'))))
+check('外部仍按大 cap 回灌',
+      len(G.summary_spec('规' * 5000, 'external')) > G.LOCAL_SPEC_CAP)
 
-m_local_on = G.summary_messages([{'get_power': {'battery': 12.6}}], '电池电压',
-                                SPEC, 'local', mode='on')
-check('强制 on 时板端走用户消息内联（RKLLM 不认 system 轮）',
-      m_local_on[0]['role'] == 'user' and '【播报要求】' in m_local_on[0]['content'])
+m_legacy = G.summary_messages([{'get_power': {'battery': 12.6}}], '电池电压',
+                              SPEC, 'local', mode='auto', inline_spec=True)
+check('未打补丁的服务端可用 inline_spec 退回内联',
+      m_legacy[0]['role'] == 'user' and '【播报要求】' in m_legacy[0]['content'])
 
 check('cap 生效', len(G.summary_spec('规' * 5000, 'external', cap=300)) == 300)
 check('空规范不注入', G.summary_spec('', 'external') == '')
