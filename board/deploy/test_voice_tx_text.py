@@ -175,16 +175,15 @@ else:
         def _aprs_overlap(self, *_a):
             return False
 
-        def tx_match(self, ts, seconds):
-            hits = V.tx_matches(ts, seconds, lead=3.0)
-            return hits[0] if hits else None
-
         def enqueue_asr(self, rid):
             queued.append(rid)
 
     svc = _Stub()
     svc.store = store
     svc.counters = {}
+    # 桩**故意不提供** tx_match：真机上就是因为它被挂在错的类上、而桩又替它兜了底，
+    # 才让「落段抛 AttributeError、整段记录丢失」这件事在本地测试里看不见。
+    check('测试桩不提供 tx_match（否则会掩盖真实调用路径）', not hasattr(svc, 'tx_match'))
     rec = V.Recorder(svc)
     st = svc.settings()
     mono = struct.pack('<%dh' % 16000, *([1200] * 16000))       # 1s 单声道
@@ -211,6 +210,8 @@ else:
     check('tx 段不排 ASR', queued == [], queued)
     check('落库字段完整（含 APRS 列不报错）', abs(float(row.get('end_epoch') or 0) - (T0 + 1.0)) < 0.01
           and abs(float(row.get('seconds') or 0) - 1.0) < 0.01 and row.get('path'), row)
+    check('落库成功后清掉上一次的错误（状态栏不再挂着旧异常）',
+          rec.stats.get('error') == '', rec.stats.get('error'))
 
     V.reset_tx_texts()
     row = _one_segment('tx', T0 + 400.0)
@@ -250,9 +251,11 @@ print('\n=== 8. 接线防漏：每个合成站点都要登记发射文本 ===')
 # 逻辑对了但漏登记，等于没修：那一段还是会被拿去 ASR。这条断言盯的是**接线数量** ——
 # app.py 里每出现一次 synthesize_multilingual(，就应该有一次 _tx_note_wav(。
 # 新增「合成但不上发射机」的路径时这条会误报，那时把新站点加进来或说明理由即可。
-_app = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'app.py')
+# 路径按**正在被测的那个 voice_service 模块**推：测试脚本可能被放在 /tmp 里跑。
+_LIVE_DIR = os.path.dirname(os.path.abspath(getattr(V, '__file__', '') or '.'))
+_app = os.path.join(_LIVE_DIR, 'app.py')
 if not os.path.exists(_app):
-    print('  SKIP 找不到 app.py，跳过接线检查')
+    print('  SKIP 找不到 app.py（%s），跳过接线检查' % _app)
 else:
     src = open(_app, encoding='utf-8').read()
     n_synth = src.count('synthesize_multilingual(')
@@ -268,6 +271,27 @@ else:
           'note_tx_live(' in src and "source='intercom'" in src)
     check('重播/播报/助手三处都是 _tx_note_wav(path, text)',
           src.count('_tx_note_wav(path, text)') >= 5, src.count('_tx_note_wav(path, text)'))
+
+print('\n=== 9. tx_match 必须是模块级函数（跨对象调用会丢段）===')
+# 旧写法把 tx_match 挂在 Recorder 上、由落段处 self.svc.tx_match() 调 → 挂错类就
+# AttributeError，整段 tx 记录丢失（真机上丢过一次：sessions=1 / segments=0）。
+_base = _LIVE_DIR
+_vsrc = ''
+_p = os.path.join(_base, 'voice_service.py')
+if os.path.exists(_p):
+    _vsrc = open(_p, encoding='utf-8').read()
+check('tx_match 在模块级可见', callable(getattr(V, 'tx_match', None)))
+check('tx_match 收 3 个参数（settings 由调用方传入）',
+      V.tx_match.__code__.co_argcount == 3, V.tx_match.__code__.co_argcount)
+check('tx_match 不再挂到 VoiceService 上（避免 self.svc 跨对象调用）',
+      not hasattr(V.VoiceService, 'tx_match'))
+check('tx_match 也不在 Recorder 上', not hasattr(V.Recorder, 'tx_match'))
+if _vsrc:
+    check('源码里没有 self.svc.tx_match / self.tx_match 这类调用',
+          'self.svc.tx_match' not in _vsrc and 'self.tx_match' not in _vsrc)
+    check('落段处的调用带上 settings', 'tx_match(st, seg.start_ts, seconds)' in _vsrc)
+else:
+    print('  SKIP 找不到 voice_service.py，跳过源码调用检查')
 
 print('\n' + '=' * 62)
 print('通过 %d 项，失败 %d 项' % (OK[0], len(FAIL)))

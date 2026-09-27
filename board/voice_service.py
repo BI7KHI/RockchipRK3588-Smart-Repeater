@@ -211,6 +211,22 @@ def reset_tx_texts():
         _TX_TEXTS.clear()
 
 
+def tx_match(st, ts_epoch, seconds):
+    """按录音时间窗取回本机发射登记（含 pre-roll 补偿），无命中返回 None。
+
+    **刻意做成模块级函数而不是某个类的方法**：录音机（Recorder）和识别侧
+    （VoiceService）都要用它，挂在其中一个类上就会变成 `self.svc.xxx` 这种
+    跨对象调用 —— 一旦挂错类，落段当场抛 AttributeError，整段 tx 记录直接丢失
+    （真机上就是这么丢掉过一次发射段）。settings 字典由调用方传进来。
+    """
+    try:
+        lead = _f((st or {}).get('vlog_pre_roll'), 3.0)
+    except Exception:
+        lead = 3.0
+    hits = tx_matches(ts_epoch, seconds, lead=lead)
+    return hits[0] if hits else None
+
+
 def tx_asr_mode(st):
     """本机发射识别策略：off / auto / on（非法值回落 auto）。"""
     v = str((st or {}).get('vlog_tx_asr') or 'auto').strip().lower()
@@ -885,15 +901,6 @@ class Recorder:
         if p > self.seg.peak:
             self.seg.peak = int(p)
 
-    def tx_match(self, ts_epoch, seconds):
-        """按录音时间窗取回本机发射登记（含 pre-roll 补偿）。无命中返回 None。"""
-        try:
-            lead = _f(self.svc.settings().get('vlog_pre_roll'), 3.0)
-        except Exception:
-            lead = 3.0
-        hits = tx_matches(ts_epoch, seconds, lead=lead)
-        return hits[0] if hits else None
-
     def _close_segment(self, ts):
         seg = self.seg
         self.seg = None
@@ -942,7 +949,7 @@ class Recorder:
         # 没命中也不是人声（APRS 信标等）→ 只标记跳过，别拿 ASR 去猜数据音。
         status, tx_text, note = 'pending', '', ''
         if seg.kind == 'tx':
-            m = self.svc.tx_match(seg.start_ts, seconds) or {}
+            m = tx_match(st, seg.start_ts, seconds) or {}
             status, tx_text, note = tx_decision(
                 tx_asr_mode(st), seg.kind, m.get('text') or '', bool(m.get('live')))
             if tx_text:
@@ -967,6 +974,9 @@ class Recorder:
         self.stats['segments'] += 1
         self.stats['seconds'] = round(float(self.stats['seconds']) + seconds, 1)
         self.svc.counters['segments'] = int(self.svc.counters.get('segments', 0)) + 1
+        # 这一段落库成功了：把上一次的错误清掉。否则状态栏会一直挂着一条早就过去了
+        # 的异常（真机上就见过「异常: AttributeError…」一直显示，看着像还在坏）。
+        self.stats['error'] = ''
         if status == 'pending' and _flag(st.get('vlog_asr_enabled'), True) and rid:
             self.svc.enqueue_asr(rid)
 
@@ -1349,7 +1359,7 @@ class VoiceService:
         kind = row.get('kind') or ''
         mode = tx_asr_mode(st)
         if kind == 'tx' and mode != 'on':
-            m = self.tx_match(row.get('ts_epoch'), _f(row.get('seconds'), 0.0)) or {}
+            m = tx_match(st, row.get('ts_epoch'), _f(row.get('seconds'), 0.0)) or {}
             status, tx_text, note = tx_decision(mode, kind, m.get('text') or '',
                                                 bool(m.get('live')))
             if status != 'pending':
@@ -1498,7 +1508,7 @@ class VoiceService:
         if row and (row.get('kind') or '') == 'tx' and not force:
             st = self.settings()
             mode = tx_asr_mode(st)
-            m = self.tx_match(row.get('ts_epoch'), _f(row.get('seconds'), 0.0)) or {}
+            m = tx_match(st, row.get('ts_epoch'), _f(row.get('seconds'), 0.0)) or {}
             status, tx_text, note = tx_decision(mode, 'tx', m.get('text') or '',
                                                 bool(m.get('live')))
             if status != 'pending':
