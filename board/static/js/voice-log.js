@@ -548,6 +548,13 @@
         d.className = 'vlog-seg vlog-seg-full';
       }
       box.appendChild(d);
+      // 本机发射段的文字是怎么来的，写清楚（回填的老记录尤其要能追溯）
+      if (it.kind === 'tx' && hasText && (it.note || '').trim()) {
+        const n = document.createElement('div');
+        n.className = 'muted small';
+        n.textContent = it.note;
+        box.appendChild(n);
+      }
       return;
     }
     segs.forEach(sg => {
