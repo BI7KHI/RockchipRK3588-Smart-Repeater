@@ -1409,6 +1409,11 @@ def api_settings_get():
         'assist_prompt_suffix',
         'assist_voice',
         'assist_retention_days',
+        # 自主回答（阶段一影子模式）
+        'assist_auto_enabled', 'assist_auto_mode', 'assist_auto_max_per_hour',
+        'assist_auto_min_gap', 'assist_auto_call_cooldown', 'assist_auto_whitelist',
+        'assist_auto_think', 'assist_auto_think_chars', 'assist_auto_dry_answer',
+        'assist_debug_keep',
         'vlog_enabled', 'vlog_dir', 'vlog_channel', 'vlog_pre_roll', 'vlog_post_roll',
         'vlog_min_seconds', 'vlog_max_seconds', 'vlog_silence_dbfs',
         'vlog_asr_enabled', 'vlog_vad_enabled', 'vlog_enhance', 'vlog_keep_transient',
@@ -1547,6 +1552,20 @@ def api_settings_set():
         'assist_voice': lambda v: str(v).strip()[:80],
         'assist_retention_days': lambda v: str(int(max(1, min(3650, int(float(v)))))),
         'assist_debug_keep': lambda v: str(int(max(0, min(200, int(float(v)))))),
+        # —— 自主回答（阶段一影子模式）——
+        # 模式只接受**已开放**的那几种：half/full 的代码在，但闸门没开，
+        # 这里再拦一道，改设置也放不开发射（双重保险，不靠前端自觉）。
+        'assist_auto_enabled': _bool_caster,
+        'assist_auto_mode': lambda v: (str(v).strip().lower()
+            if str(v).strip().lower() in ('shadow',) else 'shadow'),
+        'assist_auto_max_per_hour': lambda v: str(int(max(0, min(120, int(float(v)))))),
+        'assist_auto_min_gap': lambda v: str(int(max(0, min(3600, int(float(v)))))),
+        'assist_auto_call_cooldown': lambda v: str(int(max(0, min(86400, int(float(v)))))),
+        'assist_auto_whitelist': lambda v: ','.join(
+            [x.strip().upper() for x in re.split(r'[,;\s]+', str(v)) if x.strip()][:50])[:400],
+        'assist_auto_think': _bool_caster,
+        'assist_auto_think_chars': lambda v: str(int(max(8, min(60, int(float(v)))))),
+        'assist_auto_dry_answer': _bool_caster,
         # 中继语音日志
         'vlog_dir': lambda v: str(v).strip()[:120] or '/opt/ai/relay_voice',
         'vlog_channel': lambda v: v if v in ('left', 'right', 'mix') else 'left',
@@ -6781,6 +6800,45 @@ def _assist_ask(prompt, question='', max_tokens=256, temperature=0.3,
     return out
 
 
+def _assist_ask_raw(messages, temperature=0.1, max_tokens=48, timeout=60):
+    """决策层专用的**一次纯文本调用**：不吃工具、不吃人设、不做总结轮。
+
+    必须与 _assist_ask 分开：那条路会跑 Agent 工具循环并在第二轮把答案重写成人话，
+    而决策层要的是**四行结构化输出**，被总结轮一改写就必然解析失败（fail-closed
+    → 全部判默，影子期就白跑了）。
+    """
+    t0 = time.time()
+    out = {'ok': False, 'text': '', 'ms': 0, 'provider': '', 'model': '', 'error': ''}
+    try:
+        provider = (_setting_direct('llm_provider', 'local') or 'local').strip()
+        if provider not in ('local', 'external'):
+            provider = 'local'
+        cfg = provider_config(provider) or {}
+        if not cfg.get('url'):
+            out['error'] = 'LLM 地址未配置（provider=%s）' % provider
+            return out
+        out['provider'] = cfg.get('provider') or provider
+        out['model'] = cfg.get('model') or ''
+        if (cfg.get('provider') or provider) == 'local':
+            ok, msg = voice_service_instance.ensure_llm_ready(
+                wait=float(_setting_direct('assist_llm_wait', '25') or 25))
+            if not ok:
+                out['error'] = '本地 LLM 未就绪：%s' % msg
+                return out
+        voice_service.llm_lease(120.0)
+        txt = _llm_oneshot(cfg, out['model'], messages, temperature,
+                           max_tokens, timeout=timeout)
+        out['text'] = txt or ''
+        if not txt:
+            out['error'] = '决策调用无输出'
+        else:
+            out['ok'] = True
+    except Exception as e:
+        out['error'] = '%s: %s' % (type(e).__name__, e)
+    out['ms'] = int((time.time() - t0) * 1000)
+    return out
+
+
 def _assist_tts(text, voice=''):
     """把回复合成成 WAV。与网页朗读共用同一条 Piper 中英混读路径。
 
@@ -6878,6 +6936,7 @@ assistant_service_instance.configure(
     base_prompt_fn=_assist_prompt_base,
     stop_play_fn=_assist_stop_play,
     expand_fn=_expand_vars,
+    ask_raw_fn=_assist_ask_raw,
 )
 assistant_service_instance.start()
 
@@ -6965,6 +7024,28 @@ def api_assist_say():
     audit('assist_say', ('tx ' if tx else '试听 ') + text[:120])
     return api_ok(**assistant_service_instance.say_text(
         text, tx=tx, voice=(data.get('voice') or '').strip()))
+
+
+@app.route('/api/assist/auto/test', methods=['POST'])
+@login_required
+def api_assist_auto_test():
+    """自主决策自测：给一句话，回报「叫不叫模型、判答还是判默、被哪道闸门拦下」。
+
+    默认**不入库、不发射**（影子期要的就是这个：只看判断）。`busy` 可显式指定，
+    用于不接无线电也能验「信道忙 → 一律不答」这条红线。
+    """
+    data = request.get_json(silent=True) or {}
+    text = (data.get('text') or '').strip()
+    if not text:
+        return api_err('测试文本不能为空')
+    if len(text) > 500:
+        return api_err('测试文本过长（最多 500 字）')
+    busy = data.get('busy')
+    busy = None if busy is None else bool(busy)
+    res = assistant_service_instance.test_decide(
+        text, busy=busy, store=bool(data.get('store')), judge=data.get('judge'))
+    audit('assist_auto_test', ('注入 ' if res.get('forced') else '') + text[:120])
+    return api_ok(**res)
 
 
 @app.route('/api/assist/wake', methods=['POST'])

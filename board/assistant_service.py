@@ -118,6 +118,20 @@ DEFAULTS = {
     # 归档
     'assist_retention_days': '30',
     'assist_debug_keep': '12',   # 识别音频留档条数（0=不留）
+    # ---- 自主回答（听到一段话自己判断该不该答；阶段一=影子模式）----
+    # shadow 只做决策与记录、绝不发射；half/full 的代码路径已就位，但**尚未开放**
+    # （见 AUTO_MODES_OPEN），设置里也先不提供，避免一个手滑就放开发射。
+    'assist_auto_enabled': '1',
+    'assist_auto_mode': 'shadow',
+    'assist_auto_max_per_hour': '6',
+    'assist_auto_min_gap': '90',
+    'assist_auto_call_cooldown': '600',
+    'assist_auto_whitelist': '',      # 呼号白名单；留空=不限呼号
+    'assist_auto_think': '1',         # 让模型写「想」；关掉省几秒
+    'assist_auto_think_chars': '30',
+    # 影子期把「本来会说的话」也生成出来（只合成试听，绝不发射）——只看判定
+    # 无法验收答得对不对，所以默认打开；嫌费时可以关。
+    'assist_auto_dry_answer': '1',
 }
 
 SCHEMA = """
@@ -129,10 +143,25 @@ CREATE TABLE IF NOT EXISTS assist_turns(
   wait_s REAL DEFAULT 0, rx_wav TEXT DEFAULT '', tx_wav TEXT DEFAULT '',
   prompt_chars INTEGER DEFAULT 0, reply_chars INTEGER DEFAULT 0,
   provider TEXT DEFAULT '', model TEXT DEFAULT '', iters INTEGER DEFAULT 0,
-  tools TEXT DEFAULT '', dbfs REAL DEFAULT 0
+  tools TEXT DEFAULT '', dbfs REAL DEFAULT 0,
+  decision TEXT DEFAULT '', reason TEXT DEFAULT '', confidence INTEGER DEFAULT 0,
+  think TEXT DEFAULT '', callsigns TEXT DEFAULT '', would_reply INTEGER DEFAULT 0,
+  dry INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_assist_ts ON assist_turns(ts);
 """
+
+# 自主回答新增列：老库（板上已有几百条记录）靠 ALTER TABLE 增量补，
+# 不重建表 —— 重建一次就等于把现场记录赌在一条 SQL 上。
+AUTO_COLUMNS = (
+    ('decision', "TEXT DEFAULT ''"),      # answer / silent
+    ('reason', "TEXT DEFAULT ''"),        # 结论码：silent/reason/whitelist/cooldown/rate/gap/quiet/busy/shadow/ok
+    ('confidence', 'INTEGER DEFAULT 0'),  # 模型自评 0~9
+    ('think', "TEXT DEFAULT ''"),         # 「想」：只进库里给页面看，**绝不朗读**
+    ('callsigns', "TEXT DEFAULT ''"),     # 本段抽到的呼号（逗号分隔）
+    ('would_reply', 'INTEGER DEFAULT 0'), # 若放行会不会发射（影子期的核心指标）
+    ('dry', 'INTEGER DEFAULT 0'),         # 1 = 影子记录，本身没有发射动作
+)
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +327,302 @@ def wake_near_miss(text, words, fuzzy=True, threshold=0.6):
     return (best, round(best_r, 2)) if best_r >= threshold else ('', round(best_r, 2))
 
 
+# ---------------------------------------------------------------------------
+# 自主回答：决策层（阶段一 = 影子模式）
+#
+# 目标：助手听到一段话后**自己判断**该不该答，而不是只认唤醒词。
+#
+# 两条设计原则（都是板端实测逼出来的）：
+#   1. **红线在代码里，模型无权突破**。信道忙、禁发时段、频率上限、呼号冷却这些
+#      一律在 auto_gate() 里判定；模型只回答「这段话值不值得答」。
+#   2. **模型输出必须结构化且 fail-closed**。1.5B 会照抄示例、会答非所据（实测约
+#      1/3），所以让它在**最末**输出四行固定格式，解析不出来就一律判「默」。
+#      「想」只进日志与页面，**由代码剥离、绝不进 TTS**（不靠模型自觉）。
+# ---------------------------------------------------------------------------
+AUTO_MODES = ('shadow', 'half', 'full')
+# **阶段一只开放影子模式**：half/full 的判定与门闸代码都写好了，但这里不放行。
+# 要开放必须同时改这里与前端选项 —— 不允许「设置里改一个字符串就放开发射」。
+AUTO_MODES_OPEN = ('shadow',)
+
+AUTO_REASONS = ('被点名', '直接提问', '呼叫本台', '闲聊', '与本站无关',
+                '正在通联', '听不清', '重复', '数据音', '求助', '其它')
+AUTO_REASON_CODE = {'被点名': 'called', '直接提问': 'question', '呼叫本台': 'cq',
+                    '闲聊': 'chat', '与本站无关': 'unrelated', '正在通联': 'ongoing',
+                    '听不清': 'unclear', '重复': 'duplicate', '数据音': 'data',
+                    '求助': 'help', '其它': 'other'}
+# 判「答」可接受的理由码：其余（与本台无关/正在通联/听不清/数据音…）都判「默」
+AUTO_ANSWER_REASONS = ('called', 'question', 'cq', 'chat', 'help')
+AUTO_REASON_LABEL = {v: k for k, v in AUTO_REASON_CODE.items()}
+
+# 决策轮的系统提示：**只有角色，没有任何人设/格式装饰**。输出格式留给用户消息的
+# 最后一段（板端 1.5B 只认最后一条指令），系统提示里再写一遍反而会被它当成范例照抄。
+AUTO_DECISION_SYS = (
+    '你在守听业余无线电中继台，负责判断刚听到的一段话要不要本台回答。\n'
+    '严格按用户消息要求的四行格式输出，不要解释、不要多余内容、不要复述示例。'
+)
+
+# 闸门结论码：ok=放行；其余都是「被谁拦下」，会写进记录与计数器
+AUTO_BLOCK_LABEL = {
+    'silent': '判定为默',
+    'reason': '答的理由码不可接受',
+    'whitelist': '呼号不在白名单',
+    'cooldown': '同呼号冷却中',
+    'rate': '本小时已达上限',
+    'gap': '距上次发射太近',
+    'quiet': '禁发时段',
+    'test_mode': '全局测试模式',
+    'busy': '信道忙',
+    'shadow': '影子模式（阶段一：只记录不发射）',
+    'locked': '该模式尚未开放',
+}
+
+
+def auto_mode(st):
+    v = str((st or {}).get('assist_auto_mode') or 'shadow').strip().lower()
+    return v if v in AUTO_MODES else 'shadow'
+
+
+def compose_decision_prompt(text, ctx=None):
+    """拼决策轮的提示词：短、结构固定、**指令放最末**（板端只理最后一条）。
+
+    ctx: {'last': [('对方', '…'), ('我', '…')], 'called': bool, 'callsign': str,
+          'since': 秒, 'whitelist': str, 'think_chars': int}
+    """
+    ctx = ctx or {}
+    body = re.sub(r'\s+', ' ', str(text or '')).strip()[:200]
+    lines = ['【这段听到的】' + (body or '（无）')]
+    last = ctx.get('last') or []
+    if last:
+        lines.append('【最近】' + ' / '.join(
+            '%s：%s' % (who, re.sub(r'\s+', ' ', str(what or ''))[:60])
+            for who, what in last[:4]))
+    lines.append('【状态】点名：%s　呼号：%s　距上次回答：%d 秒　白名单：%s'
+                 % ('是' if ctx.get('called') else '否',
+                    ctx.get('callsign') or '无',
+                    int(ctx.get('since') or 0),
+                    (ctx.get('whitelist') or '').strip() or '不限'))
+    n = max(8, min(60, int(ctx.get('think_chars') or 30)))
+    # 判答规则单独一段、并且紧挨着输出格式：板端 1.5B 实测**只理最后几条**。
+    # 初版把「点名：是」只写在状态行里，结果它对着一句明确点名的提问答
+    # 「由：与本站无关」—— 状态行的信息它基本没用上，必须写成规则。
+    # 「含 CQ」是实测补的：写「呼叫本台」时，模型把 CQ 判成「通用呼叫、未点名本台」
+    # 而答默 —— 对一台守着中继的助手来说，CQ 就是「有人想通联」，应当接。
+    lines.append('【判答规则】被点名、直接向本台提问、呼叫本台（含 CQ 呼叫与直接报本台'
+                 '呼号）→ 判答；与本站或中继台有关的求助与闲聊也判答；'
+                 '明确是其他友台之间与本站无关的内容、听不清、纯数据音或报数 → 判默。')
+    lines.append('【输出要求（必须遵守）】')
+    lines.append('第一行只写 想：不超过%d个字的判断依据' % n)
+    lines.append('第二行只写 判：答 或 默')
+    lines.append('第三行只写 由：' + '|'.join(AUTO_REASONS))
+    lines.append('第四行只写 信：0~9')
+    return '\n'.join(lines)[:600]
+
+
+def parse_decision(raw, max_think=30):
+    """解析模型的四行输出 → dict。**解析不出来一律判「默」**（fail-closed）。
+
+    返回 {'decision','reason','confidence','think','ok','raw_reason'}
+      decision: 'answer' / 'silent'
+      reason:   闸门/记录用的结论码（silent/reason 之外还有模型给的理由码）
+    """
+    text = str(raw or '')
+    out = {'decision': 'silent', 'reason': 'other', 'confidence': 0,
+           'think': '', 'ok': False, 'raw_reason': ''}
+
+    def grab(names):
+        """按 `字段：值` 取值。**先按行首锚定取，取不到再全串找**。
+
+        两级是必要的：1.5B 有时规规矩矩一行一个字段，有时把四行糊成一行。
+        只锚行首 → 糊成一行的解析不出来；只全串找 → 正文里的「想」会被当成字段名。
+        """
+        for nm in names:
+            for pat in (r'(?:^|\n)\s*%s\s*[:：]\s*([^\n]*)' % nm,
+                        r'%s\s*[:：]\s*([^\n]*)' % nm,
+                        r'(?:^|\n)\s*%s\s+([^\n]*)' % nm):
+                m = re.search(pat, text)
+                if m:
+                    return m.group(1).strip()
+        return ''
+
+    think = grab(['想'])
+    judge = grab(['判'])
+    reason_cn = grab(['由', '理由'])
+    conf = grab(['信', '置信'])
+
+    if think:
+        out['think'] = think[:max(1, int(max_think or 30))]
+    m = re.search(r'(\d{1,2})', conf or '')
+    if m:
+        out['confidence'] = max(0, min(9, int(m.group(1))))
+    out['raw_reason'] = reason_cn
+
+    # 判定：认「答/answer/yes/是」，认「默/silent/no」；其它一律默。
+    # 用**前缀**而不是全等：实测 1.5B 很容易写成「答：因为对方在提问」，
+    # 全等匹配会把这种本来正确的输出判成解析失败 → 全部判默，影子期就白跑了。
+    v = re.sub(r'[^\w\u4e00-\u9fff]', '', judge or '').lower()
+    if v.startswith('答') or v in ('answer', 'yes', '是'):
+        out['decision'] = 'answer'
+    elif v.startswith('默') or v in ('silent', 'no', '否', '沉默'):
+        out['decision'] = 'silent'
+    else:
+        out['reason'] = 'other'
+        return out
+
+    # 理由同样容错：只要行里**出现**闭集里的词就算（模型爱在后面补解释）
+    code = AUTO_REASON_CODE.get(reason_cn.strip(), '')
+    if not code:
+        for label in AUTO_REASONS:
+            if label in (reason_cn or ''):
+                code = AUTO_REASON_CODE[label]
+                break
+    if not code:
+        # 理由写了但不在闭集里：判「默」——理由都不按格式给，行为更不可信
+        out['decision'] = 'silent'
+        out['reason'] = 'other'
+        return out
+    out['reason'] = code
+    if out['decision'] == 'answer' and code not in AUTO_ANSWER_REASONS:
+        # 「答」却给了「与本站无关/听不清」这类理由：自相矛盾，降级为默
+        out['decision'] = 'silent'
+        out['reason'] = 'reason'
+        out['ok'] = False
+        return out
+    out['ok'] = True
+    return out
+
+
+def auto_gate(decision, reason, mode='shadow', callsign='', whitelist='',
+              min_gap=90, max_per_hour=6, cooldown=600,
+              hits=(), call_ts=0.0, last_tx=0.0, now=0.0,
+              quiet=False, test_mode=False, busy=False):
+    """闸门：返回 (allowed, code, 说明)。**纯函数**，红线全在这里，模型无权绕过。
+
+    顺序是刻意的：先判「要不要答」，再判内容/频率红线，**影子锁最后** ——
+    这样影子期还能看出「除了影子这一条，其它闸门会不会放行」（would_reply）。
+    """
+    if decision != 'answer':
+        return (False, 'silent', AUTO_BLOCK_LABEL['silent'])
+    if reason not in AUTO_ANSWER_REASONS:
+        return (False, 'reason', AUTO_BLOCK_LABEL['reason'])
+    wl = [x.strip().upper() for x in re.split(r'[,;、\s]+', whitelist or '') if x.strip()]
+    cs = (callsign or '').strip().upper()
+    if wl and cs not in wl:
+        return (False, 'whitelist', '%s，本次呼号 %s'
+                % (AUTO_BLOCK_LABEL['whitelist'], cs or '（未识别）'))
+    if cs and call_ts and (now - call_ts) < cooldown:
+        return (False, 'cooldown', '%s（%s，还需 %.0f 秒）'
+                % (AUTO_BLOCK_LABEL['cooldown'], cs, cooldown - (now - call_ts)))
+    hour_hits = [t for t in hits if t and (now - t) < 3600]
+    if len(hour_hits) >= max_per_hour:
+        return (False, 'rate', '%s（%d 次/小时）'
+                % (AUTO_BLOCK_LABEL['rate'], max_per_hour))
+    if last_tx and (now - last_tx) < max(min_gap, 0):
+        return (False, 'gap', '%s（还需 %.0f 秒）'
+                % (AUTO_BLOCK_LABEL['gap'], min_gap - (now - last_tx)))
+    if quiet:
+        return (False, 'quiet', AUTO_BLOCK_LABEL['quiet'])
+    if test_mode:
+        return (False, 'test_mode', AUTO_BLOCK_LABEL['test_mode'])
+    if busy:
+        return (False, 'busy', AUTO_BLOCK_LABEL['busy'])
+    if mode == 'shadow':
+        return (False, 'shadow', AUTO_BLOCK_LABEL['shadow'])
+    if mode not in AUTO_MODES_OPEN:
+        # 阶段未开放的模式：挡死。_auto_try 那一层已经提前返回、根本走不到这里，
+        # 这一条是给「有人直接改库把 mode 写成 full」留的兜底。
+        return (False, 'locked', AUTO_BLOCK_LABEL['locked'])
+    return (True, 'ok', '')
+
+
+def _norm_text(s):
+    """归一化：只留汉字/字母/数字，用于回声比对与长度判断。"""
+    return re.sub(r'[^\w\u4e00-\u9fff]+', '', str(s or ''), flags=re.UNICODE)
+
+
+def auto_echo(text, own):
+    """自己刚发射的内容又被收进来（自激/回声）→ 不能再答一遍。
+
+    这是「不重复自己」那道红线的实现：板端发射余波保护只有几百毫秒，而实际上
+    自发自收在同一台设备上很容易被电平门限重新切开，一旦回声进决策层，助手就会
+    自问自答无限循环。宁可漏判一次「对方正好说了同样的话」。
+    """
+    a = _norm_text(text)
+    if len(a) < 4:
+        return False
+    for o in (own or ()):
+        b = _norm_text(o)
+        if len(b) < 4:
+            continue
+        if a == b or a in b or b in a:
+            return True
+        if difflib.SequenceMatcher(None, a, b).ratio() >= 0.75:
+            return True
+    return False
+
+
+def auto_prefilter(text, own=()):
+    """廉价预筛：返回 (是否值得叫模型, 原因码)。纯函数，不起 LLM。
+
+    板端 LLM 一轮决策要好几秒，而工作线程是**串行**的：每段都叫一次模型，
+    助手就会在思考期间听不见信道。所以先用零成本的规则滤掉明显不值得判的段。
+    """
+    t = str(text or '').strip()
+    core = _norm_text(t)
+    if len(core) < 3:
+        return False, 'short'
+    if not re.search(r'[\u4e00-\u9fffA-Za-z]', core):
+        return False, 'nonspeech'
+    if own and auto_echo(t, own):
+        return False, 'echo'
+    return True, ''
+
+
+def auto_called(text, wake_words=(), told=(), fuzzy=True):
+    """这段是不是在叫我们（点名 / 呼叫本台）。
+
+    只看两类证据，不看模型：
+      * 唤醒词（用宽松变体再扫一遍 —— 主匹配已经把标准写法过了一遍）；
+      * 「自己人呼号」出现在文本里（白名单 + 语音日志那份本台呼号）。
+    """
+    t = str(text or '')
+    if not t.strip():
+        return False
+    for w in (wake_words or ()):
+        if not w:
+            continue
+        for cand in _wake_variants(w, True):
+            rx = _wake_regex(cand, fuzzy)
+            if rx is not None and rx.search(t if fuzzy else _compact(t)[0]):
+                return True
+    up = _norm_text(t).upper()
+    for c in (told or ()):
+        c = _norm_text(c).upper()
+        if len(c) >= 4 and c in up:
+            return True
+    return False
+
+
+def auto_callsigns(text, whitelist=''):
+    """抽取文本里的呼号（含 ICAO 字母解释法），并用白名单纠错。
+
+    复用语音日志那套实现（`voice_service.extract_callsigns` / `correct_callsigns`），
+    两边标准一致；懒加载避免服务启动时就拖入 ASR 侧的重依赖。
+    """
+    t = str(text or '')
+    if not t.strip():
+        return []
+    try:
+        from voice_service import extract_callsigns, correct_callsigns
+        raw = extract_callsigns(t)
+        if not raw:
+            return []
+        wl = [x for x in re.split(r'[,;\s]+', whitelist or '') if x]
+        calls, _fixes = correct_callsigns(raw, wl, 0)
+        return calls
+    except Exception:
+        return []
+
+
 def clamp_reply(text, limit):
     """把回复裁到 limit 字以内，尽量在句末/逗号处断开。返回 (文本, 是否被截断)。"""
     from tts_service import clean_for_tts
@@ -388,7 +713,26 @@ class Store:
     def init(self):
         c = self._conn()
         c.executescript(SCHEMA)
+        self._migrate(c)
         c.commit()
+
+    @staticmethod
+    def _migrate(c):
+        """增量补列（幂等）。老库缺哪列补哪列，已有数据一行不动。"""
+        try:
+            have = {str(r[1]) for r in c.execute(
+                'PRAGMA table_info(assist_turns)').fetchall()}
+        except Exception as e:
+            print('%s 读取表结构失败：%s' % (LOG, e), flush=True)
+            return
+        for name, decl in AUTO_COLUMNS:
+            if name in have:
+                continue
+            try:
+                c.execute('ALTER TABLE assist_turns ADD COLUMN %s %s' % (name, decl))
+                print('%s 迁移：assist_turns 增加列 %s' % (LOG, name), flush=True)
+            except Exception as e:
+                print('%s 迁移列 %s 失败：%s' % (LOG, name, e), flush=True)
 
     def exec(self, sql, args=()):
         c = self._conn()
@@ -421,7 +765,26 @@ class AssistantService:
             'turns': 0, 'tx': 0, 'tx_seconds': 0.0, 'busy_defers': 0,
             'gap_waits': 0, 'truncated': 0, 'errors': 0, 'aborted': 0,
             'quiet_blocked': 0, 'test_turns': 0,
+            # 自主回答（阶段一影子模式）——这几个计数是验收影子期的依据
+            'auto_decided': 0,      # 真的叫了决策模型的段数
+            'auto_skipped': 0,      # 预筛掉、没叫模型的段数
+            'auto_answered': 0,     # 模型判「答」
+            'auto_silent': 0,       # 模型判「默」/解析失败
+            'auto_parse_fail': 0,   # 四行格式没解析出来（fail-closed → 默）
+            'auto_shadow_blocked': 0,   # 判答但被影子锁拦下（阶段一恒等于判答数）
+            'auto_rate_limited': 0,
+            'auto_cooldown': 0,
+            'auto_gap_blocked': 0,
+            'auto_whitelist_blocked': 0,
+            'auto_echo_skipped': 0,
         }
+        # 自主回答的频率状态：发射时刻环 + 呼号冷却表 + 自己刚说过的话
+        self.auto_hits = deque(maxlen=200)
+        self.auto_call_ts = {}
+        self.auto_last_ts = 0.0
+        self.auto_last = {}
+        self.tx_texts = deque(maxlen=8)
+        self.auto_dry_running = False
         self.stage = 'off'
         self.stage_since = time.time()
         self.stage_detail = ''
@@ -444,6 +807,10 @@ class AssistantService:
         self.busy_getter = lambda: False
         self.tx_getter = lambda: False
         self.ask_fn = None
+        # 决策层专用的「一次纯文本调用」：不吃工具、不吃人设规范、不做总结轮。
+        # 决策必须短平快且可复现，走 Agent 那条路会被工具协议和总结轮改写（实测
+        # 总结轮会把「判：答」这种结构化输出重写成一段人话，解析必然失败）。
+        self.ask_raw_fn = None
         self.tts_fn = None
         self.play_fn = None
         self.stop_play_fn = lambda: None
@@ -461,11 +828,13 @@ class AssistantService:
 
     # -- 配置 / 依赖注入 ---------------------------------------------------
     def configure(self, setting_getter, busy_getter, tx_getter, ask_fn, tts_fn,
-                  play_fn, base_prompt_fn, stop_play_fn=None, expand_fn=None):
+                  play_fn, base_prompt_fn, stop_play_fn=None, expand_fn=None,
+                  ask_raw_fn=None):
         self._setting_getter = setting_getter
         self.busy_getter = busy_getter or (lambda: False)
         self.tx_getter = tx_getter or (lambda: False)
         self.ask_fn = ask_fn
+        self.ask_raw_fn = ask_raw_fn
         self.tts_fn = tts_fn
         self.play_fn = play_fn
         self.stop_play_fn = stop_play_fn or (lambda: None)
@@ -845,6 +1214,7 @@ class AssistantService:
             'asr': '识别中', 'think': '思考中', 'synth': '语音合成中',
             'wait': '等待信道', 'tx': '发射中', 'tx-guard': '发射余波保护',
             'followup': '追问窗口', 'error': '异常',
+            'auto': '自主判定',
         }.get(self.stage, self.stage)
 
     # -- 单轮处理 ----------------------------------------------------------
@@ -923,6 +1293,10 @@ class AssistantService:
             kind = 'followup'
             rest = text
         else:
+            # 没命中唤醒词、也不在追问窗口 —— 交给自主决策层判一次（阶段一影子：
+            # 判归判、记归记，**绝不发射**）。返回 True 表示这一段已被自主层记下。
+            if self._auto_try(text, st, item, rec, keep, asr_ms, now):
+                return
             rec['action'] = 'ignored'
             self.counters['ignored'] += 1
             near, ratio = wake_near_miss(text, words, fuzzy)
@@ -931,7 +1305,10 @@ class AssistantService:
                 rec['note'] = '接近唤醒词 %s（相似度 %.2f）' % (near, ratio)
             keep('ignored')
             self._push_recent(rec)
-            self._set_stage('idle', rec['note'] or '未命中唤醒词')
+            # 必须用 .get：note 只在「接近唤醒词」或自主预筛时才写，
+            # 直接下标取会在**普通忽略**这条最常走的路上 KeyError
+            # （板端日志实测：处理失败：KeyError: 'note'，整段处理中断）。
+            self._set_stage('idle', rec.get('note') or '未命中唤醒词')
             return
 
         if not rest:
@@ -950,6 +1327,303 @@ class AssistantService:
         self._push_recent(rec)
         self._answer(rest, st, kind=kind, heard=text, asr_ms=asr_ms,
                      rx_bytes=item['data'], dbfs=item['dbfs'], wake=hit)
+
+    # -- 自主回答（阶段一：影子模式）---------------------------------------
+    def auto_told_callsigns(self, st):
+        """「自己人」呼号：自主白名单 + 语音日志里那份本台呼号。
+
+        只用来判 `被点名` 这个**提示位**，不参与发射与否的判定。
+        """
+        raw = ' '.join([str(st.get('assist_auto_whitelist') or ''),
+                        str(st.get('vlog_callsign_whitelist') or '')])
+        return [x.strip() for x in re.split(r'[,;、\s]+', raw) if len(x.strip()) >= 4]
+
+    def auto_ctx(self, st, text, now=None, busy=False):
+        """决策模型的输入上下文（纯读取，无副作用）。"""
+        now = now if now is not None else time.time()
+        wl = (st.get('assist_auto_whitelist') or '').strip()
+        calls = auto_callsigns(text, wl)
+        cs = calls[0] if calls else ''
+        called = auto_called(text, self.wake_words(st),
+                             self.auto_told_callsigns(st),
+                             _flag(st.get('assist_wake_fuzzy'), True))
+        last = []
+        with self.lock:
+            for h in list(self.history)[-2:]:
+                last.append(('对方', h.get('q') or ''))
+                last.append(('我', h.get('a') or ''))
+        since = int(now - self.auto_last_ts) if self.auto_last_ts else 9999
+        return {'wl': wl, 'callsigns': calls, 'callsign': cs, 'called': called,
+                'last': last[-4:], 'since': since, 'busy': bool(busy)}
+
+    def auto_decide(self, text, st=None, busy=None, now=None, judge=None):
+        """跑一次决策层：**不发射、不入库**，只返回结构化结果。
+
+        实况路径与页面「决策自测」共用这一份实现 —— 自测若走另一条路，测的就不是
+        线上那条路了（这个坑在 PTT 自检上已经踩过一次）。
+
+        `judge` 是**注入判定**（自测专用，为的是不依赖模型也能验闸门链），
+        实况路径永远不传。
+        """
+        st = st or self.settings()
+        now = now if now is not None else time.time()
+        busy = bool(self.busy_getter()) if busy is None else bool(busy)
+        ctx = self.auto_ctx(st, text, now, busy)
+        out = {'text': text, 'mode': auto_mode(st), 'decision': 'silent',
+               'reason': 'silent', 'confidence': 0, 'think': '', 'raw': '',
+               'parse_ok': False, 'called': ctx['called'], 'callsign': ctx['callsign'],
+               'callsigns': ctx['callsigns'], 'prompt': '', 'prompt_chars': 0,
+               'ms': 0, 'provider': '', 'model': '', 'error': '',
+               'gate': 'silent', 'gate_note': '', 'would_reply': False,
+               'allowed': False, 'gate_label': AUTO_BLOCK_LABEL['silent']}
+        think_on = _flag(st.get('assist_auto_think'), True)
+        think_chars = max(8, min(60, int(_f(st.get('assist_auto_think_chars'), 30))))
+        prompt = compose_decision_prompt(
+            text, dict(ctx, think_chars=think_chars if think_on else 8))
+        if not think_on:
+            # 关掉「想」就明确告诉模型别写第一行，而不是让它写完了再丢
+            prompt = prompt.replace('第一行只写 想：不超过%d个字的判断依据' % think_chars,
+                                    '第一行只写 想：无')
+        out['prompt'] = prompt
+        out['prompt_chars'] = len(prompt)
+        if judge:
+            # 注入判定：跳过一次模型调用（自测专用，为了让闸门链可稳定复现）
+            dec = dict(judge)
+            out['raw'] = '（注入判定，未调用模型）'
+            out['parse_ok'] = True
+            out['provider'], out['model'] = 'inject', 'inject'
+        else:
+            if self.ask_raw_fn is None:
+                out['error'] = '决策用 LLM 通道未注入'
+                return out
+            msgs = [{'role': 'system', 'content': AUTO_DECISION_SYS},
+                    {'role': 'user', 'content': prompt}]
+            t0 = time.time()
+            try:
+                r = self.ask_raw_fn(msgs, 0.1, 48) or {}
+            except Exception as e:
+                r = {'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}
+            out['ms'] = int(r.get('ms') or (time.time() - t0) * 1000)
+            out['provider'] = str(r.get('provider') or '')
+            out['model'] = str(r.get('model') or '')
+            if not r.get('ok') or not str(r.get('text') or '').strip():
+                out['error'] = str(r.get('error') or '决策调用无输出')
+                out['decision'], out['reason'], out['gate'] = 'silent', 'error', 'error'
+                return out
+            out['raw'] = str(r.get('text') or '')
+            dec = parse_decision(out['raw'], max_think=think_chars)
+            out['parse_ok'] = bool(dec['ok'])
+        out['decision'] = dec['decision']
+        out['reason'] = dec['reason']
+        out['confidence'] = dec['confidence']
+        out['think'] = dec['think'] if think_on else ''
+        allowed, code, note = auto_gate(
+            dec['decision'], dec['reason'], mode=out['mode'],
+            callsign=ctx['callsign'], whitelist=ctx['wl'],
+            min_gap=_f(st.get('assist_auto_min_gap'), 90.0),
+            max_per_hour=int(_f(st.get('assist_auto_max_per_hour'), 6)),
+            cooldown=_f(st.get('assist_auto_call_cooldown'), 600.0),
+            hits=list(self.auto_hits),
+            call_ts=self.auto_call_ts.get((ctx['callsign'] or '').upper(), 0.0),
+            last_tx=self.auto_last_ts, now=now,
+            quiet=in_quiet_hours((st.get('assist_quiet_hours') or '').strip())
+            if (st.get('assist_quiet_hours') or '').strip() else False,
+            test_mode=_flag(st.get('assist_test_mode'), False),
+            busy=busy)
+        out['allowed'], out['gate'], out['gate_note'] = allowed, code, note
+        out['gate_label'] = AUTO_BLOCK_LABEL.get(code, code)
+        # 影子期：除了「影子」那一道锁，其余闸门全放行 = 本来会发射
+        out['would_reply'] = code in ('shadow', 'ok')
+        return out
+
+    def _auto_try(self, text, st, item, rec, keep, asr_ms, now):
+        """实况路径的自主判定入口。返回 True = 这一段已由自主层记档。
+
+        BUSY 用的是**此刻**的信道状态，不是这一段的 BUSY 标志：段标志说的是
+        「刚才那段有载波」（那正是我们听见对方的原因），拿它当发射红线会导致
+        「只要听见了就永远不许答」。真正的发射前检查在 _transmit 里还会再做一遍。
+        """
+        if not _flag(st.get('assist_auto_enabled'), True):
+            return False
+        mode = auto_mode(st)
+        if mode not in AUTO_MODES_OPEN:
+            # 未开放的模式（half/full）：连决策模型都不叫，避免白烧十几秒
+            return False
+        ok_pre, why = auto_prefilter(text, list(self.tx_texts))
+        if not ok_pre:
+            self.counters['auto_skipped'] = int(self.counters.get('auto_skipped', 0)) + 1
+            if why == 'echo':
+                self.counters['auto_echo_skipped'] = int(
+                    self.counters.get('auto_echo_skipped', 0)) + 1
+                rec['note'] = '自主：与自己刚发射的内容雷同，跳过'
+            elif why == 'short':
+                rec['note'] = '自主：内容太短，跳过'
+            else:
+                rec['note'] = '自主：不像有效语音，跳过'
+            return False
+        self.counters['auto_decided'] = int(self.counters.get('auto_decided', 0)) + 1
+        res = self.auto_decide(text, st, busy=bool(self.busy_getter()), now=now)
+        code = str(res.get('gate') or 'silent')
+        if res.get('raw') and not res.get('parse_ok'):
+            self.counters['auto_parse_fail'] = int(
+                self.counters.get('auto_parse_fail', 0)) + 1
+        if res['decision'] == 'answer':
+            self.counters['auto_answered'] = int(
+                self.counters.get('auto_answered', 0)) + 1
+        else:
+            self.counters['auto_silent'] = int(self.counters.get('auto_silent', 0)) + 1
+        for name, key in (('whitelist', 'auto_whitelist_blocked'),
+                          ('cooldown', 'auto_cooldown'), ('rate', 'auto_rate_limited'),
+                          ('gap', 'auto_gap_blocked'), ('shadow', 'auto_shadow_blocked')):
+            if code == name:
+                self.counters[key] = int(self.counters.get(key, 0)) + 1
+        would = bool(res.get('would_reply'))
+        label = AUTO_BLOCK_LABEL.get(code, code)
+        rec['auto'] = {
+            'decision': res['decision'], 'reason': code, 'gate_label': label,
+            'model_reason': res['reason'], 'confidence': res['confidence'],
+            'think': res['think'], 'callsign': res['callsign'],
+            'would_reply': would, 'ms': res['ms'], 'error': res['error'],
+            'parse_ok': res['parse_ok']}
+        rec['action'] = 'shadow' if would else 'silent'
+        rec['note'] = '自主：%s（%s）' % (
+            '应答' if res['decision'] == 'answer' else '保持静默', label)
+        # 影子行一定 dry=1 —— 它**没有**发射动作，查询时不能按 sent 统计
+        rec['id'] = self._save_turn(
+            'auto', text, '', rec['action'], error=str(res.get('error') or ''),
+            asr_ms=asr_ms, rx_bytes=(item.get('data') if would else None),
+            dbfs=item.get('dbfs') or 0.0, decision=res['decision'], reason=code,
+            confidence=res['confidence'], think=res['think'],
+            callsigns=','.join(res['callsigns']), would_reply=1 if would else 0, dry=1)
+        keep(rec['action'])
+        self._push_recent(rec)
+        self.auto_last = dict(res, prompt='', ts=time.strftime('%H:%M:%S'))
+        if would:
+            self._set_stage('auto', '影子模式：本应发射（未发射）')
+            print('%s [影子] 本应回答「%s」→ 想：%s（%s，信 %d，%dms）'
+                  % (LOG, text[:40], res['think'][:30] or '-', code,
+                     res['confidence'], res['ms']), flush=True)
+            if _flag(st.get('assist_auto_dry_answer'), True):
+                self._auto_dry_answer(text, st, res, asr_ms, item)
+        else:
+            self._set_stage('auto', '自主判定：保持静默（%s）' % label)
+        return True
+
+    def _auto_dry_answer(self, text, st, res, asr_ms, item):
+        """影子期把「本来会说的话」生成出来，但**只合成不发射**（no_tx=True 硬保证）。
+
+        只看「判答/判默」无法验收答得对不对，所以影子期连答案一起生成、写进记录，
+        人再回头看。放独立线程：一轮要十几秒，压在工作线程上会让助手在这期间听不见
+        唤醒词；同一时刻只跑一轮，来不及就跳过并在返回值里说明。
+        """
+        with self.lock:
+            if self.auto_dry_running:
+                print('%s [影子] 上一轮试答还没跑完，本段只留判定', LOG, flush=True)
+                return False
+            self.auto_dry_running = True
+
+        def _run():
+            try:
+                self._answer(text, st, kind='auto-answer', heard=text, asr_ms=asr_ms,
+                             rx_bytes=None, dbfs=item.get('dbfs') or 0.0, no_tx=True,
+                             auto=res)
+            except Exception as e:
+                print('%s [影子] 试答失败：%s: %s' % (LOG, type(e).__name__, e), flush=True)
+            finally:
+                with self.lock:
+                    self.auto_dry_running = False
+
+        threading.Thread(target=_run, daemon=True, name='assist-auto-dry').start()
+        return True
+
+    def test_decide(self, text, busy=None, store=False, judge=None):
+        """页面「决策自测」：给定一句话，回报决策层全链路结果（默认不入库）。
+
+        `judge` 可以**注入**判定结果（{'decision':'answer','reason':'question'}），
+        用来在不依赖 1.5B 模型心情的前提下验闸门链：红线必须与模型无关，
+        「模型说答但信道忙」这类组合只有注入才能稳定复现。
+        注入只存在于这条自测路径，**实况路径（_auto_try）永远不传它**。
+        """
+        text = (text or '').strip()
+        if not text:
+            return {'ok': False, 'error': '测试文本为空'}
+        st = self.settings()
+        forced = self._forced_judge(judge)
+        res = self.auto_decide(text, st, busy=busy, judge=forced) if forced \
+            else self.auto_decide(text, st, busy=busy)
+        res.pop('prompt', None)
+        res['ok'] = not res.get('error')
+        res['forced'] = bool(forced)
+        res['own'] = [x[:40] for x in self.tx_texts]
+        res['prefilter'] = auto_prefilter(text, list(self.tx_texts))[1] or 'pass'
+        res['busy'] = bool(self.busy_getter()) if busy is None else bool(busy)
+        res['whitelist'] = (st.get('assist_auto_whitelist') or '').strip()
+        res['limits'] = {'max_per_hour': int(_f(st.get('assist_auto_max_per_hour'), 6)),
+                         'min_gap': _f(st.get('assist_auto_min_gap'), 90.0),
+                         'cooldown': _f(st.get('assist_auto_call_cooldown'), 600.0)}
+        if store:
+            self._save_turn('auto-test', text, '', 'shadow' if res['would_reply'] else 'silent',
+                            decision=res['decision'], reason=res['gate'],
+                            confidence=res['confidence'], think=res['think'],
+                            callsigns=','.join(res['callsigns']),
+                            would_reply=1 if res['would_reply'] else 0, dry=1)
+        return res
+
+    @staticmethod
+    def _forced_judge(judge):
+        """校验注入的判定：只认闭集里的写法，写错就当没注入（宁可走真模型）。"""
+        if not isinstance(judge, dict):
+            return None
+        d = str(judge.get('decision') or '').strip().lower()
+        if d in ('answer', '答', '1', 'true'):
+            d = 'answer'
+        elif d in ('silent', '默', '0', 'false'):
+            d = 'silent'
+        else:
+            return None
+        r = str(judge.get('reason') or '').strip()
+        # 理由两种写法都收：中文闭集标签（'直接提问'）或结论码（'question'）
+        if r and r not in AUTO_REASON_CODE and r not in AUTO_REASON_LABEL:
+            return None
+        code = AUTO_REASON_CODE.get(r, r)
+        if d == 'answer' and code not in AUTO_ANSWER_REASONS:
+            # 注入「答」时必须给一个可接受的理由码，否则验的是自相矛盾那条分支
+            return None
+        return {'decision': d, 'reason': code or ('question' if d == 'answer' else 'unrelated'),
+                'confidence': max(0, min(9, int(judge.get('confidence') or 5))),
+                'think': str(judge.get('think') or '（注入判定）')[:60]}
+
+    def decide_status(self, st=None):
+        """页面/接口用的自主回答概览。"""
+        st = st or self.settings()
+        now = time.time()
+        hits = [t for t in self.auto_hits if t and (now - t) < 3600]
+        return {
+            'enabled': _flag(st.get('assist_auto_enabled'), True),
+            'mode': auto_mode(st),
+            'mode_label': {'shadow': '影子模式（只记录不发射）',
+                           'half': '半自动（阶段二开放）',
+                           'full': '全自动（阶段二开放）'}.get(auto_mode(st), ''),
+            'open_modes': list(AUTO_MODES_OPEN),
+            'whitelist': (st.get('assist_auto_whitelist') or '').strip(),
+            'max_per_hour': int(_f(st.get('assist_auto_max_per_hour'), 6)),
+            'min_gap': _f(st.get('assist_auto_min_gap'), 90.0),
+            'cooldown': _f(st.get('assist_auto_call_cooldown'), 600.0),
+            'think': _flag(st.get('assist_auto_think'), True),
+            'think_chars': int(_f(st.get('assist_auto_think_chars'), 30)),
+            'dry_answer': _flag(st.get('assist_auto_dry_answer'), True),
+            'used_last_hour': len(hits),
+            'last_auto_ago': round(now - self.auto_last_ts, 1) if self.auto_last_ts else -1,
+            'dry_running': bool(self.auto_dry_running),
+            'own': [x[:60] for x in self.tx_texts],
+            'last': {k: v for k, v in (self.auto_last or {}).items() if k != 'prompt'},
+            'reason_labels': dict(AUTO_BLOCK_LABEL),
+            'counters': {k: self.counters.get(k, 0) for k in (
+                'auto_decided', 'auto_skipped', 'auto_answered', 'auto_silent',
+                'auto_parse_fail', 'auto_shadow_blocked', 'auto_rate_limited',
+                'auto_cooldown', 'auto_gap_blocked', 'auto_whitelist_blocked',
+                'auto_echo_skipped')},
+        }
 
     def _decode(self, data):
         try:
@@ -1000,9 +1674,24 @@ class AssistantService:
 
     # -- 回答（LLM → TTS → 发射）------------------------------------------
     def _answer(self, question, st, kind='wake', heard='', asr_ms=0,
-                rx_bytes=None, dbfs=0.0, wake='', no_tx=False):
-        """完整跑一轮回答。kind: wake / followup / ack / test。"""
+                rx_bytes=None, dbfs=0.0, wake='', no_tx=False, auto=None):
+        """完整跑一轮回答。kind: wake / followup / ack / test / auto-answer。
+
+        `auto` 给定时表示这是自主决策层触发的一轮（阶段一影子）：照常生成答案，
+        但 `no_tx` 强制为真，且这一行记成 dry —— 它没有发射动作。
+        """
         self.stop_flag = False
+        auto = dict(auto or {})
+        auto_kw = {}
+        if auto:
+            no_tx = True
+            auto_kw = {'decision': auto.get('decision', ''),
+                       'reason': auto.get('gate') or auto.get('reason', ''),
+                       'confidence': int(auto.get('confidence') or 0),
+                       'think': auto.get('think', ''),
+                       'callsigns': ','.join(auto.get('callsigns') or []),
+                       'would_reply': 1 if auto.get('would_reply') else 0,
+                       'dry': 1}
         if kind != 'ack':
             self._set_stage('think', '思考中')
         base = ''
@@ -1050,7 +1739,7 @@ class AssistantService:
             self._save_turn(kind, heard, '', 'error', error=self.last_error, wake=wake,
                             asr_ms=asr_ms, llm_ms=llm_ms, prompt_chars=prompt_chars,
                             provider=provider, model=model, iters=iters, tools=tools,
-                            rx_bytes=rx_bytes, dbfs=dbfs)
+                            rx_bytes=rx_bytes, dbfs=dbfs, **auto_kw)
             return
         limit = self.max_chars(st)
         speak, truncated = clamp_reply(reply, limit)
@@ -1066,7 +1755,7 @@ class AssistantService:
             self._save_turn(kind, heard, reply, 'error', error=self.last_error, wake=wake,
                             asr_ms=asr_ms, llm_ms=llm_ms, prompt_chars=prompt_chars,
                             provider=provider, model=model, iters=iters, tools=tools,
-                            rx_bytes=rx_bytes, dbfs=dbfs)
+                            rx_bytes=rx_bytes, dbfs=dbfs, **auto_kw)
             return
         if truncated:
             self.counters['truncated'] += 1
@@ -1090,7 +1779,8 @@ class AssistantService:
             self._save_turn(kind, heard, speak, 'error', error=self.last_error, wake=wake,
                             asr_ms=asr_ms, llm_ms=llm_ms, tts_ms=tts_ms,
                             prompt_chars=prompt_chars, provider=provider, model=model,
-                            iters=iters, tools=tools, rx_bytes=rx_bytes, dbfs=dbfs)
+                            iters=iters, tools=tools, rx_bytes=rx_bytes, dbfs=dbfs,
+                            **auto_kw)
             return
         # 发射
         t_tx = time.time()
@@ -1099,6 +1789,10 @@ class AssistantService:
         ok = bool(res.get('ok'))
         skipped = bool(res.get('skipped'))
         action = 'sent' if ok else ('skipped' if skipped else 'failed')
+        if auto and not ok:
+            # 影子轮：no_tx 必然 skipped，但这不是「被拦下的发射」，是它本来就不发。
+            # action 记 shadow，免得 day_stats 的 skipped/aborted 被影子刷成噪声。
+            action = 'shadow'
         if ok:
             self.counters['tx'] += 1
             self.counters['tx_seconds'] += tx_seconds
@@ -1110,6 +1804,8 @@ class AssistantService:
             self._set_stage('followup', '追问窗口')
         elif skipped:
             self.counters['aborted'] += 1
+            if auto:
+                self.counters['aborted'] -= 1
             if '禁发时段' in str(res.get('error') or ''):
                 self.counters['quiet_blocked'] += 1
             self._set_stage('idle', str(res.get('error') or '已跳过'))
@@ -1118,6 +1814,8 @@ class AssistantService:
             self.last_error = str(res.get('error') or '发射失败')
             self._set_stage('error', self.last_error)
         self.counters['turns'] += 1
+        if ok:
+            self.tx_texts.append(speak)     # 供「不重复自己」的回声闸门比对
         self._save_turn(kind, heard, speak, action, wake=wake,
                         error=str(res.get('error') or ''),
                         tx_seconds=tx_seconds, truncated=truncated,
@@ -1125,7 +1823,9 @@ class AssistantService:
                         wait_s=float(res.get('waited') or 0.0),
                         prompt_chars=prompt_chars, reply_chars=len(speak),
                         provider=provider, model=model, iters=iters, tools=tools,
-                        rx_bytes=rx_bytes, tx_wav=wav_path, dbfs=dbfs)
+                        rx_bytes=rx_bytes, tx_wav=wav_path, dbfs=dbfs, **auto_kw)
+        if auto:
+            self._set_stage('auto', '影子试答完成（未发射）')
         print('%s [%s] %s → %s（发射 %.1fs%s）' % (
             LOG, kind, heard[:40], speak[:60], tx_seconds,
             '，已截断' if truncated else ''), flush=True)
@@ -1250,7 +1950,9 @@ class AssistantService:
                    wake='',
                    truncated=False, asr_ms=0, llm_ms=0, tts_ms=0, wait_s=0.0,
                    prompt_chars=0, reply_chars=0, provider='', model='', iters=0,
-                   tools='', rx_bytes=None, tx_wav='', dbfs=0.0):
+                   tools='', rx_bytes=None, tx_wav='', dbfs=0.0,
+                   decision='', reason='', confidence=0, think='', callsigns='',
+                   would_reply=0, dry=0):
         rx_name = ''
         try:
             rx_name = self._store_wav(rx_bytes, 'rx')
@@ -1266,12 +1968,16 @@ class AssistantService:
             cur = self.store.exec(
                 'INSERT INTO assist_turns(ts,kind,wake,heard,reply,action,tx_seconds,'
                 'truncated,error,asr_ms,llm_ms,tts_ms,wait_s,rx_wav,tx_wav,'
-                'prompt_chars,reply_chars,provider,model,iters,tools,dbfs) '
-                'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                'prompt_chars,reply_chars,provider,model,iters,tools,dbfs,'
+                'decision,reason,confidence,think,callsigns,would_reply,dry) '
+                'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                 (_now_iso(), kind, wake, heard, reply, action, float(tx_seconds),
                  1 if truncated else 0, error[:300], int(asr_ms), int(llm_ms),
                  int(tts_ms), float(wait_s), rx_name, tx_name, int(prompt_chars),
-                 int(reply_chars), provider, model, int(iters), tools, float(dbfs)))
+                 int(reply_chars), provider, model, int(iters), tools, float(dbfs),
+                 str(decision or ''), str(reason or ''), int(confidence or 0),
+                 str(think or '')[:400], str(callsigns or '')[:120],
+                 1 if would_reply else 0, 1 if dry else 0))
             return int(getattr(cur, 'lastrowid', 0) or 0)
         except Exception as e:
             print('%s 保存轮次失败：%s' % (LOG, e), flush=True)
@@ -1550,6 +2256,7 @@ class AssistantService:
             'llm_warm': dict(self.llm_warm,
                              age=round(now - float(self.llm_warm.get('ts') or now), 1)),
             'counters': dict(self.counters),
+            'auto': self.decide_status(st),
             'today': self.day_stats(),
             'last_error': self.last_error,
             'uptime': round(now - self.started_at, 1),

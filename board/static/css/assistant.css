@@ -76,6 +76,14 @@
 .as-line.hit  { background: rgba(34, 197, 94, .10); }
 .as-line.ign  { opacity: .62; }
 .as-line.err  { background: rgba(239, 68, 68, .10); }
+/* 自主决策：判「应发射」的段要显眼（影子期它其实没发射，最容易被看漏） */
+.as-line.auto { background: rgba(168, 85, 247, .12); }
+.as-auto {
+  flex: 0 0 auto; font-size: 11px; padding: 1px 7px; border-radius: 99px;
+  background: #3b0764; color: #e9d5ff; white-space: nowrap;
+}
+.as-auto.no  { background: #27272a; color: #a1a1aa; }
+.as-auto i { font-style: normal; opacity: .75; }
 .as-tag {
   flex: 0 0 auto; font-size: 11px; padding: 1px 7px; border-radius: 99px;
   background: #1e3a5f; color: #93c5fd;
@@ -116,6 +124,8 @@
 .as-pill.skipped { background: #713f12; color: #fde68a; }
 .as-pill.failed  { background: #7f1d1d; color: #fca5a5; }
 .as-pill.error   { background: #7f1d1d; color: #fca5a5; }
+.as-pill.shadow  { background: #3b0764; color: #e9d5ff; }
+.as-pill.silent  { background: #27272a; color: #a1a1aa; }
 
 /* ---------- 标签页 ---------- */
 .as-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 16px 0 10px; }
