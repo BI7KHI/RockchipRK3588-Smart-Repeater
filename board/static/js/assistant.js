@@ -117,6 +117,41 @@
       ]
     },
     {
+      title: '自主回答（听到就判断该不该答）',
+      hint: '开了这项，助手不再只认唤醒词：每听到一段话先自己判断「要不要接」，'
+          + '再叠上频率红线（每小时上限、与前一次发射的最小间隔、同呼号冷却、'
+          + '白名单、禁发时段、信道忙、全局测试模式）。'
+          + '判定由一个**独立的小模型调用**完成，它只输出四行：'
+          + '想（判断依据）／判（答或默）／由（闭集理由）／信（置信度）；'
+          + '格式解析不出来一律判「默」，「想」只进日志与页面、**绝不朗读**。'
+          + '当前只开放**影子模式**：判定与记录全跑，但一次都不发射 ——'
+          + '先在「手动测试 → 自主决策自测」和实况流的判定徽章上攒够证据，'
+          + '确认判断靠谱了再开阶段二。',
+      items: [
+        { k: 'assist_auto_enabled', f: '启用自主回答判断', t: 'bool',
+          tip: '关掉则回到「只认唤醒词」的老行为' },
+        { k: 'assist_auto_mode', f: '自主模式', t: 'select',
+          tip: '半自动/全自动的代码路径已就位，但闸门未开放，选了也会被强制回落成影子模式',
+          opts: [['shadow', '影子模式（只记录不发射，阶段一）'],
+                 ['half', '半自动（阶段二开放 · 现在选不了）', 1],
+                 ['full', '全自动（阶段二开放 · 现在选不了）', 1]] },
+        { k: 'assist_auto_max_per_hour', f: '每小时最多主动回答 次', t: 'num',
+          min: 0, max: 120, step: 1, tip: '0 = 一律不主动答；影子期按此上限换算可达率' },
+        { k: 'assist_auto_min_gap', f: '两次主动回答最小间隔 秒', t: 'num',
+          min: 0, max: 3600, step: 10, tip: '这条是自主层的额外间隔，与「发射安全」里的通用间隔叠加生效' },
+        { k: 'assist_auto_call_cooldown', f: '同一呼号冷却 秒', t: 'num',
+          min: 0, max: 86400, step: 60, tip: '刚答过的人再说话，这段时间内不再插话' },
+        { k: 'assist_auto_whitelist', f: '呼号白名单', t: 'text', span: 2,
+          tip: '只答这些呼号（逗号分隔）；留空 = 不限呼号' },
+        { k: 'assist_auto_think', f: '让模型写出判断依据（想）', t: 'bool',
+          tip: '关掉省几秒生成时间，代价是页面上看不到它为什么这么判' },
+        { k: 'assist_auto_think_chars', f: '「想」最多 字', t: 'num', min: 8, max: 60, step: 2,
+          tip: '只在页面与日志里显示，不会被朗读出去' },
+        { k: 'assist_auto_dry_answer', f: '影子期同时生成「本来会说的那句话」', t: 'bool',
+          tip: '只合成试听、绝不发射；只看判答/判默无法验收答得对不对，所以默认打开' }
+      ]
+    },
+    {
       title: 'LLM 与回复预算', hint: '防止长输入长输出挤爆本地上下文 —— 这是本地 1.5B 模型最容易空输出的原因。',
       items: [
         // LLM 提供方已统一到「设置 / 校准」页并全局生效，助手页不再重复设置
@@ -178,7 +213,7 @@
       h += '<select id="' + id + '">';
       it.opts.forEach(function (o) {
         h += '<option value="' + esc(o[0]) + '"' + (String(val) === o[0] ? ' selected' : '') +
-          '>' + esc(o[1]) + '</option>';
+          (o[2] ? ' disabled' : '') + '>' + esc(o[1]) + '</option>';
       });
       h += '</select>';
     } else if (it.t === 'textarea') {
@@ -303,11 +338,35 @@
             cls += ' ign'; tag = '忽略';
           } else if (r.action === 'duplicate') {
             cls += ' ign'; tag = '重复';
+          } else if (r.action === 'silent') {
+            cls += ' ign'; tag = '自主·默';
+          } else if (r.action === 'shadow') {
+            cls += ' auto'; tag = '自主·本应答';
+          }
+          var extra = '';
+          if (r.auto) {
+            var a = r.auto;
+            // 徽章里**只放短结论**（应答 / 默）。判定依据「想」有几十字，塞进徽章会
+            // 把识别文本挤成一字一行：`.as-line` 是 flex 行，徽章原来是
+            // flex:0 0 auto + nowrap → 它先占满宽度，`.x`(flex:1+word-break:break-all)
+            // 被压到 0 宽 → 每个字一行、整行撑出横向滚动条（板端实测截图）。
+            // 详细依据整条放进 title，悬停即看；完整「想」在下面的对话记录里。
+            var tip = '判定：' + (a.decision === 'answer' ? '答' : '默') +
+              '　结论：' + (a.gate_label || a.reason) +
+              '　置信：' + (a.confidence == null ? '-' : a.confidence) +
+              '　模型理由码：' + (a.model_reason || '-') +
+              '　决策耗时：' + (a.ms || 0) + 'ms' +
+              (a.parse_ok ? '' : '　（四行格式未解析出 → 按默处理）') +
+              (a.callsign ? '　呼号：' + a.callsign : '') +
+              (a.error ? '　错误：' + a.error : '') +
+              (a.think ? '　想：' + a.think : '');
+            extra = '<span class="as-auto ' + (a.would_reply ? 'yes' : 'no') + '" title="' +
+              esc(tip) + '">' + esc(a.would_reply ? '应答' : '默') + '</span>';
           }
           html += '<div class="' + cls + '"><span class="t">' + esc(r.ts) + '</span>' +
             '<span class="as-tag ' + tagCls + '">' + esc(tag) + '</span>' +
             '<span class="x">' + (r.heard ? esc(r.heard) : '<span class="muted">（空）</span>') +
-            '</span><span class="t">' + (r.seconds != null ? r.seconds + 's' : '') +
+            '</span>' + extra + '<span class="t">' + (r.seconds != null ? r.seconds + 's' : '') +
             (r.asr_ms ? ' / ' + r.asr_ms + 'ms' : '') + '</span>' +
             (r.error ? '<span class="x muted">' + esc(r.error) + '</span>' : '') + '</div>';
         });
@@ -387,7 +446,18 @@
       ['间隔不足放弃', c.gap_waits, '距上次发射太近'],
       ['回复被截断', c.truncated, '超过字数上限'],
       ['手动停止', c.aborted, '含禁发时段拦截'],
-      ['异常', c.errors, '识别/LLM/合成/发射']
+      ['异常', c.errors, '识别/LLM/合成/发射'],
+      ['自主·送模型判定', c.auto_decided, '预筛通过、真的叫了决策模型'],
+      ['自主·预筛跳过', c.auto_skipped, '太短/数据音/与自己刚说的雷同'],
+      ['自主·判答', c.auto_answered, '模型判「这段该答」'],
+      ['自主·判默', c.auto_silent, '模型判默或格式解析失败'],
+      ['自主·格式解析失败', c.auto_parse_fail, 'fail-closed：一律按默处理'],
+      ['自主·被闸门拦下', c.auto_shadow_blocked, '影子期=本应发射的次数'],
+      ['自主·频率超限', c.auto_rate_limited, '本小时已达上限'],
+      ['自主·同呼号冷却', c.auto_cooldown, '刚答过这个人'],
+      ['自主·间隔不足', c.auto_gap_blocked, '距上次主动回答太近'],
+      ['自主·白名单外', c.auto_whitelist_blocked, '呼号不在白名单'],
+      ['自主·回声跳过', c.auto_echo_skipped, '自己刚发射的内容又被收进来']
     ];
     $('#as-counters').innerHTML = items.map(function (x) {
       return '<div class="cell"><div class="k">' + x[0] + '</div><div class="v">' +
@@ -395,6 +465,7 @@
     }).join('');
 
     var t = st.today || {};
+    var au = st.auto || {};
     var stat = [
       ['今日轮次', t.turns || 0, ''],
       ['今日发射', t.sent || 0, '成功占用信道次数'],
@@ -403,7 +474,14 @@
       ['今日信道占用', Math.round(t.tx_seconds || 0) + ' s', '发射总时长'],
       ['平均 LLM 耗时', Math.round(t.avg_llm || 0) + ' ms', ''],
       ['平均 ASR 耗时', Math.round(t.avg_asr || 0) + ' ms', ''],
-      ['运行时长', fmtDur(st.uptime || 0), '服务启动至今']
+      ['运行时长', fmtDur(st.uptime || 0), '服务启动至今'],
+      ['自主模式', au.mode_label || '—', '当前只开放影子模式：只记录不发射'],
+      ['本小时已主动答', (au.used_last_hour == null ? 0 : au.used_last_hour) +
+        ' / ' + (au.max_per_hour == null ? '-' : au.max_per_hour), '实际发射计数；影子期恒为 0'],
+      ['距上次主动答', au.last_auto_ago == null || au.last_auto_ago < 0
+        ? '—' : fmtDur(au.last_auto_ago) + '前', ''],
+      ['影子试答', au.dry_running ? '进行中' : '空闲',
+        au.dry_answer ? '会同时生成「本来会说的那句话」（不发射）' : '已关闭']
     ];
     $('#as-stat').innerHTML = stat.map(function (x) {
       return '<div class="cell"><div class="k">' + x[0] + '</div><div class="v">' + x[1] +
@@ -429,8 +507,18 @@
       var pills = '<span class="as-pill ' + esc(r.action) + '">' + esc(r.action) + '</span>';
       if (r.kind && r.kind !== 'wake') pills += '<span class="as-pill">' + esc(r.kind) + '</span>';
       if (r.truncated) pills += '<span class="as-pill skipped">已截断</span>';
+      if (r.dry) {
+        pills += '<span class="as-pill skipped" title="影子记录：这一行没有发射动作">' +
+          (r.would_reply ? '本应发射·未发射' : '未发射') + '</span>';
+      }
       var foot = [];
       if (r.wake) foot.push('唤醒:' + esc(r.wake));
+      if (r.decision) {
+        foot.push('自主:' + (r.decision === 'answer' ? '答' : '默') +
+          (r.reason ? '(' + esc(r.reason) + ')' : '') +
+          (r.confidence ? ' 信' + r.confidence : ''));
+      }
+      if (r.callsigns) foot.push('呼号 ' + esc(r.callsigns));
       if (r.tx_seconds) foot.push('发射 ' + Number(r.tx_seconds).toFixed(1) + 's');
       if (r.wait_s) foot.push('等待 ' + Number(r.wait_s).toFixed(1) + 's');
       if (r.asr_ms) foot.push('ASR ' + r.asr_ms + 'ms');
@@ -450,6 +538,8 @@
         (r.heard ? esc(r.heard) : '<span class="muted">（无）</span>') + '</span></div>' +
         '<div class="as-msg reply"><span class="who">助手</span><span class="txt">' +
         (r.reply ? esc(r.reply) : '<span class="muted">（无）</span>') + '</span></div>' +
+        (r.think ? '<div class="as-msg"><span class="who">想</span><span class="txt muted">' +
+          esc(r.think) + '</span></div>' : '') +
         (r.error ? '<div class="as-msg"><span class="who">错误</span><span class="txt muted">' +
           esc(r.error) + '</span></div>' : '') +
         '<div class="as-turn-foot"><span>' + foot.join(' · ') + '</span>' +
@@ -612,9 +702,69 @@
         }).catch(function () { btn.disabled = false; toast('请求失败'); });
     });
 
+    // 自主决策自测：给一句话，看决策层与闸门怎么判（不发射）
+    $('#btn-as-auto-test').addEventListener('click', function () {
+      var text = ($('#as-auto-text').value || '').trim();
+      if (!text) { toast('请输入要判定的语音内容'); return; }
+      var btn = this;
+      var body = {
+        text: text,
+        busy: !!($('#as-auto-busy') && $('#as-auto-busy').checked),
+        store: !!($('#as-auto-store') && $('#as-auto-store').checked)
+      };
+      btn.disabled = true;
+      $('#as-auto-state').textContent = '判定中…（要叫一次决策模型，板端约几秒）';
+      api('/api/assist/auto/test', { method: 'POST', body: JSON.stringify(body) })
+        .then(function (d) {
+          btn.disabled = false;
+          if (!d.ok && !d.decision) {
+            $('#as-auto-state').textContent = d.error || '失败';
+            $('#as-auto-out').textContent = d.error || '失败';
+            return;
+          }
+          var verdict = d.decision === 'answer' ? '判：答' : '判：默';
+          var concl = d.would_reply ? '本应发射（影子模式：未发射）'
+            : ('不发射 · ' + (d.gate_label || d.gate));
+          $('#as-auto-state').textContent = verdict + ' · ' + concl + ' · ' +
+            (d.ms || 0) + 'ms';
+          var lines = [
+            '预筛：' + (d.prefilter === 'pass' ? '通过（值得叫模型）' : ('直接跳过（' + d.prefilter + '）')),
+            '是否在叫我们：' + (d.called ? '是' : '否') +
+              (d.callsigns && d.callsigns.length ? '　呼号：' + d.callsigns.join(',') : ''),
+            '模型四行原文：',
+            (d.raw || '（无输出）'),
+            '',
+            '解析：' + (d.parse_ok ? '成功' : '失败 → fail-closed 按默处理') +
+              '　判定=' + d.decision + '　模型理由码=' + d.reason +
+              '　置信=' + d.confidence,
+            '闸门结论：' + (d.gate || '-') + '（' + (d.gate_label || '') + '）' +
+              (d.gate_note ? '　' + d.gate_note : ''),
+            '本应发射：' + (d.would_reply ? '是（影子期不发射）' : '否'),
+            '想（不会朗读）：' + (d.think || '（无）'),
+            '自述：已答过的内容=' + JSON.stringify(d.own || []) +
+              '　设置上限=' + JSON.stringify(d.limits || {}),
+            '通道：' + (d.provider || '-') + ' / ' + (d.model || '-') +
+              '　耗时=' + (d.ms || 0) + 'ms' +
+              (d.error ? '　错误：' + d.error : ''),
+            '提示词字数：' + (d.prompt_chars || 0)
+          ];
+          $('#as-auto-out').textContent = lines.join('\n');
+          if (body.store) setTimeout(loadTurns, 600);
+        }).catch(function () {
+          btn.disabled = false;
+          $('#as-auto-state').textContent = '请求失败';
+        });
+    });
+
     $$('[data-fill]').forEach(function (b) {
       b.addEventListener('click', function () {
         $('#as-test-text').value = b.getAttribute('data-fill');
+      });
+    });
+
+    $$('[data-afill]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        $('#as-auto-text').value = b.getAttribute('data-afill');
       });
     });
 

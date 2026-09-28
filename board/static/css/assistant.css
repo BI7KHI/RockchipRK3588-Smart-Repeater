@@ -62,20 +62,31 @@
 /* ---------- 实况识别流 ---------- */
 .as-sub { color: var(--muted); font-size: 12px; margin: 10px 0 6px; }
 .as-stream {
-  max-height: 240px; overflow-y: auto;
+  max-height: 240px; overflow-y: auto; overflow-x: hidden;
   border: 1px solid var(--border); border-radius: 8px; background: #0d1524;
 }
 .as-line {
   display: flex; gap: 8px; align-items: baseline;
   padding: 6px 10px; border-bottom: 1px solid rgba(38, 51, 77, .6);
-  font-size: 13px;
+  font-size: 13px; min-width: 0;
 }
 .as-line:last-child { border-bottom: 0; }
 .as-line .t { color: var(--muted); font-size: 11px; flex: 0 0 auto; font-variant-numeric: tabular-nums; }
-.as-line .x { flex: 1; min-width: 0; word-break: break-all; }
+/* 识别文本最少留 6 个字宽：不能让它被行内的徽章压成「一字一行」 */
+.as-line .x { flex: 1 1 auto; min-width: 6em; word-break: break-all; }
 .as-line.hit  { background: rgba(34, 197, 94, .10); }
 .as-line.ign  { opacity: .62; }
 .as-line.err  { background: rgba(239, 68, 68, .10); }
+/* 自主决策：判「应发射」的段要显眼（影子期它其实没发射，最容易被看漏）。
+   徽章**不许被压缩**（压了就只剩「应…」，实测过），靠两点保证它不撑破行：
+   max-width 封顶 + 省略号；识别文本自己留 6em 最小宽度。 */
+.as-line.auto { background: rgba(168, 85, 247, .12); }
+.as-auto {
+  flex: 0 0 auto; max-width: 30%; overflow: hidden; text-overflow: ellipsis;
+  font-size: 11px; padding: 1px 7px; border-radius: 99px;
+  background: #3b0764; color: #e9d5ff; white-space: nowrap;
+}
+.as-auto.no  { background: #27272a; color: #a1a1aa; }
 .as-tag {
   flex: 0 0 auto; font-size: 11px; padding: 1px 7px; border-radius: 99px;
   background: #1e3a5f; color: #93c5fd;
@@ -116,6 +127,8 @@
 .as-pill.skipped { background: #713f12; color: #fde68a; }
 .as-pill.failed  { background: #7f1d1d; color: #fca5a5; }
 .as-pill.error   { background: #7f1d1d; color: #fca5a5; }
+.as-pill.shadow  { background: #3b0764; color: #e9d5ff; }
+.as-pill.silent  { background: #27272a; color: #a1a1aa; }
 
 /* ---------- 标签页 ---------- */
 .as-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 16px 0 10px; }

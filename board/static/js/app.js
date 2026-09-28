@@ -9,6 +9,25 @@
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
+  // 每个浏览器标签页一个 client id：板端用它区分「哪个页面在按住 PTT」，
+  // 别的标签页的操作不会互相掐断。（原来这个常量定义在对话页的流式朗读块里，
+  // 对话搬去助手页时被一起删掉，于是 PTT 自检抛 `TTS_CLIENT_ID is not defined`
+  // —— 2026-09-27 修回，并改成不绑对话的通用名字。）
+  const CLIENT_ID = (() => {
+    try {
+      let v = sessionStorage.getItem('elf2-client');
+      if (!v) {
+        v = (window.crypto && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+        sessionStorage.setItem('elf2-client', v);
+      }
+      return v;
+    } catch (e) {
+      return '';
+    }
+  })();
+
   function showToast(msg, type = '') {
     const el = $('#toast');
     if (!el) return;
@@ -366,13 +385,68 @@
     } catch (e) { showToast(e.message, 'error'); }
   }
 
+  // ---------------- LLM 提供方（auto / local / external） ----------------
+  // 解析结果由后端算（网络探测在后端，前端只显示），reason 的人话也由后端给，
+  // 避免前后端各翻一套。
+  function renderLlmRoute(r) {
+    const box = $('#llm-route-status');
+    if (!box || !r) return;
+    const eff = r.effective === 'external' ? '外部 API' : '本地模型';
+    const net = r.net || {};
+    const items = [
+      ['当前生效', eff + (r.model ? '（' + r.model + '）' : '')],
+      ['模式', r.mode_label || r.mode || '--'],
+      ['依据', (r.reason_label || r.reason || '--')],
+    ];
+    if (r.mode === 'auto') {
+      items.push(['网络探测',
+        (net.ok ? '可达' : '不可达') + '（' + (net.ms != null ? net.ms + 'ms' : '--') +
+        (net.cached ? ' · 缓存 ' + net.age + 's' : ' · 刚探测') + '）']);
+    } else {
+      items.push(['网络探测', '仅自动模式需要探测']);
+    }
+    if (r.base_url) items.push(['地址', r.base_url]);
+    box.innerHTML = items.map(function (x) {
+      return '<span class="muted small">' + x[0] + '：</span> <b>' + x[1] + '</b>';
+    }).join('<br>');
+  }
+
+  async function loadLlmRoute() {
+    // 读状态接口（走后端 60 秒缓存，不在每次加载时都去连外网）
+    try {
+      const s = await apiFetch('/api/status');
+      if (s && s.llm) { renderLlmRoute(s.llm); return s.llm; }
+    } catch (e) { /* 忽略 */ }
+    return null;
+  }
+
+  async function probeLlmRoute() {
+    // 按钮用：强制重新探测（网络刚恢复时不必等缓存过期）
+    const state = $('#llm-probe-state');
+    if (state) state.textContent = '探测中…';
+    try {
+      const d = await apiFetch('/api/llm/probe', { method: 'POST', body: '{}' });
+      renderLlmRoute(d);
+      if (state) {
+        state.textContent = '已探测：' + (d.reason_label || d.reason || '') +
+          '（' + (d.net && d.net.ms != null ? d.net.ms + 'ms' : '--') + '）';
+      }
+      showToast('当前生效：' + (d.effective_label || d.effective), 'success');
+      return d;
+    } catch (e) {
+      if (state) state.textContent = '探测失败：' + e.message;
+      showToast('探测失败：' + e.message, 'error');
+      return null;
+    }
+  }
+
   // ---------------- settings ----------------
   async function loadSettings() {
     if (role !== 'admin') return;
     try {
       const data = await apiFetch('/api/settings');
       const s = data.settings;
-      $('#set-llm-provider').value = s.llm_provider || 'local';
+      $('#set-llm-provider').value = s.llm_provider || 'auto';
       $('#set-local-base').value = s.local_base_url || '';
       $('#set-local-model').value = s.local_model || '';
       $('#set-ext-base').value = s.external_base_url || '';
@@ -392,6 +466,7 @@
       if ($('#set-reboot-notice')) $('#set-reboot-notice').value = s.reboot_notice_sec || '30';
       if ($('#set-reboot-text')) $('#set-reboot-text').value = s.reboot_text || '';
       clearDirty('#llm-save-state'); clearDirty('#tts-save-state'); clearDirty('#reboot-save-state');
+      loadLlmRoute();
     } catch (e) { showToast(e.message, 'error'); }
   }
 
@@ -412,6 +487,7 @@
       showToast('LLM / 页面设置已保存', 'success');
       clearDirty('#llm-save-state');
       loadSettings();
+      loadLlmRoute();
     } catch (e) { showToast(e.message, 'error'); }
   }
 
@@ -2163,7 +2239,7 @@
     try {
       const d = await apiFetch('/api/ptt/manual', {
         method: 'POST',
-        body: JSON.stringify({ hold: !!hold, reason: reason || '', client_id: TTS_CLIENT_ID }),
+        body: JSON.stringify({ hold: !!hold, reason: reason || '', client_id: CLIENT_ID }),
       });
       renderPttDiag(d);
     } catch (e) {
@@ -2405,6 +2481,7 @@
     });
     $('#btn-add-user')?.addEventListener('click', addUser);
     $('#btn-save-settings')?.addEventListener('click', saveLlmSettings);
+    $('#btn-llm-probe')?.addEventListener('click', probeLlmRoute);
     $('#btn-change-pass')?.addEventListener('click', changeOwnPassword);
     $('#set-tts-icao-voice')?.addEventListener('change', (e) => {
       if (e.target) e.target.dataset.saved = e.target.value || '';
@@ -2549,6 +2626,7 @@
     if (role === 'admin') {
       loadUsers();
       loadSettings();
+      loadCalibration();       // 电压校准的通道/零点/倍率：删对话代码时被连带删掉过，见上面 CLIENT_ID 的注释
       loadAudioVolume();
       loadWeatherSettings();
       loadSensorStatus();

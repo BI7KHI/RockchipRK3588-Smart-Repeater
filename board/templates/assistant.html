@@ -9,7 +9,7 @@
 {% endblock %}
 
 {% block head_extra %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/assistant.css', v='20260925a') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/assistant.css', v='20260930c') }}">
 {% endblock %}
 
 {% block app_js %}{% endblock %}
@@ -187,6 +187,33 @@
   </div>
   <div class="as-sub">唤醒词匹配结果</div>
   <div class="as-pre" id="as-wake-out" style="max-height:220px">—</div>
+
+  <div class="as-sub">自主决策自测（不发射、默认不入库）</div>
+  <div class="as-warn">
+    模拟「听到某一段话」时自主回答层会怎么判：先看预筛（太短/数据音/与自己刚说的雷同会被
+    直接跳过），再叫一次决策模型输出四行（想／判／由／信），最后过一遍频率红线
+    （白名单 → 同呼号冷却 → 每小时上限 → 最小间隔 → 禁发时段 → 测试模式 → 信道忙）。
+    <b>当前是影子模式</b>：无论判成什么都不会发射，判成「应发射」时结论写作 shadow。
+  </div>
+  <div class="row gap wrap" style="align-items:flex-start">
+    <textarea id="as-auto-text" class="as-field" style="flex:1;min-width:260px;min-height:64px;background:#0d1524;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px;font-size:13px"
+      placeholder="例如：BI7KHI 帮我看看现在电池电压">BI7KHI 帮我看看现在电池电压</textarea>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <button class="btn" id="btn-as-auto-test">跑一次决策判定</button>
+      <label class="checkline" title="按「信道忙」判定：忙则一律不答（红线，不需要真的接无线电）">
+        <input type="checkbox" id="as-auto-busy"> 模拟信道忙（BUSY 有效）</label>
+      <label class="checkline" title="勾上则把这次判定记进对话记录，便于回看">
+        <input type="checkbox" id="as-auto-store"> 记进对话记录</label>
+      <span class="muted small" id="as-auto-state">—</span>
+    </div>
+  </div>
+  <div class="as-pre" id="as-auto-out" style="max-height:260px">—</div>
+  <div class="row gap wrap">
+    <button class="btn ghost" data-afill="BI7KHI 帮我看看现在电池电压">点名 + 提问（应判答）</button>
+    <button class="btn ghost" data-afill="CQ CQ 这里是 BI7KHI 呼叫，有友台在吗">CQ 呼叫（应判答）</button>
+    <button class="btn ghost" data-afill="老李你那边天气怎么样，我这边下雨了">无关闲聊（应判默）</button>
+    <button class="btn ghost" data-afill="599 599 12 我的信号报告五九">报数/数据音（预筛会跳过）</button>
+  </div>
   <div class="as-sub">常用问句（点一下填入）</div>
   <div class="row gap wrap">
     <button class="btn ghost" data-fill="中继台，现在风速多少">风速</button>
@@ -246,6 +273,6 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/assistant.js', v='20260930e') }}"></script>
+<script src="{{ url_for('static', filename='js/assistant.js', v='20260930g') }}"></script>
 <script src="{{ url_for('static', filename='js/assistant-test.js', v='20260930b') }}"></script>
 {% endblock %}
