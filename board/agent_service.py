@@ -21,7 +21,7 @@ import time
 # ---------------------------------------------------------------------------
 TOOL_SPECS = [
     {
-        'name': 'get_weather',
+        'name': 'get_wind',
         'title': '风速风向',
         'desc': '读取当前风速、风向与气象采集服务状态（含最后一次 Modbus 原始报文、错误计数）。注意：风速风向属于本工具，与降雨量无关。',
         'params': {},
@@ -95,6 +95,14 @@ TOOL_SPECS = [
         'action': False,
     },
     {
+        'name': 'get_forecast',
+        'title': '天气预报气温湿度',
+        'desc': ('读取联网天气预报：天气现象、当前气温、今日最高最低气温、湿度、'
+                 '风速、今日降水量。本地气象站只能测当下，预报要问这个工具。'),
+        'params': {},
+        'action': False,
+    },
+    {
         'name': 'get_home_position',
         'title': '本站经纬度海拔',
         'desc': '读本站（中继台）自己的经纬度与海拔，以及位置来自手填还是 GPS。',
@@ -136,8 +144,10 @@ def enabled_tools(enabled=None):
 def tools_prompt(enabled=None):
     """工具清单 + READ 协议（**务必保持精简**）。
 
-    实测两条硬约束：
-      1. 板端 RKLLM（Qwen2.5-1.5B）提示词过长（>约 400 字）会直接空输出；
+    实测两条约束：
+      1. 板端 RKLLM 的瓶颈是**延时**而不是容量——2026-09-27 实测 4615 字符仍能
+         正常输出（24~31s），而 ≈4.7 ms/字符意味着这份清单每多 100 字就多 0.47 s
+         prefill。所以「精简」的理由从「超了会空输出」变成「超了会变慢」。
       2. **示例一多，模型会去照抄示例而不是按标题匹配工具**——曾给出 6 条
          「关键词→READ」示例，探针命中率反而从 6/7 掉到 5/9（问「在发射吗」
          输出 `发射→READ get_power {}`）。因此只保留一条示例。
@@ -161,13 +171,21 @@ def tools_prompt(enabled=None):
     ])
 
 
-def compose_user_prompt(base_prompt='', question='', enabled=None):
-    """把（可选）用户自定义提示词、工具协议、实际问题合成一条 user 消息。"""
+def compose_user_prompt(base_prompt='', question='', enabled=None, suffix=''):
+    """把（可选）用户自定义提示词、工具协议、实际问题合成一条 user 消息。
+
+    `suffix`（网页对话的**输出约束**）固定放在**末尾**，这不是排版偏好：
+    实测板端 1.5B 只可靠地理会最后一条消息 —— 同一份约束作为最后一条用户消息
+    遵守 4/4，放进 system 轮（后面跟 user）则 0/4。多项规则时也是**最后一条
+    最受重视**，所以最要紧的规则应当写在约束文本的最后一行。
+    """
     parts = []
     if base_prompt and base_prompt.strip():
         parts.append('【系统设定】\n' + base_prompt.strip())
     parts.append(tools_prompt(enabled))
     parts.append('【用户问题】\n' + (question or '').strip())
+    if suffix and suffix.strip():
+        parts.append('【输出要求（必须遵守）】\n' + suffix.strip())
     return '\n\n'.join(parts)
 
 
@@ -179,6 +197,8 @@ DATA_KEYWORDS = (
     # 位置类：命中就走一轮工具，否则模型会凭想象编坐标
     '位置', '经纬度', '坐标', '在哪', '哪里', '哪儿', '附近', '距离', '方位',
     '多远', '呼号', 'aprs', '定位', 'gps', '导航', '引导',
+    # 预报类：本地气象站测不到预报，必须走联网天气 API
+    '预报', '气温', '最高温', '最低温', '多云', '晴天', '阴天', '会不会下雨',
 )
 
 
@@ -200,22 +220,167 @@ def wants_realtime(text):
 # 里的「全中文单位（伏特/摄氏度）」「每句输出后加喵」全部未执行，回复仍是
 # 「当前电池电压为 10.8006 V。」——因为总结轮的消息体里一个字的约束都没有。
 #
-# 板端 RKLLM（Qwen2.5-1.5B）是另一套约束：实测提示词 >约 400 字直接空输出，
-# 而数据段本身已接近该上限，所以默认（auto）只回灌给外部云模型。
+# 板端 RKLLM 一度被记为「>约 400 字直接空输出」，据此 auto 只回灌外部云模型。
+# 2026-09-27 板端实测推翻了这条：max_context_len 从 512 提到 4096 后，4615 字符
+# 仍正常输出（24~31s）。真正的约束是**延时**（≈4.7 ms/字符），不是容量。
+# 另外还查明「RKLLM 忽略 system 角色」的真因是服务端只取最后一条消息
+# （见 deploy/patch_rkllm_chat.py），不是模型不吃 system。
 SUMMARY_SPEC_MODES = ('auto', 'on', 'off')
 
 # 总结轮收尾语（中继语音助手用；网页 Agent 对话传自己的）
 SUMMARY_TAIL_ASSIST = ('直接给结论，不要说「根据数据」「根据您提供的数据」这类开场白，'
                        '不要复述问题，用中文 1~2 句回答：')
 
+# 板端 RKLLM 的延时预算（字符）：≈4.7 ms/字，600 字约 2.8 s prefill。
+LOCAL_SPEC_CAP = 600
+
+
+def ensure_meow(text, spec='', mark='喵'):
+    """回复末尾缺关键标记就补上（**只在这条要求确实写在约束里时**才补）。
+
+    板端 1.5B 对「句末加喵」的遵守并不稳（实测同一份约束下会丢），而「喵」在本项目里
+    是**验证工具注入是否生效的探针**：掉了就看不出注入到底有没有工作。所以这里做确定性
+    兜底 —— 与数值口语化同一个思路：格式正确性不赌模型，放在出口保证。
+    """
+    s = str(text or '').strip()
+    if not s or mark not in str(spec or ''):
+        return s
+    if s.rstrip('。！？!?…~～. ').endswith(mark):
+        return s
+    m = re.search(r'[。！？!?…]+$', s)          # 插在句末标点前：「…喵。」
+    if m:
+        return s[:m.start()] + mark + s[m.start():]
+    return s + mark
+
+
+# ---------------------------------------------------------------------------
+# 「答非所据」检测：拿到工具数据却没用上时，带数据重试一次
+#
+# 为什么需要它（板端实测）：1.5B 有约 1/3 的概率把约束里的**范式例句**当成答案照抄
+# （问「电池电压是多少」答「早上好，友台，呼叫信号为59，喵」），也有答「不确定。喵」
+# 而数据明明在手里的情况。提示词层面已经被证明不可靠（同一份约束下时好时坏），
+# 所以这里做成**可判定 + 可重试**：回复里既没有数据里的任何事实、又没有明确说
+# 「不知道」，就带上数据再问一次，并要求把数值原样说出来。重试只有一次，且
+# **重试没变好就保留原文**，不会把回答弄丢。
+# ---------------------------------------------------------------------------
+REFUSAL_WORDS = ('不知道', '不确定', '无法确定', '没有数据', '没数据', '查不到',
+                 '暂无', '不清楚', '无法获取', '没有收到', '未收到')
+
+# 重试**不**再带上那份输出约束：约束里的人格/通联范式一旦压在最末（板端 1.5B 只
+# 理最后一段），它就会去写问候语而不是报数 —— 线上实测正是如此（两条 [AGENT] 记录
+# 显示重试后依然「一个工具数据都没用上」）。所以重试只给一条紧凑的格式要求，
+# 并把**数据与问题放在最后**。对照实测（同一台 1.5B、同一份数据、各 2 次）：
+#   约束压最后（现状）  → 12.3867喵      （这一次对了，但线上两次都没用上数据）
+#   极简 + 数据问题在最后 → 当前电池电压是12.3867伏。（2/2）
+RETRY_RULES = ('【重试】上一次回答没有用上实时数据。只输出一句可直接朗读的中文口语，'
+               '必须把下面数据里的数值原样说出来（带上单位：伏特、摄氏度、米每秒…），'
+               '末尾加「喵」；数据里确实没有的，才说不知道。')
+
+
+def retry_messages(collected, question, data_cap=280):
+    """「答非所据」重试用的消息体：格式要求在前，**数据与问题在最后**。"""
+    data = '设备实时数据：' + json.dumps(collected, ensure_ascii=False)[:int(data_cap)]
+    return [{'role': 'user',
+             'content': RETRY_RULES + '\n' + data
+                        + '\n现在只回答这个问题（不要复述、不要解释）：'
+                        + (question or '')}]
+
+
+def data_facts(collected, cap=60):
+    """把工具数据里「可以被复述的事实」抽出来。
+
+    数值给两种形态：原样数字串（54.5）与中文口语（五十四点五），因为板端 TTS 与
+    模型都可能用任一种写法。位数太短的值（0、9 这种单字）不参与判定 ——
+    「零」几乎出现在任何句子里，那会把判定变成永远为真。
+    """
+    facts = []
+
+    def walk(obj, depth=0):
+        if depth > 3 or len(facts) >= cap:
+            return
+        if isinstance(obj, dict):
+            for v in obj.values():
+                walk(v, depth + 1)
+        elif isinstance(obj, (list, tuple)):
+            for v in list(obj)[:8]:
+                walk(v, depth + 1)
+        elif isinstance(obj, bool) or obj is None:
+            return
+        elif isinstance(obj, (int, float)):
+            s = ('%.4f' % float(obj)).rstrip('0').rstrip('.') or '0'
+            if len(s) >= 2:
+                facts.append(s)
+            try:
+                import speech_text
+                cn = speech_text.cn_number(s)
+            except Exception:
+                cn = None
+            if cn and len(cn) >= 2:
+                facts.append(cn)
+        elif isinstance(obj, str):
+            t = obj.strip()
+            if len(t) >= 2:
+                facts.append(t)
+
+    for item in (collected or []):
+        if isinstance(item, dict):
+            for res in item.values():
+                walk(res)
+        else:
+            walk(item)
+    seen, out = set(), []
+    for f in facts:
+        if f not in seen:
+            seen.add(f)
+            out.append(f)
+    return out[:cap]
+
+
+def answer_grounded(reply, collected):
+    """回复有没有「用上数据」。返回 (是否算过关, 原因)。
+
+    过关的三种情况：复述了数据里的某个事实、明确说不知道、压根没有可核对的事实。
+    判断不了时一律算过关 —— 宁可放过，也不要为了判定而重试。
+    """
+    text = str(reply or '').strip()
+    if not text:
+        return (False, '空回复')
+    for w in REFUSAL_WORDS:
+        if w in text:
+            return (True, '明确表示不知道：%s' % w)
+    facts = data_facts(collected)
+    if not facts:
+        return (True, '没有可核对的事实')
+    try:
+        import speech_text
+        spoken = speech_text.speakable(text)
+    except Exception:
+        spoken = text
+    for f in facts:
+        if f in text or f in spoken:
+            return (True, '复述了 %s' % f)
+    return (False, '一个工具数据都没用上')
+
+
+def needs_data_retry(reply, collected, question=''):
+    """要不要带数据重试一次。返回 (bool, 原因)。非数据类问题一律不重试。"""
+    if not collected:
+        return (False, '没有工具数据')
+    if question and not wants_realtime(question):
+        return (False, '不是实时数据类问题')
+    ok, why = answer_grounded(reply, collected)
+    return ((not ok), why)
+
 
 def summary_spec(spec='', provider='local', mode='auto', cap=1200):
     """决定总结轮要回灌多少「行为约束」，返回要回灌的文本（'' = 不回灌）。
 
     mode:
-      auto（默认）—— 只回灌给外部云模型；板端 RKLLM 不回灌（见上）。
+      auto（默认）—— 所有 provider 都回灌，只按 provider 给不同上限。
       on / off    —— 强制回灌 / 强制不回灌。
-    cap: 回灌字符上限，防止长规范把板端模型顶到空输出。
+    cap: 回灌字符上限。
+
+    板端不是不能回灌，而是要按**延时**预算限量，所以 local 另给一个小 cap。
     """
     s = (spec or '').strip()
     if not s:
@@ -223,12 +388,14 @@ def summary_spec(spec='', provider='local', mode='auto', cap=1200):
     m = str(mode or 'auto').strip().lower()
     if m not in SUMMARY_SPEC_MODES:
         m = 'auto'
-    if m == 'off' or (m == 'auto' and str(provider) != 'external'):
+    if m == 'off':
         return ''
     try:
         cap = max(120, min(4000, int(cap)))
-    except Exception:
+    except (TypeError, ValueError):
         cap = 1200
+    if str(provider) != 'external':
+        cap = min(cap, LOCAL_SPEC_CAP)
     return s[:cap]
 
 
@@ -236,21 +403,32 @@ def summary_messages(collected, question, spec='', provider='local',
                      mode='auto', cap=1200, data_cap=280, tail=None):
     """拼「总结轮」的消息体：拿到工具数据 → 要一句最终回答。
 
-    外部云模型把约束放进**真正的 system 轮**：权威性高，也不会被前面的数据段
-    冲淡；板端 RKLLM 实测不认 system 轮（所以第一轮才把指令并进用户消息），
-    在它身上只能把约束并进同一条用户消息。
+    约束放哪儿是**实测定的**（板端 Qwen2.5-1.5B，同一份 283 字规范，各 4 次）：
+
+        规范作为**最后一条 user 消息**        → 4/4 遵守
+        同内容放进 system 轮（后面跟着 user） → 0/4 遵守
+        system 轮、但「喵」恰好是规范最后一行 → 4/4 遵守
+
+    也就是说 1.5B 只可靠地理会**最后一条消息**，system 槽位对它几乎不起作用；
+    放进 system 时会退化成「只遵守最后一行」。所以：
+
+      * 外部云模型 —— 走真正的 system 轮（权威、不被数据段冲淡）；
+      * 板端本地   —— 内联进用户消息，且必须落在**末尾**。
+
+    这个差别就是「约束写得好好的却总不生效」的根因，别改回去。
     """
     tail = tail or SUMMARY_TAIL_ASSIST
     data = ('设备实时数据：'
             + json.dumps(collected, ensure_ascii=False)[:int(data_cap)])
+    user = data + '\n' + tail + (question or '')
     sp = summary_spec(spec, provider, mode=mode, cap=cap)
     if not sp:
-        return [{'role': 'user', 'content': data + '\n' + tail + (question or '')}]
+        return [{'role': 'user', 'content': user}]
     if str(provider) == 'external':
         return [{'role': 'system', 'content': sp},
-                {'role': 'user', 'content': data + '\n' + tail + (question or '')}]
+                {'role': 'user', 'content': user}]
     return [{'role': 'user',
-             'content': '【播报要求】' + sp + '\n' + data + '\n' + tail + (question or '')}]
+             'content': user + '\n\n【输出要求（必须遵守）】\n' + sp}]
 
 
 def build_agent_prompt(base_prompt='', enabled=None):
@@ -340,8 +518,16 @@ ALIASES = {
     'get_cpu_temperature': 'get_system', 'get_temperature': 'get_system',
     'get_temp': 'get_system', 'get_cpu': 'get_system', 'get_cpu_temp': 'get_system',
     'get_system_status': 'get_system', 'get_load': 'get_system',
-    'get_wind_speed': 'get_weather', 'get_wind': 'get_weather',
-    'get_weather_data': 'get_weather', 'get_weather_status': 'get_weather',
+    'get_wind_speed': 'get_wind', 'get_wind_dir': 'get_wind',
+    # 旧名 get_weather 保留为别名：它只读**本地**风速风向，叫 weather 会让模型
+    # 把「今天天气怎么样」也路由到它（实测：改名后同一问题才落到 get_forecast）。
+    'get_weather': 'get_wind', 'get_weather_data': 'get_wind',
+    'get_weather_status': 'get_wind', 'get_wind': 'get_wind',
+    'get_meteorology': 'get_wind',
+    # 预报类
+    'get_weather_forecast': 'get_forecast', 'get_forecast_weather': 'get_forecast',
+    'weather_forecast': 'get_forecast', 'get_today_weather': 'get_forecast',
+    'get_temperature_forecast': 'get_forecast', 'get_forecast_temperature': 'get_forecast',
     'get_rainfall': 'get_rain', 'get_rain_data': 'get_rain',
     'get_precipitation': 'get_rain',
     'get_ptt': 'get_radio', 'get_ptt_status': 'get_radio',
@@ -356,7 +542,8 @@ ALIASES = {
 KEYWORDS = (
     (('battery', 'pv', 'voltage', 'volt', 'power', 'electric'), 'get_power'),
     (('temp', 'cpu', 'load', 'memory', 'disk', 'system', 'uptime'), 'get_system'),
-    (('wind', 'weather', 'meteor'), 'get_weather'),
+    (('wind', 'meteor'), 'get_wind'),
+    (('forecast',), 'get_forecast'),
     (('rain', 'precip'), 'get_rain'),
     (('ptt', 'radio', 'transmit', 'tx'), 'get_radio'),
     (('camera', 'video', 'record'), 'get_camera'),

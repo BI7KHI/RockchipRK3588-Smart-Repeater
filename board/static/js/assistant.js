@@ -82,15 +82,21 @@
     {
       title: '唤醒词与交互', hint: '一句话唤醒：唤醒词与问题连在一起说即可。命中后 30 秒内可直接追问，不必再喊唤醒词。',
       items: [
+        { k: 'assist_wake_mode', f: '唤醒方式', t: 'select',
+          tip: 'BUSY 触发 = 只有载波有效才算「检测到语音」并送 ASR（电平触发完全关闭，'
+             + '下面「语音分段」那组 dBFS 阈值不再参与判定）；弱信号也能收，没人说话时不会误唤醒',
+          opts: [['level', '电平唤醒（原行为）'], ['busy', 'BUSY 触发 + 唤醒词（推荐）']] },
         { k: 'assist_wake_words', f: '唤醒词（逗号分隔，最多 8 个）', t: 'text', span: 2, tip: '短词误触发多、长词更稳；改完立刻生效' },
-        { k: 'assist_wake_fuzzy', f: '同音容错', t: 'bool', tip: '「中继太」也能命中「中继台」' },
+        { k: 'assist_wake_fuzzy', f: '同音容错', t: 'bool', tip: '「中继太」「中机台」「智能中记」也能命中' },
+        { k: 'assist_wake_loose', f: '宽松匹配（允许唤醒词漏一个字）', t: 'bool', tip: '「智能中继」→「智能继」也能唤醒；短词会更易误触发，默认关闭' },
         { k: 'assist_followup_seconds', f: '追问窗口（秒）', t: 'num', min: 0, max: 600, step: 5 },
         { k: 'assist_ack_reply', f: '只喊唤醒词时的应答', t: 'text' },
         { k: 'assist_use_vad', f: '用 silero VAD 收紧语音边界', t: 'bool', tip: '只做边界裁剪，不会据此丢弃唤醒词' }
       ]
     },
     {
-      title: '语音分段（灵敏度调参）', hint: '「有反应但识别不到」时优先调这里：先降起判电平，再降最短有声时长。',
+      title: '语音分段（灵敏度调参）', hint: '「有反应但识别不到」时优先调这里：先降起判电平，再降最短有声时长。'
+          + '注意：唤醒方式选「BUSY 触发」时这一组只影响电平模式，busy 模式下不参与判定。',
       items: [
         { k: 'assist_dbfs_open', f: '语音起判电平 dBFS', t: 'num', min: -80, max: -5, step: 1, tip: '越大越不灵敏；静噪良好的电台可到 -45' },
         { k: 'assist_dbfs_close', f: '语音结束电平 dBFS', t: 'num', min: -85, max: -5, step: 1, tip: '必须低于起判电平' },
@@ -126,9 +132,23 @@
       ]
     },
     {
-      title: '提示词（语音播报约束）', hint: '这段会追加在共用的基础提示词之后，只对中继语音助手生效。{max_chars} 会自动替换成上面的回复字数上限。',
+      title: '提示词（共用基础设定 + 语音播报约束）',
+      hint: '两条链路**共用**这两份：中继语音助手（发射）与「手动测试 / 文本对话」（不发射）。'
+          + '「共用基础设定」在注入时排在最前，「语音播报约束」追加在最后，变量'
+          + '（如 {battery}）已展开为实时值，{max_chars} 会自动替换成回复字数上限。'
+          + '排布要点：实测板端 1.5B 只可靠地理会**最后一条消息**，多项规则时也是'
+          + '**最后一条最受重视** —— 所以人格/通联范式这类「设定」放上面那份，'
+          + '下面的约束只留输出格式，并把最要紧的格式规则写在最后一段。'
+          + '范式要写成规则、不要写可直接抄的完整例句（实测带例句时会被照抄，'
+          + '问电压都答「早上好，友台，呼叫信号为59」）。数值读法已由后端确定性处理'
+          + '（speech_text.speakable），不必在这里要求模型转换数字。'
+          + '若模型答非所据（明明查到了数据却没用上），后端会自动带数据重试一次。',
       items: [
-        { k: 'assist_prompt_suffix', f: '', t: 'textarea', span: 2 }
+        { k: 'llm_system_prompt_on', f: '启用共用基础设定', t: 'bool' },
+        { k: 'llm_system_prompt', f: '', t: 'textarea', span: 2,
+          tip: '角色设定/人格/通联范式放这里 —— 它排在最前，不会把最后的格式规则挤掉' },
+        { k: 'llm_prompt_vars', f: '展开实时变量（{battery} {pv} {cpu_temp} {wind} {rain_today}）', t: 'bool' },
+        { k: 'assist_prompt_suffix', f: '语音播报约束（只写输出格式）', t: 'textarea', span: 2 }
       ]
     },
     {
@@ -536,13 +556,16 @@
     $('#btn-as-test').addEventListener('click', function () {
       var text = $('#as-test-text').value.trim();
       if (!text) { toast('请输入测试问题'); return; }
+      var tx = !!($('#as-test-tx') && $('#as-test-tx').checked);
+      if (tx && !confirm('会真的发射到无线电（占用信道，其他台能听到）。确定继续？')) return;
       this.disabled = true;
       var btn = this;
-      toast('已提交，结果稍后出现在右侧「对话记录」');
-      api('/api/assist/test', { method: 'POST', body: JSON.stringify({ text: text }) })
+      toast(tx ? '已提交：生成后走受控发射（会占用信道）' : '已提交，结果稍后出现在右侧「对话记录」');
+      api('/api/assist/test', { method: 'POST', body: JSON.stringify({ text: text, tx: tx }) })
         .then(function (d) {
           btn.disabled = false;
           if (!d.ok) toast(d.error || '提交失败');
+          else if (d.test_mode && tx) toast('全局「测试模式」开着：本次仍然只合成不发射');
           else if (d.test_mode) toast('测试模式：只合成不发射');
           setTimeout(function () { poll(); loadTurns(); }, 800);
           setTimeout(loadTurns, 4000);
@@ -552,14 +575,41 @@
 
     $('#btn-as-test-wake').addEventListener('click', function () {
       var text = $('#as-test-text').value.trim();
-      api('/api/assist/wake', { method: 'POST', body: JSON.stringify({ text: text }) })
+      var busyEl = $('#as-test-busy');
+      var body = { text: text };
+      if (busyEl) body.busy = !!busyEl.checked;
+      api('/api/assist/wake', { method: 'POST', body: JSON.stringify(body) })
         .then(function (d) {
           $('#as-wake-out').textContent = d.ok ? JSON.stringify(d, null, 2) : (d.error || '失败');
           if (d.ok) {
-            toast(d.matched ? ('命中「' + d.matched + '」，问题：' + (d.question || '（空）'))
-              : '未命中任何唤醒词');
+            if (d.matched && d.would_wake === false) {
+              toast('命中「' + d.matched + '」但 ' + (d.reason || '被唤醒方式拦下'));
+            } else {
+              toast(d.matched ? ('命中「' + d.matched + '」，问题：' + (d.question || '（空）'))
+                : (d.near ? ('未命中；最接近「' + d.near + '」相似度 ' + d.near_ratio)
+                          : '未命中任何唤醒词'));
+            }
           }
         });
+    });
+
+    // 只发射这段文本（不过 LLM）：合成 → 受控发射
+    $('#btn-as-say').addEventListener('click', function () {
+      var text = $('#as-test-text').value.trim();
+      if (!text) { toast('请输入要发射的文本'); return; }
+      var tx = !!($('#as-say-tx') && $('#as-say-tx').checked);
+      if (tx && !confirm('会真的发射到无线电（占用信道，其他台能听到）。确定继续？')) return;
+      this.disabled = true;
+      var btn = this;
+      api('/api/assist/say', { method: 'POST', body: JSON.stringify({ text: text, tx: tx }) })
+        .then(function (d) {
+          btn.disabled = false;
+          if (!d.ok) toast(d.error || '提交失败');
+          else if (d.test_mode && tx) toast('全局「测试模式」开着：本次仍然只合成不发射');
+          else toast(tx ? '已提交发射（受控：禁发时段/信道占用/间隔/上限都生效）' : '已提交试听');
+          setTimeout(function () { poll(); loadTurns(); }, 800);
+          setTimeout(loadTurns, 4000);
+        }).catch(function () { btn.disabled = false; toast('请求失败'); });
     });
 
     $$('[data-fill]').forEach(function (b) {

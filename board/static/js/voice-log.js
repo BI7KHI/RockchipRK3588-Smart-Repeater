@@ -94,7 +94,10 @@
         ? ('处理中 ' + ((d.asr_current && d.asr_current.file) || ''))
         : (d.queue ? (d.queue + ' 条待处理') : '空闲')
           + (d.counters ? (' · 完成 ' + (d.counters.asr_done || 0)
-            + ' 失败 ' + (d.counters.asr_error || 0)) : '');
+            + ' 失败 ' + (d.counters.asr_error || 0)
+            + ((d.counters.tx_text || d.counters.tx_skip)
+               ? (' · 本机原文 ' + (d.counters.tx_text || 0)
+                  + ' 跳过 ' + (d.counters.tx_skip || 0)) : '')) : '');
       $('#vlog-st-vad').textContent = (d.vad && d.vad.available)
         ? ('silero 已加载 · ' + (d.vad.model || '').split('/').pop())
         : ('silero ' + ((d.vad && d.vad.state) || '不可用')
@@ -234,6 +237,15 @@
         tags.appendChild(tag('asr-' + it.asr_status, it.asr_status === 'running' ? '识别中' : '待识别'));
       } else if (it.asr_status === 'error') {
         tags.appendChild(tag('asr-error', '识别失败'));
+      } else if (it.asr_status === 'tx') {
+        // 本机发射：文字是合成时输入的那一段，不是识别出来的
+        const t = tag('asr-tx', '本机原文');
+        t.title = '本条是本机发射，文字取自 TTS 合成原文，未调用 ASR';
+        tags.appendChild(t);
+      } else if (it.asr_status === 'skip' && it.kind === 'tx') {
+        const t = tag('asr-skip', '未识别');
+        t.title = (it.note || '本机发射且无对应发射原文，未调用 ASR');
+        tags.appendChild(t);
       }
       main.appendChild(tags);
       const txt = document.createElement('div');
@@ -523,13 +535,26 @@
     if (!segs.length) {
       const d = document.createElement('div');
       d.className = 'muted small';
-      d.textContent = (it.text || '').trim()
-        ? it.text
-        : ('本条为「' + it.category_label + '」，未生成文字（非语音不送 ASR，避免幻觉）。');
-      if ((it.text || '').trim() && it.asr_status === 'done') {
+      const hasText = (it.text || '').trim().length > 0;
+      if (hasText) {
+        // 本机发射段的文字是 TTS 原文（未走 ASR），其余是识别结果
+        d.textContent = it.text;
+      } else if (it.asr_status === 'skip' && it.kind === 'tx') {
+        d.textContent = it.note || '本条为本机发射，未登记发射原文，已跳过 ASR（不猜）。';
+      } else {
+        d.textContent = '本条为「' + it.category_label + '」，未生成文字（非语音不送 ASR，避免幻觉）。';
+      }
+      if (hasText && (it.asr_status === 'done' || it.asr_status === 'tx')) {
         d.className = 'vlog-seg vlog-seg-full';
       }
       box.appendChild(d);
+      // 本机发射段的文字是怎么来的，写清楚（回填的老记录尤其要能追溯）
+      if (it.kind === 'tx' && hasText && (it.note || '').trim()) {
+        const n = document.createElement('div');
+        n.className = 'muted small';
+        n.textContent = it.note;
+        box.appendChild(n);
+      }
       return;
     }
     segs.forEach(sg => {

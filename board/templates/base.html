@@ -2,32 +2,45 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>{% block title %}{{ site_title or 'ELF2 智能中继控制中心' }}{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css', v='20260930a') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css', v='20260930f') }}">
   {# 空 favicon：抑制浏览器自动请求 /favicon.ico 产生的 404（控制台不再有噪声） #}
   <link rel="icon" href="data:,">
   {% block head_extra %}{% endblock %}
 </head>
-<body>
+<body class="{{ body_class|default('') }}">
   <header class="topbar">
     <div class="brand">
       <span class="logo">◉</span>
-      <span>ELF2 智能中继控制中心</span>
+      <span class="brand-text">
+        <span class="brand-full">ELF2 智能中继控制中心</span>
+        <span class="brand-short">ELF2 中继</span>
+      </span>
     </div>
     <nav class="main-nav">
       {% block nav %}
-      <button class="tab-btn active" data-tab="overview">总览</button>
-      <button class="tab-btn" data-tab="intercom">网页对讲</button>
-      <button class="tab-btn" data-tab="llm">LLM 对话</button>
-      <button class="tab-btn" data-tab="camera">摄像头</button>
-      <button class="tab-btn" data-tab="weather">气象</button>
-      <a class="tab-btn nav-link" href="{{ url_for('voice_log_page') }}">语音日志</a>
-      <a class="tab-btn nav-link" href="{{ url_for('aprs_page') }}">APRS</a>
-      <a class="tab-btn nav-link" href="{{ url_for('assistant_page') }}">中继语音助手</a>
-      <button class="tab-btn admin-only" data-tab="users">用户管理</button>
-      <button class="tab-btn admin-only" data-tab="settings">设置 / 校准</button>
+      {# 桌面：.nav-bar 与 .nav-sheet 各自是一行 flex 片段，拼起来与原来 10 项完全同序 #}
+      {# 手机（≤720px）：.nav-bar 变底部固定栏，.nav-sheet 变上拉面板 #}
+      <div class="nav-bar">
+        <button class="tab-btn active" data-tab="overview" data-icon="📊" data-short="总览"><span class="tl">总览</span></button>
+        <button class="tab-btn" data-tab="intercom" data-icon="🎙" data-short="对讲"><span class="tl">网页对讲</span></button>
+        <button class="tab-btn" data-tab="camera" data-icon="📷" data-short="监控"><span class="tl">摄像头</span></button>
+        {# 仅手机出现的「更多」入口：桌面 display:none，不参与桌面布局 #}
+        <button class="nav-more" type="button" data-icon="☰" data-short="更多"
+                aria-expanded="false" aria-controls="nav-sheet"><span class="tl">更多</span></button>
+      </div>
+      <div class="nav-sheet" id="nav-sheet">
+        <div class="nav-sheet-title">全部功能</div>
+        <button class="tab-btn" data-tab="weather" data-icon="🌦"><span class="tl">气象</span></button>
+        <a class="tab-btn nav-link" href="{{ url_for('voice_log_page') }}" data-icon="📝"><span class="tl">语音日志</span></a>
+        <a class="tab-btn nav-link" href="{{ url_for('aprs_page') }}" data-icon="📡"><span class="tl">APRS</span></a>
+        <a class="tab-btn nav-link" href="{{ url_for('assistant_page') }}" data-icon="🤖"><span class="tl">中继语音助手</span></a>
+        <a class="tab-btn nav-link" href="{{ url_for('broadcast_page') }}" data-icon="📢"><span class="tl">定时播报</span></a>
+        <button class="tab-btn admin-only" data-tab="users" data-icon="👤"><span class="tl">用户管理</span></button>
+        <button class="tab-btn admin-only" data-tab="settings" data-icon="⚙"><span class="tl">设置 / 校准</span></button>
+      </div>
       {% endblock %}
     </nav>
     <div class="user-box">
@@ -53,7 +66,7 @@
      {% block app_js %}{% endblock %} 整个覆盖掉那个块 #}
   <script src="{{ url_for('static', filename='js/poll.js', v='20260930b') }}"></script>
   {% block app_js %}
-  <script src="{{ url_for('static', filename='js/app.js', v='20260930d') }}"></script>
+  <script src="{{ url_for('static', filename='js/app.js', v='20260930j') }}"></script>
   {% endblock %}
   {% block scripts %}{% endblock %}
 </body>

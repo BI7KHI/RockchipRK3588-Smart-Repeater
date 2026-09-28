@@ -1,4 +1,6 @@
 {% extends "base.html" %}
+{# 子页面只有「返回控制台 + 当前页」，沿用顶部导航，不启用手机底部栏 #}
+{% set body_class = 'page-sub' %}
 {% block title %}中继语音助手 - ELF2 智能中继控制中心{% endblock %}
 
 {% block nav %}
@@ -98,6 +100,7 @@
   <button class="tab-btn active" data-atab="cfg">设置</button>
   <button class="tab-btn" data-atab="prompt">提示词与清洗</button>
   <button class="tab-btn" data-atab="test">手动测试</button>
+  <button class="tab-btn" data-atab="chat">文本对话</button>
   <button class="tab-btn" data-atab="stat">信道占用统计</button>
 </div>
 
@@ -121,8 +124,8 @@
 
 <div class="as-pane" data-apane="prompt">
   <p class="muted small">
-    「运行前提示词注入」的<b>实际结果</b>在这里逐字可见 —— 网页 LLM 对话与中继语音助手
-    <b>共用同一份基础设定</b>（<code>llm_system_prompt</code>），助手再追加一段语音播报约束。
+    「运行前提示词注入」的<b>实际结果</b>在这里逐字可见 —— 「文本对话」与中继语音助手
+    <b>共用同一份基础设定</b>（<code>llm_system_prompt</code>），再追加同一段语音播报约束。
     变量（如 <code>{battery}</code>）已展开为实时值。
   </p>
   <div class="row gap wrap" style="margin-bottom:10px">
@@ -162,15 +165,24 @@
 <div class="as-pane" data-apane="test">
   <div class="as-warn">
     手动测试走<b>完整链路</b>（提示词注入 → LLM → 工具调用 → TTS 清洗 → 语音合成），
-    但<b>默认不发射</b>：结果只出现在「对话记录」里并可网页试听。
-    确认没问题后再关掉设置里的「测试模式（不发射）」。
+    默认<b>不发射</b>：结果只出现在「对话记录」里并可网页试听。
+    要真的发上无线电，勾上<b>「发射到无线电」</b>再跑 —— 它走的是助手的**受控发射**
+    那条路（禁发时段、信道占用、最小间隔、单次上限全都生效），并会先弹一次确认。
+    全局「测试模式（只试听不发射）」是硬开关，开着时即使勾了发射也只会合成。
   </div>
   <div class="row gap wrap" style="align-items:flex-start">
     <textarea id="as-test-text" class="as-field" style="flex:1;min-width:260px;min-height:78px;background:#0d1524;border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px;font-size:13px"
       placeholder="例如：现在风速多少">现在风速多少</textarea>
     <div style="display:flex;flex-direction:column;gap:8px">
       <button class="btn primary" id="btn-as-test">跑一轮（不发射）</button>
+      <label class="checkline" title="勾上后：生成完就发射到无线电（占用信道）">
+        <input type="checkbox" id="as-test-tx"> 发射到无线电</label>
+      <button class="btn" id="btn-as-say" title="不过 LLM：把上面这段文本直接合成并发射">只发射这段文本</button>
+      <label class="checkline" title="勾上即发射；不勾只合成到网页试听">
+        <input type="checkbox" id="as-say-tx" checked> 上面这个按钮发射</label>
       <button class="btn" id="btn-as-test-wake">只测唤醒词匹配</button>
+      <label class="checkline" title="按所选唤醒方式判定「会不会真的唤醒」">
+        <input type="checkbox" id="as-test-busy" checked> 模拟 BUSY 有效</label>
     </div>
   </div>
   <div class="as-sub">唤醒词匹配结果</div>
@@ -186,6 +198,46 @@
   </div>
 </div>
 
+<div class="as-pane" data-apane="chat">
+  <div class="as-warn">
+    这就是原来「总览 → LLM 对话」那一页，现已<b>并入语音测试</b>：它与中继语音助手共用
+    <b>同一份提示词</b>（共用基础设定 + 语音播报约束）、同一条技能链路、同一套数值口语化出口，
+    所以它只是助手的<b>本地非接收测试</b> —— 全程<b>不发射</b>（不拉 PTT、不上中继）。
+    提示词请在「设置」页签里改（那里的「共用基础设定」与「语音播报约束」就是两条链路共用的那两份）。
+  </div>
+  <div class="card chat-card" style="max-width:100%">
+    <div class="chat-history" id="at-chat-history"></div>
+    <div class="chat-input">
+      <textarea id="at-chat-text" rows="3"
+        placeholder="输入消息，Enter 发送，Shift+Enter 换行；（也可按住下面的麦克风说话）"></textarea>
+      <button class="btn primary" id="btn-at-send">发送</button>
+    </div>
+    <div class="row gap small wrap">
+      <button class="btn" id="btn-at-voice"
+              title="按住说话：板端离线识别（sherpa-onnx + SenseVoice）后转文字，录音留档">🎙 按住说话</button>
+      <span id="at-voice-state" class="muted small">语音输入：就绪</span>
+      <label class="checkline"><input type="checkbox" id="at-voice-auto-send" checked> 转写后自动发送</label>
+      <label class="checkline" title="勾上后：每次生成完就把这句话发射到无线电（占用信道；受控发射的全部红线照旧生效）">
+        <input type="checkbox" id="at-tx-auto"> 生成后自动发射</label>
+      <button class="btn" id="btn-at-say-last" title="把上一句回答再发射一次（不重新问）">发射上一句</button>
+      <span id="at-rate" class="muted small">生成速率：--</span>
+      <span id="at-tools-live" class="muted small"></span>
+      <span id="at-tx-state" class="muted small"></span>
+    </div>
+  </div>
+
+  <div class="as-sub">语音试听（只合成到网页播放，<b>不发射</b>；音色/ICAO 跟随全局设置）</div>
+  <div class="row gap wrap" style="align-items:flex-start">
+    <textarea id="at-tts-text" class="as-field" style="flex:1;min-width:260px;min-height:64px"
+      placeholder="例如：现在是北京时间十九点整，电池电压十二点四七伏特">现在是北京时间十九点整，电池电压十二点四七伏特，机内温度四十七点二摄氏度</textarea>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <button class="btn" id="btn-at-tts-web">合成并网页试听</button>
+      <span class="muted small" id="at-tts-state">—</span>
+    </div>
+  </div>
+  <audio id="at-audio" controls preload="none" style="width:100%;max-width:520px;display:none;margin-top:8px"></audio>
+</div>
+
 <div class="as-pane" data-apane="stat">
   <div class="as-stat" id="as-stat"></div>
   <div class="as-sub">计数器（进程生命周期累计）</div>
@@ -194,5 +246,6 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/assistant.js', v='20260930b') }}"></script>
+<script src="{{ url_for('static', filename='js/assistant.js', v='20260930e') }}"></script>
+<script src="{{ url_for('static', filename='js/assistant-test.js', v='20260930b') }}"></script>
 {% endblock %}

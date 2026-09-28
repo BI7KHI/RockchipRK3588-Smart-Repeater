@@ -74,6 +74,9 @@ DEFAULTS = {
     # 用编辑距离把它纠回白名单里的呼号。
     'vlog_callsign_whitelist': 'BI7KHI',
     'vlog_callsign_max_dist': '0',   # 0=只做「丢字」纠错；1/2 才启用编辑距离纠错（有误纠风险）
+    # 本机发射（tx）段的文字从哪来：auto=有发射原文就用原文，只有「人工实时发射」
+    # （网页对讲，文本未知）才送 ASR；off=tx 段一律不送 ASR；on=老行为（一律送）
+    'vlog_tx_asr': 'auto',
 }
 
 CATEGORY_LABEL = {
@@ -87,6 +90,163 @@ CATEGORY_LABEL = {
 }
 
 KIND_LABEL = {'rx': '接收', 'tx': '本机发射', 'both': '收发同时'}
+
+# ---------------------------------------------------------------------------
+# 本机发射文本登记：tx 段不跑 ASR 的依据
+#
+# 本机发射的声音是我们自己生成的（定时播报、重启通告、语音助手回复、网页朗读），
+# 文本在合成之前就已经存在。把录下来的自己的声音再送一遍 ASR 是纯浪费，而且经
+# 声卡/电台回录后必然失真，识别结果反而是**错的** —— 实测同一段播报，
+# 「电池电压 12.8 伏特、内部温度 47.2 摄氏度」被识别成
+# 「电池电压1156伏特及内温度472摄氏度」。
+#
+# 所以发射前把 (文本, 起始时刻, 时长) 登记进来，日志落段时按时间窗取回原文，
+# 直接当成这一段的文字（asr_status='tx'），ASR 一步都不走。
+#
+# 唯一「文本未知」的本机发射是网页对讲（人在说话，音频由浏览器推流），它走
+# note_tx_live() 打时间标记，只有这种段才允许送 ASR —— 判定集中在 tx_decision()。
+# ---------------------------------------------------------------------------
+TX_ASR_MODES = ('off', 'auto', 'on')
+TX_TEXT_TTL = 900.0        # 登记表只认最近 15 分钟，避免陈旧文本错配到新段上
+TX_TEXT_KEEP = 200
+TX_TEXT_NOTE = '文字取自本机 TTS 原文，未调用 ASR'
+TX_SKIP_NOTE = '本机发射且无对应发射原文，已跳过 ASR'
+_TX_TEXTS = deque(maxlen=TX_TEXT_KEEP)
+_TX_TEXTS_LOCK = threading.Lock()
+_CJK_RE = re.compile(r'[\u3400-\u9fff\u3040-\u30ff]')
+
+
+def est_speech_seconds(text):
+    """按字数粗估 TTS 时长（中文约 4 字/秒、其它约 9 字符/秒）。拿不到真实时长时兜底。"""
+    s = str(text or '').strip()
+    if not s:
+        return 0.0
+    cjk = len(_CJK_RE.findall(s))
+    other = max(0, len(s) - cjk)
+    return max(0.8, cjk / 4.0 + other / 9.0)
+
+
+def note_tx_text(text, seconds=0.0, ts=None, source=''):
+    """登记一次「本机即将发射的文本」。seconds<=0 时按字数估算时长。
+
+    返回登记项 (start, end, text, source, added)，text 为空时不登记、返回 None。
+    """
+    s = str(text or '').strip()
+    if not s:
+        return None
+    try:
+        dur = float(seconds or 0.0)
+    except Exception:
+        dur = 0.0
+    if dur <= 0.2:
+        dur = est_speech_seconds(s)
+    t0 = float(time.time() if ts is None else ts)
+    item = (t0, t0 + dur, s, str(source or ''), time.time())
+    with _TX_TEXTS_LOCK:
+        _TX_TEXTS.append(item)
+    return item
+
+
+def note_tx_live(ts=None, hold=30.0, source='intercom'):
+    """标记一段「文本未知的人工实时发射」（网页对讲）。
+
+    推流期间按心跳反复调用，hold 覆盖到下一次心跳，落段时据此放行 ASR。
+    """
+    t0 = float(time.time() if ts is None else ts)
+    try:
+        h = max(1.0, float(hold or 0.0))
+    except Exception:
+        h = 30.0
+    src = str(source or '')
+    with _TX_TEXTS_LOCK:
+        if _TX_TEXTS:
+            _r0, _r1, ptext, psrc, added = _TX_TEXTS[-1]
+            # 心跳节流：同一来源上一次标记仍然有效时就不再追加（推流每 250ms 一块）
+            if not ptext and psrc == src and added + h / 3.0 > time.time():
+                return
+        _TX_TEXTS.append((t0, t0 + h, '', src, time.time()))
+
+
+def tx_matches(ts_epoch, seconds, lead=0.0):
+    """与本段录音时间窗重叠的本机发射登记，按重叠时长降序返回。
+
+    lead 是 pre-roll：分段的 start_ts 之后写进去的最前面若干秒其实是**更早**录到的
+    音频，所以时间窗左边界要往前放宽，否则开头那一下会漏配。
+    """
+    try:
+        t0 = float(ts_epoch)
+    except Exception:
+        return []
+    try:
+        dur = max(0.0, float(seconds or 0.0))
+    except Exception:
+        dur = 0.0
+    s0 = t0 - max(0.0, float(lead or 0.0))
+    s1 = t0 + dur
+    now = time.time()
+    with _TX_TEXTS_LOCK:
+        items = list(_TX_TEXTS)
+    out = []
+    for r0, r1, text, src, added in items:
+        if now - added > TX_TEXT_TTL:
+            continue
+        ov = min(s1, r1) - max(s0, r0)
+        if ov <= 0:
+            continue
+        # 门槛随段长收缩（短段也要能命中），但至少 0.15s、至多 0.5s
+        need = min(0.5, max(0.15, 0.3 * min(max(r1 - r0, 0.1), max(dur, 0.1))))
+        if ov < need:
+            continue
+        out.append({'text': text, 'source': src, 'live': not text,
+                    'start': r0, 'seconds': round(r1 - r0, 2),
+                    'overlap': round(ov, 2)})
+    # 重叠相同时「有原文」优先：文本登记段绝不能因为旁边有 live 标记就退化成送 ASR
+    out.sort(key=lambda m: (m['overlap'], 1 if m['text'] else 0), reverse=True)
+    return out
+
+
+def reset_tx_texts():
+    """清空登记表（测试与排查用）。"""
+    with _TX_TEXTS_LOCK:
+        _TX_TEXTS.clear()
+
+
+def tx_match(st, ts_epoch, seconds):
+    """按录音时间窗取回本机发射登记（含 pre-roll 补偿），无命中返回 None。
+
+    **刻意做成模块级函数而不是某个类的方法**：录音机（Recorder）和识别侧
+    （VoiceService）都要用它，挂在其中一个类上就会变成 `self.svc.xxx` 这种
+    跨对象调用 —— 一旦挂错类，落段当场抛 AttributeError，整段 tx 记录直接丢失
+    （真机上就是这么丢掉过一次发射段）。settings 字典由调用方传进来。
+    """
+    try:
+        lead = _f((st or {}).get('vlog_pre_roll'), 3.0)
+    except Exception:
+        lead = 3.0
+    hits = tx_matches(ts_epoch, seconds, lead=lead)
+    return hits[0] if hits else None
+
+
+def tx_asr_mode(st):
+    """本机发射识别策略：off / auto / on（非法值回落 auto）。"""
+    v = str((st or {}).get('vlog_tx_asr') or 'auto').strip().lower()
+    return v if v in TX_ASR_MODES else 'auto'
+
+
+def tx_decision(mode, kind, text='', live=False):
+    """本机发射段该怎么处理，返回 (asr_status, text, note)。
+
+    rx 段、以及 mode='on'（兼容老行为）一律返回 pending，交回原 ASR 流程。
+    """
+    if kind != 'tx' or mode == 'on':
+        return ('pending', '', '')
+    t = str(text or '').strip()
+    if t:
+        return ('tx', t, TX_TEXT_NOTE)
+    if mode == 'auto' and live:
+        return ('pending', '', '')          # 网页对讲：人声、文本未知，仍送识别
+    return ('skip', '', TX_SKIP_NOTE)
+
 
 # ICAO / 北约字母解释法 → 字母。中继通联里呼号普遍用字母解释法念，
 # SenseVoice 会输出 "Bravo Italy number 7 Hotel India" 这种文本，
@@ -784,20 +944,40 @@ class Recorder:
         # ASR 之后还会再刷一次，兜住「解包比收段慢一点」的竞态。
         pos, pcall, plat, plon = self.svc._fill_aprs_pos(
             seg.start_ts, seconds, seg.kind)
+        # 本机发射：文本在合成时就已经知道，直接用原文，**不排 ASR**。
+        # 命中登记 → 用原文；没命中且是人工实时发射（网页对讲）→ 照旧送 ASR；
+        # 没命中也不是人声（APRS 信标等）→ 只标记跳过，别拿 ASR 去猜数据音。
+        status, tx_text, note = 'pending', '', ''
+        if seg.kind == 'tx':
+            m = tx_match(st, seg.start_ts, seconds) or {}
+            status, tx_text, note = tx_decision(
+                tx_asr_mode(st), seg.kind, m.get('text') or '', bool(m.get('live')))
+            if tx_text:
+                category = 'voice'
+                self.svc.counters['tx_text'] = int(self.svc.counters.get('tx_text', 0)) + 1
+            elif status == 'skip':
+                if not category and self.svc._aprs_overlap(seg.start_ts, seconds, 'tx'):
+                    category = 'aprs'
+                self.svc.counters['tx_skip'] = int(self.svc.counters.get('tx_skip', 0)) + 1
+            else:
+                self.svc.counters['tx_live'] = int(self.svc.counters.get('tx_live', 0)) + 1
         rid = self.svc.store.exec(
             'INSERT INTO voice_logs(ts,ts_epoch,end_epoch,session_id,seq,kind,category,'
-            'seconds,rms,peak,dbfs,filename,path,bytes,asr_status,created,'
+            'seconds,rms,peak,dbfs,filename,path,bytes,asr_status,asr_text,note,created,'
             'aprs_pos,aprs_call,aprs_lat,aprs_lon) '
-            'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
             (datetime.fromtimestamp(seg.start_ts).astimezone().isoformat(timespec='seconds'),
              seg.start_ts, ts, self.session_id, seg.seq, seg.kind, category,
              round(seconds, 2), round(rms, 1), seg.peak, round(dbfs, 1),
-             Path(seg.path).name, str(seg.path), size, 'pending', _now_iso(),
+             Path(seg.path).name, str(seg.path), size, status, tx_text, note, _now_iso(),
              pos, pcall, plat, plon))
         self.stats['segments'] += 1
         self.stats['seconds'] = round(float(self.stats['seconds']) + seconds, 1)
         self.svc.counters['segments'] = int(self.svc.counters.get('segments', 0)) + 1
-        if _flag(st.get('vlog_asr_enabled'), True) and rid:
+        # 这一段落库成功了：把上一次的错误清掉。否则状态栏会一直挂着一条早就过去了
+        # 的异常（真机上就见过「异常: AttributeError…」一直显示，看着像还在坏）。
+        self.stats['error'] = ''
+        if status == 'pending' and _flag(st.get('vlog_asr_enabled'), True) and rid:
             self.svc.enqueue_asr(rid)
 
     def force_close(self):
@@ -1174,6 +1354,24 @@ class VoiceService:
             return
         st = self.settings()
         path = row.get('path') or ''
+        # 本机发射段：文字来自发射前的登记（TTS 原文），根本不需要 ASR。
+        # 这里是兜底 —— 老记录、被手工重新排队的段、以及队列里滞留的段都经过这。
+        kind = row.get('kind') or ''
+        mode = tx_asr_mode(st)
+        if kind == 'tx' and mode != 'on':
+            m = tx_match(st, row.get('ts_epoch'), _f(row.get('seconds'), 0.0)) or {}
+            status, tx_text, note = tx_decision(mode, kind, m.get('text') or '',
+                                                bool(m.get('live')))
+            if status != 'pending':
+                cat = 'voice' if tx_text else (row.get('category') or '')
+                self.store.exec(
+                    "UPDATE voice_logs SET asr_status=?, asr_text=?, note=?, category=?, "
+                    "asr_ms=0, rtf=0 WHERE id=?",
+                    (status, tx_text, note, cat, rid))
+                key = 'tx_text' if tx_text else 'tx_skip'
+                self.counters[key] = int(self.counters.get(key, 0)) + 1
+                print('%s #%s 本机发射跳过 ASR：%s' % (LOG, rid, note or status), flush=True)
+                return
         if not path or not Path(path).exists():
             self.store.exec("UPDATE voice_logs SET asr_status='error',note='文件缺失' WHERE id=?", (rid,))
             return
@@ -1300,9 +1498,28 @@ class VoiceService:
                   flush=True)
         return changed
 
-    def retranscribe(self, rid):
+    def retranscribe(self, rid, force=False):
+        """手工「重新识别」。
+
+        本机发射段优先取回**发射原文** —— 那才是它真正的文字，而不是对回录音频
+        再猜一遍的结果；只有关掉了该策略（或 force=True）才真的重跑 ASR。
+        """
+        row = self.store.one('SELECT * FROM voice_logs WHERE id=?', (rid,))
+        if row and (row.get('kind') or '') == 'tx' and not force:
+            st = self.settings()
+            mode = tx_asr_mode(st)
+            m = tx_match(st, row.get('ts_epoch'), _f(row.get('seconds'), 0.0)) or {}
+            status, tx_text, note = tx_decision(mode, 'tx', m.get('text') or '',
+                                                bool(m.get('live')))
+            if status != 'pending':
+                cat = 'voice' if tx_text else (row.get('category') or '')
+                self.store.exec(
+                    'UPDATE voice_logs SET asr_status=?, asr_text=?, note=?, category=? '
+                    'WHERE id=?', (status, tx_text, note, cat, rid))
+                return {'ok': True, 'source': status, 'text': tx_text, 'note': note}
         self.store.exec("UPDATE voice_logs SET asr_status='pending', category='' WHERE id=?", (rid,))
         self.enqueue_asr(rid)
+        return {'ok': True, 'source': 'asr'}
 
     # -- 维护：清理 / 每日总结调度 ----------------------------------------
     def _maintenance(self):
@@ -1580,7 +1797,7 @@ class VoiceService:
         """pos: 'only' 只看含 APRS 位置的段 / 'none' 只看不含的 / None 不过滤。"""
         sql = 'SELECT id,ts,ts_epoch,seconds,kind,category,rms,peak,dbfs,filename,path,' \
               'bytes,asr_status,asr_text,asr_json,asr_ms,rtf,session_id,seq,feature_json,' \
-              'callsigns,callsigns_raw,aprs_pos,aprs_call,aprs_lat,aprs_lon ' \
+              'callsigns,callsigns_raw,aprs_pos,aprs_call,aprs_lat,aprs_lon,note ' \
               'FROM voice_logs WHERE 1=1'
         args = []
         if day:
@@ -1624,6 +1841,9 @@ class VoiceService:
                 'rms': r['rms'], 'peak': r['peak'], 'dbfs': r['dbfs'],
                 'filename': r['filename'], 'bytes': r['bytes'],
                 'asr_status': r['asr_status'], 'text': r['asr_text'] or '',
+                # 这段文字是「识别出来的」还是「本机发射原文」——前端据此换标签
+                'text_src': 'tx' if (r['asr_status'] == 'tx') else 'asr',
+                'note': r.get('note') or '',
                 'segments': segs, 'ms': r['asr_ms'], 'rtf': r['rtf'],
                 'session_id': r['session_id'], 'seq': r['seq'],
                 'callsigns': (r.get('callsigns') or '').split(',') if r.get('callsigns') else [],

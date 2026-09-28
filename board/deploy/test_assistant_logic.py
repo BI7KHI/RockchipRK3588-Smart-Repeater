@@ -138,6 +138,21 @@ p4, n4 = svc4._build_prompt('风速多少', st4, long_base)
 check('长基础设定下仍保留播报规范', MARK in p4, '规范被切掉了')
 check('长基础设定下仍不超上限', len(p4) <= 3000, 'len=%d' % len(p4))
 
+# 顺序回归（2026-09-27 板端实测）：长提示词下行为约束放**开头**不被遵守
+# （答「哈喽！中继台的电池电压是 12.6 伏。」，句尾标记一个字没有），放**结尾**
+# 才遵守（「好的，电池电压是 12.6 伏，喵。」）。所以规范必须排在问题之后。
+i_q = p4.find('【当前问题】')
+i_s = p4.find('【播报要求')
+check('提示词含播报要求段', i_s > 0, 'idx=%d' % i_s)
+check('播报要求排在当前问题**之后**（近因）', i_q >= 0 and i_s > i_q,
+      '问题@%d 规范@%d' % (i_q, i_s))
+check('规范段是最后一段（其后不再有别的段落标题）',
+      p4.rfind('【') == i_s, '最后标题@%d 规范@%d' % (p4.rfind('【'), i_s))
+p_short = svc._build_prompt('风速多少', st, '')[0]
+check('无基础设定时规范依然在问题之后',
+      p_short.find('【播报要求') > p_short.find('【当前问题】'))
+check('无基础设定时不再出现空的系统设定段', '【系统设定】' not in p_short, p_short[:40])
+
 # 再挤：把上限压到刚好放不下「基础设定 + 规范」，规范仍要活着
 svc5, st5 = make_svc({'assist_max_input_chars': '600'})
 p5, n5 = svc5._build_prompt('风速多少', st5, long_base)
@@ -167,13 +182,30 @@ check('mode=off 时完全不回灌（板端保命开关）',
 
 m_local = G.summary_messages([{'get_power': {'battery': 12.6}}], '电池电压',
                              SPEC, 'local', mode='auto')
-check('auto 下板端 RKLLM 不回灌（>400 字会空输出）',
-      all(MARK not in (m.get('content') or '') for m in m_local))
+# 2026-09-27 实测推翻了「板端 >400 字空输出」：max_context_len 提到 4096 后
+# 4615 字符仍正常输出，真正的约束变成延时，所以 auto 现在也给板端回灌。
+check('auto 下板端 RKLLM 也回灌（旧结论已作废）',
+      any(MARK in (m.get('content') or '') for m in m_local))
+# 板端必须内联进用户消息、且落在末尾。实测（同一份 283 字规范，各 4 次）：
+#   作为最后一条 user 消息 → 4/4 遵守；放进 system 轮（后面跟 user）→ 0/4 遵守。
+check('板端约束内联在用户消息里（**不走** system 轮）',
+      len(m_local) == 1 and m_local[0]['role'] == 'user'
+      and MARK in m_local[0]['content'], str([x['role'] for x in m_local]))
+_i_sp = m_local[0]['content'].find('【输出要求')
+_i_q = m_local[0]['content'].find('电池电压')
+check('板端约束落在用户消息**末尾**（近因）',
+      _i_sp > _i_q >= 0, '问题@%d 约束@%d' % (_i_q, _i_sp))
+check('板端约束按延时预算限量（<=600 字）',
+      len(G.summary_spec('规' * 5000, 'local')) <= G.LOCAL_SPEC_CAP,
+      str(len(G.summary_spec('规' * 5000, 'local'))))
+check('外部仍按大 cap 回灌',
+      len(G.summary_spec('规' * 5000, 'external')) > G.LOCAL_SPEC_CAP)
 
-m_local_on = G.summary_messages([{'get_power': {'battery': 12.6}}], '电池电压',
-                                SPEC, 'local', mode='on')
-check('强制 on 时板端走用户消息内联（RKLLM 不认 system 轮）',
-      m_local_on[0]['role'] == 'user' and '【播报要求】' in m_local_on[0]['content'])
+m_ext = G.summary_messages([{'get_power': {'battery': 12.6}}], '电池电压',
+                           SPEC, 'external', mode='auto')
+check('外部模型仍走 system 轮（它吃 system，板端不吃）',
+      m_ext[0]['role'] == 'system' and MARK in m_ext[0]['content'],
+      str([x['role'] for x in m_ext]))
 
 check('cap 生效', len(G.summary_spec('规' * 5000, 'external', cap=300)) == 300)
 check('空规范不注入', G.summary_spec('', 'external') == '')
@@ -191,6 +223,31 @@ check('网页总结轮带基础设定', m_web[0]['role'] == 'system'
 check('网页总结轮用自己的收尾语', '请用中文 1~3 句回答：' in m_web[-1]['content'])
 check('默认收尾语仍是助手那一句',
       G.SUMMARY_TAIL_ASSIST in G.summary_messages([], 'q', SPEC, 'external')[-1]['content'])
+
+# --- 4c. 网页对话的「输出约束」注入（对话前，落在用户消息末尾）-----------------
+print('\n=== 4c. 网页对话输出约束注入 ===')
+SUF = '回答的末尾必须原样加上「喵」这个字。'
+p_c = G.compose_user_prompt('你是中继助手。', '电池电压是多少', None, SUF)
+check('约束出现在合成后的用户消息里', SUF in p_c)
+check('约束落在**末尾**（其后不再有其他段落）',
+      p_c.rstrip().endswith(SUF), p_c[-60:])
+check('约束排在【用户问题】之后',
+      p_c.find('【输出要求') > p_c.find('【用户问题】'),
+      '问题@%d 约束@%d' % (p_c.find('【用户问题】'), p_c.find('【输出要求')))
+check('约束排在工具协议之后',
+      p_c.find('【输出要求') > p_c.find('READ'),
+      '工具@%d 约束@%d' % (p_c.find('READ'), p_c.find('【输出要求')))
+p_n0 = G.compose_user_prompt('你是中继助手。', '电池电压是多少', None, '')
+check('空约束不产生空段落',
+      '【输出要求' not in p_n0, p_n0[-40:])
+p_n1 = G.compose_user_prompt('你是中继助手。', '电池电压是多少', None, '   ')
+check('纯空白约束也不注入', '【输出要求' not in p_n1)
+# 基础设定为空时不该出现空的「系统设定」段，但约束仍要在
+p_n2 = G.compose_user_prompt('', '电池电压是多少', None, SUF)
+check('无基础设定时仍注入约束且无空段落',
+      '【系统设定】' not in p_n2 and SUF in p_n2, p_n2[:60])
+check('三段顺序：工具 → 问题 → 约束',
+      p_n2.find('READ') < p_n2.find('【用户问题】') < p_n2.find('【输出要求'))
 
 # ---------------------------------------------------------------------------
 print('\n=== 5. 能量分段状态机 ===')
@@ -331,6 +388,86 @@ for k in range(3):
     if svc2.q.qsize() > before:
         ok_rounds += 1
 check('连续 3 轮「发射-静默-呼叫」都能收音', ok_rounds == 3, '%d/3 轮' % ok_rounds)
+
+# ---------------------------------------------------------------------------
+print('\n=== 12. 唤醒词模糊匹配（同音字 / 漏字 / 近似提示）===')
+W = ['智能中继', '中继台', '香香']
+for text, want in (('中继台现在风速多少', '中继台'),
+                   ('中机台电池电压', '中继台'),        # 实测：机/继 同音误识
+                   ('中继太，你好', '中继台'),
+                   ('智能中记，温度多少', '智能中继'),
+                   ('香想，讲个笑话', '香香'),
+                   ('中 继 台 ， 现在几点', '中继台'),   # 中间插标点也要命中
+                   ('智能中继站，你好', '智能中继')):   # 多字也算命中
+    got = A.match_wake(text, W, True)[0]
+    check('「%s」→ 命中 %s' % (text, want), got == want, '实得 %r' % got)
+check('非唤醒词不命中', A.match_wake('你好啊', W, True)[0] == '')
+check('容错关闭时同音字不命中', A.match_wake('中机台电压多少', W, False)[0] == '',
+      A.match_wake('中机台电压多少', W, False))
+check('漏字默认不命中（「智能继」差一个「中」）',
+      A.match_wake('智能继，现在几点', W, True)[0] == '')
+check('开宽松匹配后漏字能命中',
+      A.match_wake('智能继，现在几点', W, True, True)[0] == '智能中继')
+near, ratio = A.wake_near_miss('中继泰现在几点', W, True)
+check('未命中时给出「最像哪个词」', near == '中继台' and ratio >= 0.6,
+      '%r %.2f' % (near, ratio))
+check('差得远时不给近似提示', A.wake_near_miss('今天天气不错', W, True)[0] == '')
+
+print('\n=== 13. BUSY 唤醒方式 ===')
+svc_a, st_a = make_svc({'assist_wake_mode': 'level', 'assist_enabled': '1'})
+svc_b, st_b = make_svc({'assist_wake_mode': 'busy', 'assist_enabled': '1'})
+check('唤醒方式取值 level', svc_a.wake_mode(st_a) == 'level')
+check('唤醒方式取值 busy', svc_b.wake_mode(st_b) == 'busy')
+check('非法值回落 level',
+      svc_b.wake_mode({'assist_wake_mode': '乱写'}) == 'level')
+
+# 判定：BUSY 模式下载波没来就不唤醒（唤醒词命中也不行）
+r = svc_b.test_wake('中继台，现在几点', busy=False)
+check('busy 模式 + BUSY 未触发 → 不唤醒', r['matched'] == '中继台' and r['would_wake'] is False,
+      str(r))
+check('不唤醒时给出原因', 'BUSY' in r['reason'], r['reason'])
+r2 = svc_b.test_wake('中继台，现在几点', busy=True)
+check('busy 模式 + BUSY 有效 → 唤醒', r2['would_wake'] is True, str(r2))
+r3 = svc_a.test_wake('中继台，现在几点', busy=False)
+check('level 模式不受 BUSY 影响', r3['would_wake'] is True, str(r3))
+
+# 分段：busy 模式**只有载波**才算「检测到语音」——电平触发完全关闭
+def _seg_open(mode, busy, dbfs, pre=None):
+    svc, st = make_svc({'assist_wake_mode': mode, 'assist_enabled': '1'},
+                       busy=busy)
+    svc.busy_getter = lambda: busy
+    mono = b'\x00\x00' * 1600                 # 0.1s 单声道
+    if pre is not None:
+        svc._push_pre(900.0, mono, pre)
+    svc._segment(None, mono, 1000.0, dbfs, st)
+    return svc.seg
+
+seg = _seg_open('busy', True, -70.0)
+check('busy 模式：弱信号（-70dBFS）+ BUSY → 开段（弱信号也能收）', seg is not None,
+      'seg=%r' % (seg,))
+check('开出的段被标记为 BUSY 段', bool(seg and seg.get('busy')))
+check('BUSY 计入「有声时长」（弱信号才过得了最短时长）',
+      bool(seg and seg.get('voice_n', 0) > 0))
+seg2 = _seg_open('busy', True, -70.0, pre=400.0)
+check('busy 模式开段时带上 pre-roll（不吃掉第一个字）',
+      bool(seg2 and seg2.get('pre')), 'pre=%r' % ((seg2 or {}).get('pre'),))
+
+# 用户实测反馈：切到 BUSY 后「没有 BUSY 高电平也会被识别到语音触发」。根因是上一版
+# 把电平门限也留着当开段条件。现在 busy 模式**电平完全不参与判定**：
+check('busy 模式：无 BUSY，即使 -30dBFS 的响亮语音也**不开段**（电平触发已关闭）',
+      _seg_open('busy', False, -30.0) is None)
+check('busy 模式：无 BUSY，弱信号同样不开段', _seg_open('busy', False, -70.0) is None)
+check('level 模式：正常语音照旧开段（原行为未变）',
+      _seg_open('level', False, -30.0) is not None)
+check('level 模式：无 BUSY 无语音不开段', _seg_open('level', False, -70.0) is None)
+
+print('\n=== 14. BUSY 模式的处理闸门（不依赖 ASR）===')
+check('busy 模式 + 无载波 → 拦住', A.AssistantService.busy_gate('busy', False) != '')
+check('拦下时写明原因', 'BUSY' in A.AssistantService.busy_gate('busy', False))
+check('busy 模式 + 有载波 → 放行', A.AssistantService.busy_gate('busy', True) == '')
+check('level 模式永远放行（不受 BUSY 影响）',
+      A.AssistantService.busy_gate('level', False) == '')
+
 print('\n' + '=' * 62)
 print('通过 %d 项，失败 %d 项' % (OK[0], len(FAIL)))
 if FAIL:

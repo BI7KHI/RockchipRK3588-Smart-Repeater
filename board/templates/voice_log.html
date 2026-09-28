@@ -1,4 +1,6 @@
 {% extends "base.html" %}
+{# 子页面只有「返回控制台 + 当前页」，沿用顶部导航，不启用手机底部栏 #}
+{% set body_class = 'page-sub' %}
 {% block title %}中继语音日志 - ELF2 智能中继控制中心{% endblock %}
 
 {% block nav %}
@@ -7,7 +9,7 @@
 {% endblock %}
 
 {% block head_extra %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/voice-log.css', v='20260930c') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/voice-log.css', v='20260930d') }}">
 {% endblock %}
 
 {% block content %}
@@ -186,5 +188,5 @@
 
 {% block scripts %}
 <script>window.VLOG_CSRF = document.querySelector('meta[name="csrf-token"]')?.content || '';</script>
-<script src="{{ url_for('static', filename='js/voice-log.js', v='20260930c') }}"></script>
+<script src="{{ url_for('static', filename='js/voice-log.js', v='20260930e') }}"></script>
 {% endblock %}

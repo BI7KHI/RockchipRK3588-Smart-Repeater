@@ -10,7 +10,6 @@
   #llm-rate, #llm-tools-live { font-variant-numeric: tabular-nums; }
   .kv-list b.on { color: #f5a623; }           /* PTT 使能 / 占用 */
   .kv-list b.rec { color: #2ecc71; }          /* 本地录音中 */
-  #btn-voice-busy.recording { background: #e74c3c; border-color: #e74c3c; color: #fff; }
   #agent-tool-list label { margin: 2px 0; }
   /* 总览页子选项卡（运行概览 / 能量统计） */
   .sub-tabs { display: flex; gap: 6px; margin: 0 0 14px; border-bottom: 1px solid var(--border); }
@@ -86,6 +85,15 @@
         <div><span>本地录音</span><b class="muted" id="relay-busy-local" title="网页语音输入 / 对讲录音状态">--</b></div>
         <div><span>运行时间</span><b id="uptime">--</b></div>
       </div>
+    </div>
+  </div>
+  {# 开发板存储：eMMC（系统 / 与用户区）与 NVMe 数据盘，卡片由 JS 按实际挂载点渲染 #}
+  <div class="grid grid-3" id="disk-cards">
+    <div class="card">
+      <div class="card-title">开发板存储</div>
+      <div class="metric">-- %</div>
+      <div class="sub">读取中…</div>
+      <div class="bar"><span style="width:0%"></span></div>
     </div>
   </div>
   </div><!-- /#ov-run -->
@@ -248,57 +256,6 @@
       <span>L-RMS: <b id="mic-left-rms">--</b></span>
       <span>R-RMS: <b id="mic-right-rms">--</b></span>
       <span>设备: <b id="mic-device">--</b></span>
-    </div>
-  </div>
-</section>
-
-<!-- LLM 对话 -->
-<section id="tab-llm" class="tab-panel">
-  <div class="panel-head">
-    <h2>LLM 对话</h2>
-    <div class="row gap">
-      <select id="llm-provider">
-        <option value="local">本地模型（RKNPU / llama.cpp）</option>
-        <option value="external">外部 API</option>
-      </select>
-      <input id="llm-model" placeholder="模型名称">
-      <button class="btn ghost" id="btn-llm-refresh">刷新配置</button>
-    </div>
-  </div>
-  <div class="chat-layout">
-    <div class="card chat-card">
-      <div class="chat-history" id="chat-history"></div>
-      <div class="chat-input">
-        <textarea id="chat-text" rows="3" placeholder="输入消息，Enter 发送，Shift+Enter 换行；（也可按 BUSY 语音输入）"></textarea>
-        <button class="btn primary" id="btn-chat-send">发送</button>
-      </div>
-      <div class="row gap small">
-        <button class="btn" id="btn-voice-busy" title="按住说话：板端离线识别（sherpa-onnx + SenseVoice）后转文字">🎙 BUSY（按住说话）</button>
-        <span id="voice-state" class="muted small">语音输入：就绪</span>
-        <label class="checkline"><input type="checkbox" id="voice-auto-send" checked> 转写后自动发送</label>
-        <span id="voice-info" class="muted small">录音留档：/www/asr_recordings</span>
-      </div>
-      <div class="row gap small muted">
-        <label><input type="checkbox" id="chat-stream" checked> 流式输出</label>
-        <label class="checkline" title="开启后：端侧 LLM 会先调用技能/工具读取实时数据（电压/温度/气象/发射状态）再回答">
-          <input type="checkbox" id="chat-agent" checked> Agent 技能调用</label>
-        <span id="llm-rate" class="muted small">生成速率：--</span>
-        <span id="llm-tools-live" class="muted small"></span>
-        <span id="llm-config-hint">--</span>
-      </div>
-      <div class="row gap tts-bar">
-        <span class="badge">本地 Piper（离线）</span>
-        <span class="muted small">音色 / 英文音色 / ICAO / 流式朗读策略统一在「设置 / 校准」配置，全局生效</span>
-        <input id="tts-test-text" placeholder="TTS 测试文本" value="呼号 BG7XYZ，这里是 ELF2 中继站，Radio check five nine，how copy？">
-        <button class="btn ghost" id="btn-tts-test">测试朗读（板端 AUX）</button>
-        <button class="btn primary" id="btn-tts-test-web">朗读到网页</button>
-        <button class="btn ghost" id="btn-tts-stop">停止朗读</button>
-        <span id="tts-stream-status" class="muted small">流式朗读：{% if tts_auto_speak %}策略已开{% else %}策略关闭{% endif %}</span>
-      </div>
-      <div class="row gap mt">
-        <audio id="tts-audio" controls preload="none" style="width:100%;max-width:520px"></audio>
-        <span class="muted small" id="tts-web-status">网页播放器：空闲</span>
-      </div>
     </div>
   </div>
 </section>
@@ -927,17 +884,11 @@
       </div>
     </div>
     <div class="card" id="llm-agent-card">
-      <div class="card-title">LLM 提示词注入 / Agent 技能 / 生成速率</div>
-      <label class="checkline"><input type="checkbox" id="set-llm-prompt-on"> 启用系统提示词注入</label>
-      <textarea id="set-llm-prompt" rows="4" placeholder="例：你是 BG7XYZ 中继台值班助手，回答简短口语化。当前电池 {battery} V、光伏 {pv} V、CPU {cpu_temp}℃。"></textarea>
-      <label class="checkline"><input type="checkbox" id="set-llm-prompt-vars"> 展开实时变量（{battery} {pv} {cpu_temp} {wind} {rain_today} {date} {time} {site}）</label>
-      <div class="muted small" id="llm-prompt-vars-live">--</div>
-      <div class="row gap mt">
-        <button class="btn primary" id="btn-save-prompt">保存提示词</button>
-        <button class="btn ghost" id="btn-insert-prompt">填入推荐提示词</button>
-      </div>
-      <p class="muted small">说明：板端 RKLLM 会忽略 <code>system</code> 角色，后台已自动把提示词并入用户消息下发（实测唯一生效方式）。</p>
-      <div class="muted small">──────</div>
+      <div class="card-title">Agent 技能 / 生成速率</div>
+      <p class="muted small">
+        提示词已统一收进 <a href="{{ url_for('assistant_page') }}">中继语音助手</a> 页的「设置」
+        （共用基础设定 + 语音播报约束就那两份，助手与文本对话共用），本页只留技能与统计。
+      </p>
       <label class="checkline"><input type="checkbox" id="set-agent-enabled"> 启用 Agent 技能/工具调用</label>
       <label class="checkline">最大技能轮次 <input type="number" id="set-agent-max-iters" min="1" max="5" step="1" style="width:80px;margin-left:6px"></label>
       <div id="agent-tool-list" class="kv-list mt"><span class="muted small">--</span></div>

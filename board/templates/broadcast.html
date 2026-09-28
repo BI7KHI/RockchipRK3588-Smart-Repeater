@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+{# 子页面只有「返回控制台 + 当前页」，沿用顶部导航，不启用手机底部栏 #}
+{% set body_class = 'page-sub' %}
+{% block title %}定时播报 - ELF2 智能中继控制中心{% endblock %}
+
+{% block nav %}
+<a class="tab-btn" href="/">&larr; 返回控制台</a>
+<span class="tab-btn active">定时播报</span>
+{% endblock %}
+
+{% block head_extra %}
+<style>
+  .bc-hours { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr));
+              gap: 6px; margin-top: 8px; }
+  .bc-hours label { display: flex; align-items: center; justify-content: center;
+                    gap: 4px; padding: 6px 2px; border-radius: 8px;
+                    background: rgba(255,255,255,.03);
+                    border: 1px solid var(--border); font-size: 13px;
+                    font-variant-numeric: tabular-nums; cursor: pointer; }
+  .bc-hours label.on { border-color: #4a6cf7; color: #cfe0ff; }
+  .bc-mod { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+  .bc-mod textarea { width: 100%; margin-top: 6px; font-family: inherit; }
+  .bc-wide { flex: 1; min-width: 180px; }
+  .bc-num { width: 80px; }
+  .bc-preview { margin-top: 10px; padding: 10px 12px; border-radius: 8px;
+                background: rgba(255,255,255,.03); border: 1px solid var(--border);
+                line-height: 1.6; word-break: break-word; }
+  .bc-runstate { margin-top: 10px; min-height: 20px; }
+  @media (max-width: 720px) { .bc-hours { grid-template-columns: repeat(6, minmax(0,1fr)); } }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="panel-head">
+  <h2>定时播报</h2>
+  <div class="row gap">
+    <span id="bc-state-badge" class="badge idle">未启用</span>
+    <span id="bc-busy-badge" class="badge idle">信道空闲</span>
+    <button class="btn" id="btn-bc-refresh">刷新</button>
+  </div>
+</div>
+
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-title">播报计划</div>
+    <label class="checkline"><input type="checkbox" id="bc-enabled"> 启用定时播报</label>
+    <div class="muted small mt">选择要播报的整点（北京时间，可多选；不选则永不播）</div>
+    <div id="bc-hours" class="bc-hours"></div>
+    <div class="row gap mt">
+      <label class="inline-label">禁发时段</label>
+      <input id="bc-quiet" placeholder="留空不禁发，如 23:00-07:00" class="bc-wide">
+    </div>
+    <div class="row gap mt">
+      <label class="inline-label">忙时最多等</label>
+      <input id="bc-busy-wait" type="number" min="0" max="120" step="1" class="bc-num">
+      <span class="muted small">秒。<b>0 = 信道被占用就立即取消本次播报</b>（推荐，不盖台）</span>
+    </div>
+    <div class="row gap mt">
+      <button class="btn primary" id="btn-bc-save">保存计划</button>
+      <span class="muted small" id="bc-save-state">--</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">播报内容</div>
+    <div class="muted small">
+      三类各自独立开关。模板里可用变量：<code>{time_cn}</code>（北京时间十四点整）、
+      <code>{battery}</code> <code>{pv}</code> <code>{cpu_temp}</code>
+      <code>{load1}</code> <code>{uptime_h}</code> <code>{mem_percent}</code>
+      <code>{wind}</code> <code>{rain_today}</code> <code>{weekday}</code>
+      <code>{wx_condition}</code> <code>{wx_temp}</code> <code>{wx_temp_max}</code>
+      <code>{wx_temp_min}</code> <code>{wx_humidity}</code> <code>{wx_wind}</code>
+    </div>
+    <div class="bc-mod">
+      <label class="checkline"><input type="checkbox" id="bc-mod-time"> 时间播报</label>
+      <textarea id="bc-text-time" rows="2" spellcheck="false"></textarea>
+    </div>
+    <div class="bc-mod">
+      <label class="checkline"><input type="checkbox" id="bc-mod-status"> 中继台状态播报</label>
+      <textarea id="bc-text-status" rows="2" spellcheck="false"></textarea>
+    </div>
+    <div class="bc-mod">
+      <label class="checkline"><input type="checkbox" id="bc-mod-weather"> 气象播报</label>
+      <textarea id="bc-text-weather" rows="2" spellcheck="false"></textarea>
+    </div>
+    <div class="row gap mt">
+      <button class="btn primary" id="btn-bc-save-text">保存内容</button>
+      <button class="btn ghost" id="btn-bc-fill">填入默认模板</button>
+      <button class="btn ghost" id="btn-bc-preview">预览文本</button>
+    </div>
+    <div class="bc-preview" id="bc-preview">--</div>
+  </div>
+</div>
+
+<div class="grid grid-2 mt">
+  <div class="card">
+    <div class="card-title">天气 API</div>
+    <div class="row gap">
+      <label class="inline-label">数据源</label>
+      <select id="bc-wx-provider">
+        <option value="off">关闭</option>
+        <option value="openmeteo">Open-Meteo（免费，无需注册）</option>
+        <option value="qweather">和风天气（需注册，国内源）</option>
+      </select>
+    </div>
+    <div class="row gap mt">
+      <label class="inline-label">经度</label>
+      <input id="bc-wx-lon" placeholder="留空则用 APRS 本站坐标" class="bc-wide">
+    </div>
+    <div class="row gap mt">
+      <label class="inline-label">纬度</label>
+      <input id="bc-wx-lat" placeholder="留空则用 APRS 本站坐标" class="bc-wide">
+    </div>
+    <div id="bc-wx-qw">
+      <div class="row gap mt">
+        <label class="inline-label">API Host</label>
+        <input id="bc-wx-host" placeholder="如 abcxyz.qweatherapi.com" class="bc-wide">
+      </div>
+      <div class="row gap mt">
+        <label class="inline-label">API Key</label>
+        <input id="bc-wx-key" type="password" placeholder="留空表示不改动已保存的 key" class="bc-wide">
+      </div>
+    </div>
+    <div class="row gap mt">
+      <button class="btn primary" id="btn-bc-save-wx">保存天气设置</button>
+      <button class="btn" id="btn-bc-test-wx">测试连通性</button>
+      <span class="muted small" id="bc-wx-state">--</span>
+    </div>
+    <p class="muted small">
+      默认 <b>Open-Meteo</b>：完全免费、无需注册、无需 key，填经纬度即可用。
+      若要换和风天气，到 <a href="https://console.qweather.com" target="_blank" rel="noopener">console.qweather.com</a>
+      建项目，取<b>项目专属 API Host</b> 与 <b>API Key</b> 填到上面。
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-title">手动播报 / 试听</div>
+    <p class="muted small">
+      试听只合成并在本地放音、<b>不拉 PTT</b>（电台不会发射），可以放心点。
+      「立即播报」会走完整安全逻辑（禁发时段 / 信道占用检查）并真实发射。
+    </p>
+    <div class="row gap mt">
+      <button class="btn" id="btn-bc-dry">试听（不发射）</button>
+      <button class="btn primary" id="btn-bc-run">立即播报一次（会发射）</button>
+    </div>
+    <div class="bc-runstate muted small" id="bc-runstate">--</div>
+    <div class="muted small mt">
+      音色跟随「设置 / 校准 → TTS 语音朗读」的全局设置，本页不单独设音色。
+    </div>
+  </div>
+</div>
+
+<div class="card mt">
+  <div class="card-title">播报记录（最近 40 条）</div>
+  <p class="muted small">
+    成功与<b>取消</b>都会记录 —— 「信道被占用而取消」是这套安全逻辑的常态结果，
+    必须能事后查，否则「播没播、为什么没播」只能靠猜。
+  </p>
+  <div class="table-wrap">
+    <table class="data-table" id="bc-log-table">
+      <thead><tr><th>时间</th><th>触发</th><th>结果</th><th>说明</th><th>播报文本</th></tr></thead>
+      <tbody><tr><td colspan="5" class="muted">--</td></tr></tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block app_js %}{% endblock %}
+
+{% block scripts %}
+<script>window.BC_CSRF = document.querySelector('meta[name="csrf-token"]')?.content || '';</script>
+<script src="{{ url_for('static', filename='js/broadcast.js', v='20260930a') }}"></script>
+{% endblock %}
