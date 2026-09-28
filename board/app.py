@@ -56,6 +56,7 @@ import energy_service
 import announce_service
 import weather_api
 import speech_text
+import llm_router
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / 'relay.db'
@@ -462,7 +463,7 @@ def now_iso():
 
 def _set_default_settings(db):
     defaults = {
-        'llm_provider': 'local',
+        'llm_provider': 'auto',          # auto / local / external（auto：有网走外部，没网回退本地）
         'local_base_url': 'http://127.0.0.1:8001/v1',
         'local_model': 'qwen2.5-1.5b',
         'local_api_key': '',
@@ -1322,7 +1323,7 @@ def api_status():
         temperatures=read_temperature(),
         uptime_seconds=read_uptime(),
         voltages=voltage_payload(),
-        llm={'provider': get_setting('llm_provider', 'local')},
+        llm=dict(llm_route_status(), provider=get_setting('llm_provider', 'auto')),
         ptt=ptt_status(),
         busy=busy_status(),
         voice={'asr_enabled': _setting_direct('asr_enabled', '1') in ('1', 'true', 'True', 'on')},
@@ -1460,7 +1461,8 @@ def api_settings_set():
     data = request.get_json(silent=True) or {}
     _bool_caster = lambda v: '1' if str(v) in ('1', 'true', 'True', 'on') else '0'
     whitelist = {
-        'llm_provider': lambda v: v if v in ('local', 'external') else None,
+        'llm_provider': lambda v: (str(v).strip().lower()
+            if str(v).strip().lower() in ('auto', 'local', 'external') else None),
         'local_base_url': lambda v: str(v).strip(),
         'local_model': lambda v: str(v).strip(),
         'local_api_key': lambda v: str(v),
@@ -1767,10 +1769,53 @@ def openai_chat_url(base_url):
     return base + '/v1/chat/completions'
 
 
+def llm_mode():
+    """设置里的默认提供商：auto / local / external（非法值回落 auto）。"""
+    return llm_router.normalize_mode(_setting_direct('llm_provider',
+                                                     llm_router.DEFAULT_MODE))
+
+
+def resolve_llm_provider(requested=None, force=False):
+    """把「想要哪个提供方」解析成**此刻真能用哪个** → (provider, reason)。
+
+    所有选提供方的地方都必须走这里：以前六处各写一遍「取设置 → 校验 → 回落 local」，
+    早晚会出现「网页走外部、语音助手走本地」这种自相矛盾。
+
+    auto 的语义（用户 2026-09-28 定）：网络连通性正常 → 用外部 API；
+    外部不可达 / 没网 → 回退板端本地 LLM。显式 local/external 一律照办，不偷偷换。
+    """
+    return llm_router.resolve(
+        mode=llm_mode(), requested=requested,
+        external_url=_setting_direct('external_base_url', ''),
+        external_key=_setting_direct('external_api_key', ''),
+        local_url=_setting_direct('local_base_url', 'http://127.0.0.1:8001/v1'),
+        force=force)
+
+
+def llm_route_status(force=False):
+    """给页面/状态接口看的「现在实际会用谁、为什么」。"""
+    mode = llm_mode()
+    ext_url = (_setting_direct('external_base_url', '') or '').strip()
+    provider, reason = resolve_llm_provider(force=force)
+    cfg = provider_config(provider)
+    out = {
+        'mode': mode, 'mode_label': llm_router.MODE_LABEL.get(mode, mode),
+        'effective': provider,
+        'effective_label': ('外部 API' if provider == 'external' else '本地模型'),
+        'model': cfg.get('model') or '',
+        'base_url': cfg.get('base_url') or '',
+        'reason': reason,
+        'reason_label': llm_router.REASON_LABEL.get(reason, reason),
+        'external_configured': bool(ext_url),
+        'net': None,
+    }
+    if mode == 'auto' and ext_url:
+        out['net'] = llm_router.probe(ext_url, force=force)
+    return out
+
+
 def provider_config(provider=None):
-    provider = provider or get_setting('llm_provider', 'local')
-    if provider not in ('local', 'external'):
-        provider = 'local'
+    provider, _reason = resolve_llm_provider(provider)
     if provider == 'local':
         base = get_setting('local_base_url', 'http://127.0.0.1:8001/v1')
         model = get_setting('local_model', 'qwen2.5-1.5b')
@@ -2069,22 +2114,66 @@ def _llm_headers(key):
     return headers
 
 
+def _llm_net_fail(cfg, e=None):
+    """外部 API 出现**连接级**失败：把网络标记为不可达，下一个请求立刻回退本地。
+
+    只对连接类错误这么做：HTTP 401/400 是「Key 不对/请求不合法」，不是没网，
+    标记成不可达会把一个配错的 Key 变成「悄悄一直用本地」，反而更难查。
+    """
+    if (cfg or {}).get('provider') != 'external':
+        return False
+    if e is not None and not isinstance(e, (requests.ConnectionError,
+                                            requests.Timeout)):
+        return False
+    llm_router.mark_external_failed(cfg.get('base_url') or cfg.get('url') or '',
+                                    'call-failed')
+    print('[LLM] 外部 API 连接失败，临时降级为本地（60 秒后自动重试外部）',
+          flush=True)
+    return True
+
+
+def _llm_post_oneshot(cfg, model, msgs, temperature, max_tokens, timeout):
+    """裸调用：成功返回文本，失败抛异常（由调用方决定要不要回退）。"""
+    r = requests.post(cfg['url'],
+                      json={'model': model or 'qwen2.5-1.5b', 'messages': msgs,
+                            'temperature': float(temperature),
+                            'max_tokens': int(max_tokens), 'stream': False},
+                      headers=_llm_headers(cfg.get('api_key')),
+                      timeout=(5, timeout))
+    if r.status_code != 200:
+        print('[LLM] 一次性调用 HTTP %s: %s' % (r.status_code, r.text[:120]),
+              flush=True)
+        return ''
+    return ((r.json().get('choices') or [{}])[0].get('message', {}).get('content')
+            or '').strip()
+
+
 def _llm_oneshot(cfg, model, msgs, temperature=0.3, max_tokens=256, timeout=180):
-    """非流式一次调用（「答非所据」重试用）。返回文本，失败返回 ''。"""
+    """非流式一次调用（「答非所据」重试 / 决策层用）。返回文本，失败返回 ''。
+
+    auto 模式下外部 API 连不上时，**同一次请求内**再试一次本地 —— 用户要的
+    「回退」是这一句话不能丢，而不是「下一个请求才换本地」。
+    """
     try:
-        r = requests.post(cfg['url'],
-                          json={'model': model or 'qwen2.5-1.5b', 'messages': msgs,
-                                'temperature': float(temperature),
-                                'max_tokens': int(max_tokens), 'stream': False},
-                          headers=_llm_headers(cfg.get('api_key')),
-                          timeout=(5, timeout))
-        if r.status_code != 200:
-            print('[LLM] 重试 HTTP %s: %s' % (r.status_code, r.text[:120]), flush=True)
-            return ''
-        return ((r.json().get('choices') or [{}])[0].get('message', {}).get('content')
-                or '').strip()
+        return _llm_post_oneshot(cfg, model, msgs, temperature, max_tokens, timeout)
     except Exception as e:
-        print('[LLM] 重试失败：%s: %s' % (type(e).__name__, e), flush=True)
+        print('[LLM] 一次性调用失败：%s: %s' % (type(e).__name__, e), flush=True)
+        if not _llm_net_fail(cfg, e):
+            return ''
+    # 这里说明：外部连接级失败 + auto 模式 → 回退本地再试一次
+    if llm_mode() != 'auto':
+        return ''
+    local = provider_config('local')
+    if not (local.get('url') and local.get('provider') == 'local'):
+        return ''
+    try:
+        txt = _llm_post_oneshot(local, local.get('model'), msgs, temperature,
+                                max_tokens, timeout)
+        if txt:
+            print('[LLM] 已回退本地完成本次调用', flush=True)
+        return txt
+    except Exception as e:
+        print('[LLM] 回退本地也失败：%s: %s' % (type(e).__name__, e), flush=True)
         return ''
 
 
@@ -2102,7 +2191,11 @@ def api_chat_providers():
             'api_key_set': bool(cfg['api_key']),
             'url': cfg['url'],
         }
-    return api_ok(providers=out, current=get_setting('llm_provider', 'local'))
+    route = llm_route_status()
+    return api_ok(providers=out, current=get_setting('llm_provider', 'auto'),
+                  mode=route['mode'], effective=route['effective'],
+                  reason=route['reason'], reason_label=route['reason_label'],
+                  net=route['net'])
 
 
 @app.route('/api/chat', methods=['POST'])
@@ -2113,7 +2206,8 @@ def api_chat():
     messages = data.get('messages') or []
     if not isinstance(messages, list) or not messages:
         return api_err('messages 不能为空')
-    provider = data.get('provider') or get_setting('llm_provider', 'local')
+    # auto 时这里就把「到底用谁」定下来：显式传 local/external 则照办
+    provider = resolve_llm_provider(data.get('provider'))[0]
     cfg = provider_config(provider)
     if not cfg['url']:
         return api_err('LLM API 地址未配置')
@@ -2198,6 +2292,7 @@ def api_chat():
                         yield chunk
                 except Exception as e:
                     ok, note = False, type(e).__name__
+                    _llm_net_fail(cfg, e)          # 连接级失败 → 下次请求回退本地
                     yield _sse({'error': f'LLM 请求失败: {e}'})
                 snap = meter.snapshot()
                 _llm_stat_record('chat', cfg, model, snap, ok=ok, note=note)
@@ -2308,6 +2403,19 @@ def _shared_output_spec():
     return spec.replace('{max_chars}', mc)[:2000]
 
 
+@app.route('/api/llm/probe', methods=['POST'])
+@login_required
+def api_llm_probe():
+    """立刻重新探测外部 API 可达性，并回报「现在会用谁、为什么」。
+
+    页面上的「立即探测」按钮用它：网络刚恢复时不必等 60 秒缓存过期。
+    """
+    route = llm_route_status(force=True)
+    audit('llm_probe', '%s → %s（%s）' % (route['mode'], route['effective'],
+                                          route['reason']))
+    return api_ok(**route)
+
+
 @app.route('/api/agent/chat', methods=['POST'])
 @login_required
 def api_agent_chat():
@@ -2319,7 +2427,8 @@ def api_agent_chat():
     messages = data.get('messages') or []
     if not isinstance(messages, list) or not messages:
         return api_err('messages 不能为空')
-    provider = data.get('provider') or get_setting('llm_provider', 'local')
+    # auto 时这里就把「到底用谁」定下来：显式传 local/external 则照办
+    provider = resolve_llm_provider(data.get('provider'))[0]
     cfg = provider_config(provider)
     if not cfg['url']:
         return api_err('LLM API 地址未配置')
@@ -2461,6 +2570,7 @@ def api_agent_chat():
                                     yield _sse({'type': 'delta', 'content': show})
             except Exception as e:
                 ok, note = False, type(e).__name__
+                _llm_net_fail(cfg, e)              # 连接级失败 → 下次请求回退本地
                 yield _sse({'type': 'error', 'error': f'LLM 请求失败: {e}'})
                 break
             tail = filt.feed('', final=True)
@@ -6639,9 +6749,8 @@ def _assist_ask(prompt, question='', max_tokens=256, temperature=0.3,
     try:
         # LLM 提供方跟随「设置 / 校准」里的全局 llm_provider：
         # 助手页已不再单独设置，避免两处各说各话。
-        provider = (_setting_direct('llm_provider', 'local') or 'local').strip()
-        if provider not in ('local', 'external'):
-            provider = 'local'
+        # 全局默认提供商（auto = 有网走外部、没网回退本地）在这里落地。
+        provider = resolve_llm_provider()[0]
         cfg = provider_config(provider) or {}
         if not cfg.get('url'):
             out['error'] = 'LLM 地址未配置（provider=%s）' % provider
@@ -6810,9 +6919,9 @@ def _assist_ask_raw(messages, temperature=0.1, max_tokens=48, timeout=60):
     t0 = time.time()
     out = {'ok': False, 'text': '', 'ms': 0, 'provider': '', 'model': '', 'error': ''}
     try:
-        provider = (_setting_direct('llm_provider', 'local') or 'local').strip()
-        if provider not in ('local', 'external'):
-            provider = 'local'
+        # 全局默认提供商（auto = 有网走外部、没网回退本地）在这里落地；
+        # 助手不单独设置提供方，避免和网页对话两处各说各话。
+        provider = resolve_llm_provider()[0]
         cfg = provider_config(provider) or {}
         if not cfg.get('url'):
             out['error'] = 'LLM 地址未配置（provider=%s）' % provider

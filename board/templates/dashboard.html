@@ -864,7 +864,22 @@
     <div class="card" id="llm-set-card">
       <div class="card-title">LLM / 页面设置</div>
       <label>默认提供商</label>
-      <select id="set-llm-provider"><option value="local">本地模型</option><option value="external">外部 API</option></select>
+      <select id="set-llm-provider">
+        <option value="auto">自动（网络正常用外部 API，不可达/无网络退回本地）</option>
+        <option value="local">仅本地模型</option>
+        <option value="external">仅外部 API</option>
+      </select>
+      <p class="muted small" style="margin:6px 0 0">
+        「自动」只判断<b>网络连通性</b>：每 60 秒探测一次外部 API 地址（DNS + TCP，
+        不发业务请求、不花 token）；不可达就回退板端本地 LLM，网络恢复后自动切回。
+        外部 API 真实调用出现连接失败时会立即降级，不等缓存过期；
+        显式选「仅本地 / 仅外部」则绝不自动切换。
+      </p>
+      <div class="kv-list mt" id="llm-route-status"><span class="muted">读取中…</span></div>
+      <div class="row gap mt">
+        <button class="btn" type="button" id="btn-llm-probe">立即探测网络</button>
+        <span class="muted small" id="llm-probe-state"></span>
+      </div>
       <label>本地 API Base URL</label>
       <input id="set-local-base" placeholder="http://127.0.0.1:8001/v1">
       <label>本地模型名</label>
