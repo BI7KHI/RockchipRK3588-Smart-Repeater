@@ -9,6 +9,25 @@
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
+  // 每个浏览器标签页一个 client id：板端用它区分「哪个页面在按住 PTT」，
+  // 别的标签页的操作不会互相掐断。（原来这个常量定义在对话页的流式朗读块里，
+  // 对话搬去助手页时被一起删掉，于是 PTT 自检抛 `TTS_CLIENT_ID is not defined`
+  // —— 2026-09-27 修回，并改成不绑对话的通用名字。）
+  const CLIENT_ID = (() => {
+    try {
+      let v = sessionStorage.getItem('elf2-client');
+      if (!v) {
+        v = (window.crypto && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+        sessionStorage.setItem('elf2-client', v);
+      }
+      return v;
+    } catch (e) {
+      return '';
+    }
+  })();
+
   function showToast(msg, type = '') {
     const el = $('#toast');
     if (!el) return;
@@ -2163,7 +2182,7 @@
     try {
       const d = await apiFetch('/api/ptt/manual', {
         method: 'POST',
-        body: JSON.stringify({ hold: !!hold, reason: reason || '', client_id: TTS_CLIENT_ID }),
+        body: JSON.stringify({ hold: !!hold, reason: reason || '', client_id: CLIENT_ID }),
       });
       renderPttDiag(d);
     } catch (e) {
@@ -2549,6 +2568,7 @@
     if (role === 'admin') {
       loadUsers();
       loadSettings();
+      loadCalibration();       // 电压校准的通道/零点/倍率：删对话代码时被连带删掉过，见上面 CLIENT_ID 的注释
       loadAudioVolume();
       loadWeatherSettings();
       loadSensorStatus();
