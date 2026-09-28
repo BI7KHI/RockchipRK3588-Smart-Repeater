@@ -346,17 +346,22 @@
           var extra = '';
           if (r.auto) {
             var a = r.auto;
+            // 徽章里**只放短结论**（应答 / 默）。判定依据「想」有几十字，塞进徽章会
+            // 把识别文本挤成一字一行：`.as-line` 是 flex 行，徽章原来是
+            // flex:0 0 auto + nowrap → 它先占满宽度，`.x`(flex:1+word-break:break-all)
+            // 被压到 0 宽 → 每个字一行、整行撑出横向滚动条（板端实测截图）。
+            // 详细依据整条放进 title，悬停即看；完整「想」在下面的对话记录里。
+            var tip = '判定：' + (a.decision === 'answer' ? '答' : '默') +
+              '　结论：' + (a.gate_label || a.reason) +
+              '　置信：' + (a.confidence == null ? '-' : a.confidence) +
+              '　模型理由码：' + (a.model_reason || '-') +
+              '　决策耗时：' + (a.ms || 0) + 'ms' +
+              (a.parse_ok ? '' : '　（四行格式未解析出 → 按默处理）') +
+              (a.callsign ? '　呼号：' + a.callsign : '') +
+              (a.error ? '　错误：' + a.error : '') +
+              (a.think ? '　想：' + a.think : '');
             extra = '<span class="as-auto ' + (a.would_reply ? 'yes' : 'no') + '" title="' +
-              esc('判定：' + (a.decision === 'answer' ? '答' : '默') +
-                  '　结论：' + (a.gate_label || a.reason) +
-                  '　置信：' + (a.confidence == null ? '-' : a.confidence) +
-                  '　模型理由码：' + (a.model_reason || '-') +
-                  '　决策耗时：' + (a.ms || 0) + 'ms' +
-                  (a.parse_ok ? '' : '　（四行格式未解析出 → 按默处理）') +
-                  (a.error ? '　错误：' + a.error : '') +
-                  (a.think ? '\n想：' + a.think : '')) + '">' +
-              esc((a.would_reply ? '应答' : '默') + '·' + (a.gate_label || a.reason)) +
-              (a.think ? '<i> 想：' + esc(a.think) + '</i>' : '') + '</span>';
+              esc(tip) + '">' + esc(a.would_reply ? '应答' : '默') + '</span>';
           }
           html += '<div class="' + cls + '"><span class="t">' + esc(r.ts) + '</span>' +
             '<span class="as-tag ' + tagCls + '">' + esc(tag) + '</span>' +
