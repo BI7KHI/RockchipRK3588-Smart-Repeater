@@ -215,6 +215,16 @@ for txt, why in NOT_ADDRESSED:
 check('本台呼号也算点名', A.auto_addressed('BI7KHI 帮我看看电压', W3, ['BI7KHI'])[0] is True)
 check('别人的呼号不算点名',
       A.auto_addressed('BV7IBD 帮我看看电压', W3, ['BI7KHI'])[0] is False)
+# ICAO 拼读：真实样本 #207「This is Bravo Italy number 7 kilo Hotel India」= BI7KHI。
+# 只按字面找呼号会把它判成"没点名"，而空口上这是最常见的一种点名方式。
+check('ICAO 拼读的本台呼号也算点名',
+      A.auto_addressed('hello hello. This is Bravo Italy number 7 kilo Hotel India',
+                       W3, ['BI7KHI'])[0] is True,
+      A.auto_addressed('hello hello. This is Bravo Italy number 7 kilo Hotel India',
+                       W3, ['BI7KHI']))
+check('别人的英文呼号不能被纠成本台',
+      A.auto_addressed('BV7IBD 帮我看看电压', W3, ['BI7KHI'])[0] is False
+      and A.auto_addressed('BH7IDD 帮我看看电压', W3, ['BI7KHI'])[0] is False)
 check('noaddr 排在 whitelist 之前（内容前置先判）',
       A.auto_gate(decision='answer', reason='question', mode='full', now=NOW,
                   addressed=False, whitelist='XX9ZZZ', callsign='BI7ABC')[1] == 'noaddr')

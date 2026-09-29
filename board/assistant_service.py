@@ -663,6 +663,18 @@ def auto_addressed(text, wake_words=(), own=()):
         c = _norm_text(c).upper()
         if len(c) >= 4 and c in up:
             return True, '本台呼号 %s' % c
+    # 英文/ICAO 拼读的呼号也要认："Bravo Italy number 7 kilo Hotel India" 就是 BI7KHI。
+    # 这一条是复测时发现的漏洞：只按字面找呼号，真实空口里最常见的一种点名会被前置拦掉
+    # （历史样本 #207 正是这样被判成"没点名"）。复用与判「被点名」同一套抽取/纠错。
+    try:
+        own_list = [x for x in (own or []) if x]
+        hits = auto_callsigns(t, ','.join(own_list))
+        up_own = {_norm_text(x).upper() for x in own_list}
+        for c in hits:
+            if _norm_text(c).upper() in up_own:
+                return True, '本台呼号（拼读）%s' % c
+    except Exception:
+        pass
     return False, '没听到本台名或本台呼号'
 
 
