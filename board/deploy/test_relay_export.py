@@ -120,6 +120,36 @@ bundle2, before2 = E.collect()
 check('再收集是空的（增量语义）', bundle2 == {}, sorted(bundle2))
 check('状态里记着上次位置', before2.get('assist_turns') == 1, before2)
 
+print('\n=== 5b. 补传积压：先发旧包，绝不重复导出 ===')
+# 造一个「上次失败留下的包」，状态停在 0（=没推进）
+old = OUTBOX / 'elf2_host_20260101_000000.jsonl.gz'
+old.write_bytes(gzip.compress(b'{"_table":"assist_turns","id":1}\n'))
+E.write_meta(str(old), {'assist_turns': 1}, {'assist_turns': 1})
+check('旧包带 sidecar（sha256 + 覆盖到哪）',
+      E.read_meta(str(old)).get('sha256') and
+      E.read_meta(str(old)).get('to') == {'assist_turns': 1}, E.read_meta(str(old)))
+sent_calls = []
+E.upload = lambda path, name, conf, sha, meta: (sent_calls.append((name, meta)),
+                                               (True, '{"ok":true}'))[1]
+ok_n, fail_n = E.pending({'UPLOAD_URL': 'https://x/ingest', 'UPLOAD_TOKEN': 't'})
+check('积压被补传出去', ok_n >= 1 and fail_n == 0, (ok_n, fail_n))
+st2 = json.loads(STATE.read_text(encoding='utf-8'))
+check('补传成功后状态按包内记录推进（不是重新导出得来的）',
+      st2.get('assist_turns') == 1, st2)
+check('补传的包带 resend 标记', any(m.get('resend') for _n, m in sent_calls),
+      sent_calls[:2])
+check('补传后 outbox 不再留着它',
+      not os.path.exists(str(old)), [p.name for p in OUTBOX.glob('*.gz')])
+
+print('\n=== 5c. 没有水位信息的旧包：删掉而不是硬发（否则服务器上会重复） ===')
+orphan = OUTBOX / 'elf2_host_20260101_010000.jsonl.gz'
+orphan.write_bytes(gzip.compress(b'{"_table":"assist_turns","id":2}\n'))
+n_before = len(sent_calls)
+ok_n2, fail_n2 = E.pending({'UPLOAD_URL': 'https://x/ingest', 'UPLOAD_TOKEN': 't'})
+check('没有 sidecar 的包没有被上传', len(sent_calls) == n_before, sent_calls[n_before:])
+check('并且被删掉（避免重复数据）', not os.path.exists(str(orphan)))
+check('这种包不计成功也不计失败', ok_n2 == 0 and fail_n2 == 0, (ok_n2, fail_n2))
+
 print('\n=== 6. outbox 体量上限 ===')
 E.MAX_OUTBOX_MB = 0.0001          # 约 100 字节，逼它清理
 for i in range(3):

@@ -107,7 +107,11 @@ def hostname():
 
 
 def build(bundle, debug_audio=False):
-    """打成一份 gzip 的 JSONL（每行一个记录，带 _table 标记）。"""
+    """打成一份 gzip 的 JSONL（每行一个记录，带 _table 标记），并写同名 .meta.json。
+
+    为什么要写 sidecar：**失败留在 outbox 的那一包，下次要先把它发出去**，
+    而不是重新导一份 —— 否则同一批数据会被导出两次，服务器上出现重复行。
+    """
     os.makedirs(OUTBOX, exist_ok=True)
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     name = 'elf2_%s_%s.jsonl.gz' % (hostname(), ts)
@@ -126,6 +130,71 @@ def build(bundle, debug_audio=False):
         for w in sorted(glob.glob(os.path.join(d, 'dbg_*.wav')))[-12:]:
             extra.append(w)
     return path, name, counts, extra
+
+
+def write_meta(path, counts, to_ids, extra=()):
+    """把 sha256 与「这一包覆盖到哪」写进 sidecar，供重试时复用。"""
+    meta = {'sha256': sha256_of(path), 'counts': counts, 'to': to_ids,
+            'extra': [os.path.basename(x) for x in extra],
+            'built': datetime.now(timezone.utc).isoformat()}
+    with open(path + '.meta.json', 'w', encoding='utf-8') as f:
+        json.dump(meta, f, ensure_ascii=False, indent=1)
+    return meta
+
+
+def read_meta(path):
+    try:
+        with open(path + '.meta.json', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def pending(conf):
+    """先把 outbox 里积压的包发出去（最旧的优先）；成功才推进状态。
+
+    返回 (成功数, 失败数)。这是断网多日后补传的关键路径 —— 不重导、不重复。
+    """
+    ok_n = fail_n = 0
+    for path in sorted(glob.glob(os.path.join(OUTBOX, '*.jsonl.gz')),
+                       key=os.path.getmtime):
+        meta = read_meta(path)
+        name = os.path.basename(path)
+        if not (meta.get('to') or {}):
+            # 没有水位信息的包（旧版留下的/写 sidecar 失败）不能补传：
+            # 它的行还没被状态文件"记账"，下一次 collect() 会重新导出，
+            # 硬发出去就会在服务器上出现同一批数据的第二份。删掉最安全。
+            log('丢掉没有水位信息的旧包（下次导出会包含同样的行）：%s' % name)
+            try:
+                os.unlink(path)
+                if os.path.exists(path + '.meta.json'):
+                    os.unlink(path + '.meta.json')
+            except Exception:
+                pass
+            continue
+        sha = meta.get('sha256') or sha256_of(path)
+        ok, msg = upload(path, name, conf, sha,
+                         {'counts': meta.get('counts', {}), 'to': meta.get('to', {}),
+                          'resend': True})
+        if not ok:
+            log('补传失败，继续留着：%s（%s）' % (name, msg))
+            fail_n += 1
+            continue
+        st = load_state()
+        for t, mx in (meta.get('to') or {}).items():
+            st[t] = max(int(st.get(t) or 0), int(mx))
+        save_state(st)
+        os.makedirs(SENT, exist_ok=True)
+        try:
+            os.replace(path, os.path.join(SENT, name))
+            mp = path + '.meta.json'
+            if os.path.exists(mp):
+                os.replace(mp, os.path.join(SENT, os.path.basename(mp)))
+        except Exception:
+            pass
+        log('补传成功：%s（%s）' % (name, msg))
+        ok_n += 1
+    return ok_n, fail_n
 
 
 def sha256_of(path):
@@ -197,30 +266,41 @@ def main():
     args = ap.parse_args()
 
     conf = load_conf()
+    # ① 先补传 outbox 里积压的（断网多日后不重导、不重复）
+    if not args.dry_run and conf.get('UPLOAD_URL') and conf.get('UPLOAD_TOKEN'):
+        ok_n, fail_n = pending(conf)
+        if ok_n or fail_n:
+            log('补传积压：成功 %d，失败 %d' % (ok_n, fail_n))
     bundle, before = collect()
     if not bundle and not args.force:
         log('没有新数据（上次已传到 %s），退出' % json.dumps(before, ensure_ascii=False))
+        prune()
         return 0
     path, name, counts, extra = build(bundle, args.with_debug_audio)
     size = os.path.getsize(path)
     sha = sha256_of(path)
+    to_ids = {t: v[1] for t, v in bundle.items()}
+    write_meta(path, counts, to_ids, extra)
     log('导出 %s：%s（%.1f KB）%s' % (name, json.dumps(counts, ensure_ascii=False),
                                       size / 1024.0,
                                       '，另附 %d 个留档音频' % len(extra) if extra else ''))
     if args.dry_run:
         log('dry-run：不推进状态、不上传')
         return 0
-    meta = {'counts': counts, 'from': before, 'to': {t: v[1] for t, v in bundle.items()},
+    meta = {'counts': counts, 'from': before, 'to': to_ids,
             'extra': [os.path.basename(x) for x in extra]}
     ok, msg = upload(path, name, conf, sha, meta)
     if ok:
         st = load_state()
-        for t, (_rows, mx) in bundle.items():
+        for t, mx in to_ids.items():
             st[t] = mx
         save_state(st)
         os.makedirs(SENT, exist_ok=True)
         try:
             os.replace(path, os.path.join(SENT, name))
+            mp = path + '.meta.json'
+            if os.path.exists(mp):
+                os.replace(mp, os.path.join(SENT, os.path.basename(mp)))
         except Exception:
             pass
         log('上传成功：%s' % msg)
