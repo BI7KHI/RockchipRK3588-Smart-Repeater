@@ -33,7 +33,7 @@ def _encoder_works(args):
         return False
 
 
-def _h264_candidates():
+def _h264_h265_candidates():
     """按优先级给出候选编码器。"""
     forced = (os.environ.get('RELAY_CAM_ENCODER') or '').strip()
     if forced:
@@ -48,12 +48,28 @@ def _h264_candidates():
     except Exception:
         listing = ''
     cands = []
+    prefer_hevc = (os.environ.get('RELAY_CAM_PREFER_HEVC') or '').strip() == '1'
+    if prefer_hevc:
+        # 优先 H.265 硬件编码器
+        if 'hevc_rkmpp' in listing:
+            cands.append(('hevc_rkmpp', ['-c:v', 'hevc_rkmpp', '-b:v', _HW_BITRATE]))
+        if 'hevc_v4l2m2m' in listing:
+            cands.append(('hevc_v4l2m2m', ['-c:v', 'hevc_v4l2m2m', '-b:v', _HW_BITRATE]))
+    # H.264 硬件编码器
     if 'h264_rkmpp' in listing:
         cands.append(('h264_rkmpp', ['-c:v', 'h264_rkmpp', '-b:v', _HW_BITRATE]))
     if 'h264_v4l2m2m' in listing:
         cands.append(('h264_v4l2m2m', ['-c:v', 'h264_v4l2m2m', '-b:v', _HW_BITRATE]))
+    if not prefer_hevc:
+        # 如果不优先 H.265，则把 H.265 放到 H.264 之后作为备选
+        if 'hevc_rkmpp' in listing:
+            cands.append(('hevc_rkmpp', ['-c:v', 'hevc_rkmpp', '-b:v', _HW_BITRATE]))
+        if 'hevc_v4l2m2m' in listing:
+            cands.append(('hevc_v4l2m2m', ['-c:v', 'hevc_v4l2m2m', '-b:v', _HW_BITRATE]))
+    # 软件回退（始终为 H.264，如需软件 H.265 可自行添加 libx265）
     cands.append(_SW_H264)
     return cands
+
 
 
 def pick_h264_encoder():
@@ -71,7 +87,7 @@ def pick_h264_encoder():
     if 'enc' in _H264_ENCODER_CACHE:
         return _H264_ENCODER_CACHE['enc']
     chosen = _SW_H264
-    for name, args in _h264_candidates():
+    for name, args in _h264_h265_candidates():
         if name == _SW_H264[0] or _encoder_works(args):
             chosen = (name, args)
             break
