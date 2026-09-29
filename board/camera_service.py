@@ -33,12 +33,20 @@ def _encoder_works(args):
         return False
 
 
-def _h264_h265_candidates():
-    """按优先级给出候选编码器。
-    固定顺序：H.265 硬件 → H.264 硬件 → 软件 H.264。
+def _encoder_candidates(allow_hevc):
+    """按用途给出候选编码器，顺序即优先级。
+
+    allow_hevc=True（录像）：H.265 硬件 → H.264 硬件 → 软件 H.264。
+      录像文件只落本地，H.265 同码率画质更好/同画质更省存储。
+    allow_hevc=False（推流）：H.264 硬件 → 软件 H.264，**绝不碰 H.265**。
+      远端 RTMP 服务器/播放端不一定解得了 H.265，推流必须留在 H.264。
+
+    环境变量（不新增，沿用既有语义）：
+      RELAY_CAM_HWENC=0     强制软件编码（录像与推流都降级到 libx264）
+      RELAY_CAM_ENCODER=xx  仅对录像生效，直接指定编码器，跳过探测与试编
     """
     forced = (os.environ.get('RELAY_CAM_ENCODER') or '').strip()
-    if forced:
+    if forced and allow_hevc:
         return [(forced, ['-c:v', forced])]
     if (os.environ.get('RELAY_CAM_HWENC') or '').strip() == '0':
         return [_SW_H264]
@@ -50,11 +58,12 @@ def _h264_h265_candidates():
     except Exception:
         listing = ''
     cands = []
-    # 优先 H.265 硬件编码器
-    if 'hevc_rkmpp' in listing:
-        cands.append(('hevc_rkmpp', ['-c:v', 'hevc_rkmpp', '-b:v', _HW_BITRATE]))
-    if 'hevc_v4l2m2m' in listing:
-        cands.append(('hevc_v4l2m2m', ['-c:v', 'hevc_v4l2m2m', '-b:v', _HW_BITRATE]))
+    # 录像优先 H.265 硬件编码器
+    if allow_hevc:
+        if 'hevc_rkmpp' in listing:
+            cands.append(('hevc_rkmpp', ['-c:v', 'hevc_rkmpp', '-b:v', _HW_BITRATE]))
+        if 'hevc_v4l2m2m' in listing:
+            cands.append(('hevc_v4l2m2m', ['-c:v', 'hevc_v4l2m2m', '-b:v', _HW_BITRATE]))
     # 其次 H.264 硬件编码器
     if 'h264_rkmpp' in listing:
         cands.append(('h264_rkmpp', ['-c:v', 'h264_rkmpp', '-b:v', _HW_BITRATE]))
@@ -81,7 +90,7 @@ def pick_h264_encoder():
     if 'enc' in _H264_ENCODER_CACHE:
         return _H264_ENCODER_CACHE['enc']
     chosen = _SW_H264
-    for name, args in _h264_h265_candidates():
+    for name, args in _encoder_candidates(True):
         if name == _SW_H264[0] or _encoder_works(args):
             chosen = (name, args)
             break
