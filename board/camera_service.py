@@ -389,7 +389,7 @@ class CameraService:
         with self.lock:
             if self.recorder:
                 return False, '已有录像任务运行中'
-            rec = FfmpegRecorder(self, output_args, osd_filter, label)
+            rec = FfmpegRecorder(self, output_args, osd_filter, label, kind='record')
             self.recorder = rec
         return True, 'recording'
 
