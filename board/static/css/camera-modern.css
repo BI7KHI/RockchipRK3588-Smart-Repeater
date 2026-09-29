@@ -894,6 +894,19 @@
 .cam-type-badge.manual { color: #fde68a; background: rgba(217, 119, 6, .2); }
 .cam-type-badge.other { color: #cbd5e1; background: rgba(100, 116, 139, .22); }
 
+/* 没写完的 MP4（正在录制 / 缺 moov 的半截文件）：播放按钮已禁用，这里标出缘由 */
+.cam-rec-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 99px;
+  font-size: 11px;
+  color: #fca5a5;
+  background: rgba(220, 38, 38, .18);
+  vertical-align: middle;
+}
+.cam-rec-badge.orphan { color: #cbd5e1; background: rgba(100, 116, 139, .22); }
+
 .cam-row-actions {
   display: flex;
   gap: 6px;

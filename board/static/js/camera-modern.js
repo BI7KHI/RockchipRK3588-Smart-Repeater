@@ -641,6 +641,11 @@
 
   function loadSegment(seg, options = {}) {
     if (!seg || !els.video) return;
+    if (seg.playable === false) {
+      // 时间轴/上一段/下一段也会走到这里，同样别把没写完的分段塞进播放器
+      toast(seg.recording ? '这段还在录制，写完后才能播放' : '这个文件不完整（缺 moov），无法播放', 'error');
+      return;
+    }
     // 点时间轴/分片列表播放时自动从「实时预览」切到「录像回放」
     if (isLiveMode()) setMode('play');
     const video = els.video;
@@ -822,16 +827,25 @@
         const typeLabel = seg.type === 'loop' ? '循环' : (seg.type === 'manual' ? '手动' : '其他');
         const typeClass = seg.type === 'loop' ? 'loop' : (seg.type === 'manual' ? 'manual' : 'other');
         const checked = state.selected.has(seg.filename) ? ' checked' : '';
+        // 没写完的 MP4 点播放必定 code 4（缺 moov），别让用户白点：录制中的标「录制中」，
+        // 录制中断留下的半截文件标「未完成」，两者都把播放按钮禁掉。
+        const notPlayable = seg.playable === false;
+        const stateBadge = seg.recording
+          ? '<span class="cam-rec-badge">录制中</span>'
+          : (notPlayable ? '<span class="cam-rec-badge orphan">未完成</span>' : '');
+        const playTitle = notPlayable
+          ? (seg.recording ? '这段还在录制，写完后才能播放' : '这个文件不完整（缺 moov），无法播放')
+          : '播放';
         return `<tr data-cam-row="${escapeHtml(seg.filename)}">
           <td class="cam-check-col"><input type="checkbox" data-cam-select="${escapeHtml(seg.filename)}"${checked}></td>
-          <td title="${escapeHtml(seg.filename)}">${escapeHtml(seg.filename)}</td>
+          <td title="${escapeHtml(seg.filename)}">${escapeHtml(seg.filename)}${stateBadge}</td>
           <td><span class="cam-type-badge ${typeClass}">${typeLabel}</span></td>
           <td>${escapeHtml(seg.start || '--')}</td>
           <td>${fmtDuration(seg.duration_ms)}</td>
           <td>${fmtBytes(seg.size)}</td>
           <td>
             <div class="cam-row-actions">
-              <button class="btn ghost" data-cam-play-file="${escapeHtml(seg.filename)}">播放</button>
+              <button class="btn ghost" data-cam-play-file="${escapeHtml(seg.filename)}"${notPlayable ? ' disabled' : ''} title="${playTitle}">播放</button>
               <button class="btn ghost" data-cam-download-file="${escapeHtml(seg.filename)}">下载</button>
               <button class="btn ghost danger" data-cam-del-file="${escapeHtml(seg.filename)}">删除</button>
             </div>
@@ -1218,7 +1232,12 @@
       const downloadFile = target?.dataset?.camDownloadFile;
       if (playFile) {
         const seg = segByFilename(playFile);
-        if (seg) loadSegment(seg, { autoplay: true, offsetMs: 0 });
+        if (seg && seg.playable === false) {
+          // 按钮已经 disabled，但键盘/脚本仍可能点到；这里兜一层，别让 <video> 报 code 4
+          toast(seg.recording ? '这段还在录制，写完后才能播放' : '这个文件不完整（缺 moov），无法播放', 'error');
+        } else if (seg) {
+          loadSegment(seg, { autoplay: true, offsetMs: 0 });
+        }
       }
       if (downloadFile) {
         const seg = segByFilename(downloadFile);

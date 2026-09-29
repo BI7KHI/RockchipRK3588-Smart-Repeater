@@ -6060,6 +6060,12 @@ def _camera_recording_record(path, loop_seconds=60):
     kind = _camera_kind(path.name)
     parsed = _camera_parse_name(path.name)
     duration_ms = _camera_mp4_duration_ms(path)
+    # 没有 moov = 这个 MP4 还没写完。两种情况要分开告诉前端，否则用户点了播放
+    # 只会拿到 MEDIA_ERR_SRC_NOT_SUPPORTED(4)，看起来像"编码不支持"：
+    #   recording=True  文件还在长（mtime 刚刚更新过）→ 标注「录制中」
+    #   playable=False  没有 moov，就是放不了（录制中断留下的半截文件也走这条）
+    playable = duration_ms is not None
+    recording = (not playable) and (time.time() - st.st_mtime) <= 15.0
     start_ms = parsed['start_ms'] if parsed else None
     if duration_ms is None:
         # MP4 尚未写 moov（正在录制中）或不是标准 MP4，用分段时长/mtime 估算
@@ -6091,6 +6097,8 @@ def _camera_recording_record(path, loop_seconds=60):
         'end_hm': end_dt.strftime('%H:%M:%S'),
         'date': start_dt.strftime('%Y-%m-%d'),
         'duration': max(0, round(duration_ms / 1000.0, 3)),
+        'playable': playable,
+        'recording': recording,
         'url': f'/api/camera/recordings/{path.name}',
     }
 

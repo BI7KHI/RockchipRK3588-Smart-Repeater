@@ -20,6 +20,18 @@ _ENCODER_CACHE = {}
 _HW_BITRATE = (os.environ.get('RELAY_CAM_BITRATE') or '1000k').strip()
 
 
+def _bitrate_for(allow_hevc):
+    """录像 / 推流各自取码率，缺省都回落到 RELAY_CAM_BITRATE。
+
+    为什么要分开：录像切 H.265 后可以降到 1000k 省三分之一存储（实测同源对比：
+    HEVC@1000k 体积是 H.264@1500k 的 66.7%，PSNR 还高 1.09dB）；但推流是给人实时看
+    的 H.264，不该被"录像省空间"顺手降质，所以给推流留一个独立的覆盖变量。
+    """
+    base = (os.environ.get('RELAY_CAM_BITRATE') or '1000k').strip()
+    key = 'RELAY_CAM_RECORD_BITRATE' if allow_hevc else 'RELAY_CAM_STREAM_BITRATE'
+    return (os.environ.get(key) or base).strip()
+
+
 def _encoder_works(args):
     """试编一帧 64x64 黑场，确认这个编码器在本机真的能用。"""
     try:
@@ -44,6 +56,9 @@ def _encoder_candidates(allow_hevc):
     环境变量（不新增，沿用既有语义）：
       RELAY_CAM_HWENC=0     强制软件编码（录像与推流都降级到 libx264）
       RELAY_CAM_ENCODER=xx  仅对录像生效，直接指定编码器，跳过探测与试编
+      RELAY_CAM_BITRATE=xx  硬件编码码率的共同缺省值（录像/推流都认）
+      RELAY_CAM_RECORD_BITRATE / RELAY_CAM_STREAM_BITRATE
+                            分别覆盖录像 / 推流的码率，只动一边不牵连另一边
     """
     forced = (os.environ.get('RELAY_CAM_ENCODER') or '').strip()
     if forced and allow_hevc:
@@ -58,17 +73,18 @@ def _encoder_candidates(allow_hevc):
     except Exception:
         listing = ''
     cands = []
+    br = _bitrate_for(allow_hevc)
     # 录像优先 H.265 硬件编码器
     if allow_hevc:
         if 'hevc_rkmpp' in listing:
-            cands.append(('hevc_rkmpp', ['-c:v', 'hevc_rkmpp', '-b:v', _HW_BITRATE]))
+            cands.append(('hevc_rkmpp', ['-c:v', 'hevc_rkmpp', '-b:v', br]))
         if 'hevc_v4l2m2m' in listing:
-            cands.append(('hevc_v4l2m2m', ['-c:v', 'hevc_v4l2m2m', '-b:v', _HW_BITRATE]))
+            cands.append(('hevc_v4l2m2m', ['-c:v', 'hevc_v4l2m2m', '-b:v', br]))
     # 其次 H.264 硬件编码器
     if 'h264_rkmpp' in listing:
-        cands.append(('h264_rkmpp', ['-c:v', 'h264_rkmpp', '-b:v', _HW_BITRATE]))
+        cands.append(('h264_rkmpp', ['-c:v', 'h264_rkmpp', '-b:v', br]))
     if 'h264_v4l2m2m' in listing:
-        cands.append(('h264_v4l2m2m', ['-c:v', 'h264_v4l2m2m', '-b:v', _HW_BITRATE]))
+        cands.append(('h264_v4l2m2m', ['-c:v', 'h264_v4l2m2m', '-b:v', br]))
     # 软件回退（始终为 H.264）
     cands.append(_SW_H264)
     return cands
