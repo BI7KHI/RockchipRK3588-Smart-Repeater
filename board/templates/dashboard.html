@@ -548,6 +548,8 @@
       <div><label>帧率</label><input id="camera-fps" type="number"></div>
       <div><label>录像目录</label><input id="camera-record-dir"></div>
     </div>
+    <div class="muted small" id="camera-dir-warning" style="color:#fca5a5;display:none"></div>
+    <p class="muted small">录像目录必须<strong>已存在或可创建</strong>、且对运行 relay-web 的用户<strong>可写</strong>。TF 卡挂载点通常只有 root 可写，直接填进去会让录像静默失败、抓拍返回 500；保存时服务端会真的试写一个探针文件，写不进去会当场拒绝并给出修复命令。</p>
     <div class="cal-row">
       <div><label>循环容量上限 (MB)</label><input id="camera-loop-max-mb" type="number"></div>
       <div><label>循环最大文件数</label><input id="camera-loop-max-files" type="number"></div>

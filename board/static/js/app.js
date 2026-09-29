@@ -1310,6 +1310,13 @@
           ${st.last_error ? `<div><span>最近错误</span><b class="muted">${escapeHtml(String(st.last_error).slice(0,120))}</b></div>` : ''}`;
       }
       renderCameraRecordings(data.recordings || []);
+      // 录像目录写不进去时把原因顶到眼前：以前只能靠"抓拍 500 / 录像没文件"猜
+      const dw = $('#camera-dir-warning');
+      if (dw) {
+        const prob = data.record_dir_problem || '';
+        dw.textContent = prob;
+        dw.style.display = prob ? '' : 'none';
+      }
       const wx = await apiFetch('/api/weather');
       if (wx.note && $('#weather-note')) $('#weather-note').textContent = wx.note;
     } catch (e) { /* 预留页静默 */ }

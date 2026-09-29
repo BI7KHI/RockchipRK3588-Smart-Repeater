@@ -5817,7 +5817,7 @@ def _camera_cfg():
         'resolution': get_setting('camera_resolution', '640x480'),
         'fps': int(float(get_setting('camera_fps', '15') or 15)),
         'quality': int(float(get_setting('camera_quality', '5') or 5)),
-        'record_dir': get_setting('camera_record_dir', '/www/camera_recordings'),
+        'record_dir': get_setting('camera_record_dir', CAMERA_DEFAULT_RECORD_DIR),
         'loop_seconds': int(float(get_setting('camera_loop_seconds', '60') or 60)),
         'loop_max_mb': int(float(get_setting('camera_loop_max_mb', '2048') or 2048)),
         'loop_max_files': int(float(get_setting('camera_loop_max_files', '100') or 100)),
@@ -5844,6 +5844,62 @@ def _camera_record_dir():
     d = Path(_camera_cfg()['record_dir'])
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# 录像/抓拍目录的默认值：一处定义，cfg 与「坏目录时的兜底」都用它
+CAMERA_DEFAULT_RECORD_DIR = '/www/camera_recordings'
+
+
+def _camera_dir_problem(d):
+    """这个录像/抓拍目录能不能用？返回空串=能用，否则是人能看懂的原因。
+
+    为什么必须真写一个探针文件：`os.access()` 在 ACL、只读挂载、root 拥有的挂载点上
+    会骗人。板端实测的现场故障就是「目录存在、stat 一切正常、elf 却写不进去」
+    （TF 卡挂载点），只有真写一下才知道 —— 而当时的失败形式是抓拍 HTTP 500
+    加录像"启动成功但一个文件都没落"，从界面上完全看不出是这个原因。
+    """
+    d = Path(d)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        return '目录不存在且无法创建：%s（%s: %s）' % (d, type(e).__name__, e)
+    probe = d / ('.elf2_write_probe_%d' % os.getpid())
+    try:
+        # 目录本身可能是只读挂载点，mkdir(parents=True) 对它不会报错
+        probe.write_bytes(b'elf2')
+        probe.unlink()
+    except Exception as e:
+        try:
+            if probe.exists():
+                probe.unlink()
+        except Exception:
+            pass
+        return '目录存在但没有写权限：%s（%s: %s）' % (d, type(e).__name__, e)
+    return ''
+
+
+def _camera_dir_hint(d):
+    """给出能直接照抄的修复命令（跑 relay-web 的用户是谁就写谁）。"""
+    try:
+        import pwd
+        who = pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        who = os.environ.get('USER') or 'elf'
+    return ('在板端执行：sudo mkdir -p %s && sudo chown -R %s:%s %s；'
+            '若该路径在 FAT/exFAT 卡上，chown 无效，需要改挂载参数（uid/gid/umask）'
+            '或换到可写目录' % (d, who, who, d))
+
+
+def _camera_record_dir_problem(force_dir=None):
+    """当前（或指定）录像目录的问题描述；同时给修复建议。空串=没问题。"""
+    if force_dir is None:
+        try:
+            force_dir = _camera_cfg()['record_dir']
+        except Exception:
+            force_dir = CAMERA_DEFAULT_RECORD_DIR
+    reason = _camera_dir_problem(force_dir)
+    return '%s。%s' % (reason, _camera_dir_hint(force_dir)) if reason else ''
+
 
 
 # 页面上的码率：'' = 跟随环境变量；其余只认 500k / 1.5M 这类写法
@@ -5949,6 +6005,12 @@ def _cam_loop_ensure(reason='autostart'):
             if not ok:
                 return False, msg
         out, seconds, d = _cam_loop_output(cfg)
+        # 目录不可写时 ffmpeg 会"启动成功但一个文件都不落"（日志里只看到"已启动"），
+        # 所以这里先真写个探针文件把话说清楚，让自愈线程的日志与页面都能看出根因。
+        problem = _camera_dir_problem(d)
+        if problem:
+            print('[CAM] 录像目录不可用，循环录像未启动：%s' % problem, flush=True)
+            return False, '录像目录不可用：%s。%s' % (problem, _camera_dir_hint(d))
         if not _cam_loop_running():
             ok, msg = svc.start_recording(cfg, out, camera_service.osd_filter(_camera_osd_cfg()), 'loop')
             if not ok:
@@ -6323,6 +6385,8 @@ def api_camera_status():
         loop_running=_cam_loop_running(),
         loop_autostart=bool_setting('camera_loop_autostart', True),
         loop_manual_stop=bool(CAM_LOOP_MANUAL_STOP),
+        # 目录不可写时页面要能直接看到原因（原先只能靠抓拍 500 或"录像没文件"猜）
+        record_dir_problem=_camera_record_dir_problem(),
     )
 
 
@@ -6389,6 +6453,15 @@ def api_camera_settings_get():
 @admin_required
 def api_camera_settings_set():
     data = request.get_json(silent=True) or {}
+    # 录像目录先验证再落库：否则会留下「设置保存成功、录像一个文件都不落」的坏状态
+    # （板端实测：TF 卡挂载点对 elf 不可写 → 抓拍 500、循环录像静默失败）。
+    # 顺便归一化（去掉结尾斜杠），避免 /a 与 /a/ 被当成两个不同设置互相覆盖。
+    if 'record_dir' in data:
+        cand = str(data.get('record_dir') or '').strip() or CAMERA_DEFAULT_RECORD_DIR
+        problem = _camera_record_dir_problem(cand)
+        if problem:
+            return api_err('录像目录不可用：%s' % problem, 400)
+        data['record_dir'] = str(Path(cand))
     mapping = {
         'device': 'camera_device',
         'resolution': 'camera_resolution',
@@ -6504,16 +6577,34 @@ def api_camera_snapshot():
     frame = svc.get_frame(timeout=5)
     if not frame:
         return api_err('获取摄像头帧失败', 500)
+    # 目录写不进去时不能让整个请求 500（原先就是未捕获的 PermissionError）：
+    # 先换到默认目录保住「抓拍」这个功能，并把原因回给页面。
     d = _camera_record_dir()
+    problem = _camera_dir_problem(d)
+    fallback = ''
+    if problem:
+        alt = Path(CAMERA_DEFAULT_RECORD_DIR)
+        if not _camera_dir_problem(alt):
+            d, fallback = alt, '%s（本次已改存到 %s）' % (problem, alt)
+        else:
+            return api_err('抓拍失败：%s' % _camera_record_dir_problem(), 500)
     name = f'snapshot_{time.strftime("%Y%m%d_%H%M%S")}.jpg'
     path = d / name
-    path.write_bytes(frame)
-    return api_ok(filename=name, url=f'/api/camera/recordings/{name}', size=len(frame))
+    try:
+        path.write_bytes(frame)
+    except Exception as e:
+        return api_err('抓拍写入失败：%s（%s: %s）'
+                       % (_camera_record_dir_problem(), type(e).__name__, e), 500)
+    return api_ok(filename=name, url=f'/api/camera/recordings/{name}',
+                  size=len(frame), dir=str(d), note=fallback)
 
 
 @app.route('/api/camera/record/manual/start', methods=['POST'])
 @login_required
 def api_camera_manual_start():
+    problem = _camera_record_dir_problem()
+    if problem:
+        return api_err('录像目录不可用，无法开始录像：%s' % problem, 500)
     d = _camera_record_dir()
     name = f'manual_{time.strftime("%Y%m%d_%H%M%S")}.mp4'
     path = d / name
@@ -6540,6 +6631,9 @@ def api_camera_manual_stop():
 def api_camera_loop_start():
     global CAM_LOOP_MANUAL_STOP
     CAM_LOOP_MANUAL_STOP = False
+    problem = _camera_record_dir_problem()
+    if problem:
+        return api_err('录像目录不可用，无法开始循环录像：%s' % problem, 500)
     cfg = _camera_cfg()
     out, seconds, d = _cam_loop_output(cfg)
     ok, msg = camera_service.camera_service.start_recording(
