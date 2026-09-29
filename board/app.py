@@ -32,6 +32,7 @@ import threading
 import time
 import uuid
 import wave
+import zipfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import wraps
@@ -1460,6 +1461,114 @@ def api_energy_export():
         body, mimetype='text/csv; charset=utf-8',
         headers={'Content-Disposition':
                  'attachment; filename=energy_%s.csv' % day})
+
+
+@app.route('/api/health')
+def api_health():
+    """免登录健康探针：只回答「这个进程还活着、能出 JSON 吗」。
+
+    **刻意不读数据库、不读 ADC、不读设置**：
+      * /api/status 要登录、要读库、还要读 ADC（读一次 ADC 会把电池读数压低，
+        见能量统计那段实测），拿它当健康检查既慢又互相干扰；
+      * frp 的 http 健康检查、升级脚本的「起来没」判定、服务器侧掉线告警都用这个，
+        所以它必须便宜到能 10 秒一次。
+    版本号取 /www/VERSION（有就读，没有就空）——未来的自拉升级拿它对版本。
+    """
+    ver = ''
+    try:
+        p = BASE_DIR / 'VERSION'
+        if p.exists():
+            ver = p.read_text(encoding='utf-8').strip()[:40]
+    except Exception:
+        ver = ''
+    return api_ok(service='relay-web', version=ver, time=now_iso(),
+                  uptime=read_uptime())
+
+
+@app.route('/api/diag/bundle')
+@login_required
+@admin_required
+def api_diag_bundle():
+    """一键诊断包：日志尾巴 + 状态 + 脱敏设置 + 最近影子判定，打成一个 zip 下载。
+
+    远端站点排查时最省事的一条路：**走现有面板隧道就能取走**，不需要额外端口、
+    不需要 SSH、也不需要在服务器上放任何东西。内容刻意只挑"文本类"的小东西
+    （录像/录音一律不进包，4G 上那是灾难）。
+    """
+    hours = max(1, min(72, int(request.args.get('hours') or 6)))
+    rows = max(10, min(500, int(request.args.get('rows') or 120)))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr('health.json', json.dumps(
+            {'service': 'relay-web', 'time': now_iso(), 'uptime': read_uptime()},
+            ensure_ascii=False, indent=1))
+        try:
+            z.writestr('status.json', json.dumps(api_status().get_json(),
+                                                 ensure_ascii=False, indent=1))
+        except Exception as e:
+            z.writestr('status.error.txt', '%s: %s' % (type(e).__name__, e))
+        # 设置：密钥一律脱敏（诊断包会经网络传输，不能带明文 Key）
+        try:
+            safe = {}
+            _db = _db_direct()
+            try:
+                for k, v in _db.execute('SELECT key,value FROM settings'):
+                    safe[k] = ('***已设置***' if (str(k).endswith('_api_key') and v)
+                               else v)
+            finally:
+                _db.close()
+            z.writestr('settings.json', json.dumps(safe, ensure_ascii=False,
+                                                   indent=1))
+        except Exception as e:
+            z.writestr('settings.error.txt', '%s: %s' % (type(e).__name__, e))
+        try:
+            r = subprocess.run(['journalctl', '-u', 'relay-web', '--since',
+                                '-%dh' % hours, '--no-pager', '-n', '800'],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               timeout=30)
+            z.writestr('journal-relay-web.txt', r.stdout.decode('utf-8', 'ignore'))
+        except Exception as e:
+            z.writestr('journal.error.txt', '%s: %s' % (type(e).__name__, e))
+        try:
+            r = subprocess.run(['journalctl', '-u', 'frpc', '--since', '-%dh' % hours,
+                                '--no-pager', '-n', '200'],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               timeout=20)
+            z.writestr('journal-frpc.txt', r.stdout.decode('utf-8', 'ignore'))
+        except Exception as e:
+            z.writestr('journal-frpc.error.txt', '%s: %s' % (type(e).__name__, e))
+        # 影子判定 / 语音日志：后期调优的核心素材，文本很小
+        for tbl, name in (('assist_turns', 'assist_turns'), ('voice_logs', 'voice_logs')):
+            try:
+                got = [dict(x) for x in get_db().execute(
+                    'SELECT * FROM %s ORDER BY id DESC LIMIT ?' % tbl,
+                    (rows,)).fetchall()]
+                z.writestr('%s.jsonl' % name,
+                           '\n'.join(json.dumps(x, ensure_ascii=False) for x in got))
+            except Exception as e:
+                z.writestr('%s.error.txt' % name, '%s: %s' % (type(e).__name__, e))
+        try:
+            bits = []
+            for cmd in (['systemctl', '--failed', '--no-pager'],
+                        ['systemctl', 'is-active', 'relay-web', 'frpc', 'ssh',
+                         'rkllm-server', 'nginx'],
+                        ['df', '-h'], ['free', '-m'],
+                        ['ip', '-br', 'addr'], ['uptime']):
+                try:
+                    rr = subprocess.run(cmd, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, timeout=15)
+                    bits.append('$ %s\n%s' % (' '.join(cmd),
+                                              rr.stdout.decode('utf-8', 'ignore')))
+                except Exception as e:
+                    bits.append('$ %s\n(失败 %s)' % (' '.join(cmd), e))
+            z.writestr('system.txt', '\n\n'.join(bits))
+        except Exception as e:
+            z.writestr('system.error.txt', '%s: %s' % (type(e).__name__, e))
+    buf.seek(0)
+    audit('diag_bundle', 'hours=%s rows=%s' % (hours, rows))
+    name = 'elf2_diag_%s.zip' % datetime.now().strftime('%Y%m%d_%H%M%S')
+    return send_file(buf, mimetype='application/zip', as_attachment=True,
+                     download_name=name)
 
 
 @app.route('/api/status')
