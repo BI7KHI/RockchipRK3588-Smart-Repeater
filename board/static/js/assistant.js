@@ -143,6 +143,9 @@
           min: 0, max: 86400, step: 60, tip: '刚答过的人再说话，这段时间内不再插话' },
         { k: 'assist_auto_whitelist', f: '呼号白名单', t: 'text', span: 2,
           tip: '只答这些呼号（逗号分隔）；留空 = 不限呼号' },
+        { k: 'assist_auto_require_address', f: '必须点名本台才发（内容硬前置）', t: 'bool',
+          tip: '听文里要出现本台名（含 ASR 变形容错）或本台呼号，才允许放行；'
+               + '影子期实测约一半「拟发射」是旁人互相通联，关掉等于把这道防线撤了' },
         { k: 'assist_auto_think', f: '让模型写出判断依据（想）', t: 'bool',
           tip: '关掉省几秒生成时间，代价是页面上看不到它为什么这么判' },
         { k: 'assist_auto_think_chars', f: '「想」最多 字', t: 'num', min: 8, max: 60, step: 2,
@@ -457,6 +460,8 @@
       ['自主·同呼号冷却', c.auto_cooldown, '刚答过这个人'],
       ['自主·间隔不足', c.auto_gap_blocked, '距上次主动回答太近'],
       ['自主·白名单外', c.auto_whitelist_blocked, '呼号不在白名单'],
+      ['自主·没点名本台', c.auto_noaddr, '内容硬前置：听文里没有本台名/呼号'],
+      ['自主·决策调用失败', c.auto_error, 'fail-closed 判默；>0 说明模型通道有问题'],
       ['自主·回声跳过', c.auto_echo_skipped, '自己刚发射的内容又被收进来']
     ];
     $('#as-counters').innerHTML = items.map(function (x) {

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ site_title or 'ELF2 智能中继控制中心' }}{% endblock %}
 {% block head_extra %}
-<link rel="stylesheet" href="{{ url_for('static', filename='css/camera-modern.css', v='20260923a') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/camera-modern.css', v='20260930d') }}">
 <style>
   .msg.tool { font-size: 12px; color: var(--muted); border-left: 3px solid #4a6cf7;
               padding: 4px 0 4px 8px; margin: 4px 0; white-space: pre-wrap; word-break: break-all; }
@@ -119,22 +119,30 @@
       <div class="card">
         <div class="card-title">电池电压（当日）</div>
         <div class="kv-list">
-          <div><span>最高</span><b id="energy-bat-max">-- V</b></div>
+          <div><span>静息估计</span><b id="energy-bat-rested" title="近 30 分钟剔除「发射中」采样后的中位数；播报与助手回答用的就是它">-- V</b></div>
+          <div><span>滤波后最低</span><b id="energy-bat-min-f">-- V</b></div>
+          <div><span>滤波后平均</span><b id="energy-bat-avg-f">-- V</b></div>
+          <div><span>滤波后峰谷差</span><b id="energy-bat-drop-f" title="去掉疑似单点毛刺后的峰谷差，代表真实趋势">-- V</b></div>
+          <div class="muted small" style="margin:6px 0 2px">原始采样（保留尖峰作证据）</div>
+          <div><span>原始最高</span><b id="energy-bat-max">-- V</b></div>
           <div><span>最高时刻</span><b id="energy-bat-max-ts">--</b></div>
-          <div><span>最低</span><b id="energy-bat-min">-- V</b></div>
+          <div><span>原始最低</span><b id="energy-bat-min">-- V</b></div>
           <div><span>最低时刻</span><b id="energy-bat-min-ts">--</b></div>
-          <div><span>平均</span><b id="energy-bat-avg">-- V</b></div>
-          <div><span>峰谷差</span><b id="energy-bat-drop" title="当日最高与最低之差，反映负载/光照波动">-- V</b></div>
+          <div><span>原始峰谷差</span><b id="energy-bat-drop" title="含单点毛刺的极差，用来发现异常而不是看趋势">-- V</b></div>
         </div>
       </div>
       <div class="card">
         <div class="card-title">光伏电压（当日）</div>
         <div class="kv-list">
-          <div><span>最高</span><b id="energy-pv-max">-- V</b></div>
+          <div><span>静息估计</span><b id="energy-pv-rested">-- V</b></div>
+          <div><span>滤波后最低</span><b id="energy-pv-min-f">-- V</b></div>
+          <div><span>滤波后平均</span><b id="energy-pv-avg-f">-- V</b></div>
+          <div class="muted small" style="margin:6px 0 2px">原始采样</div>
+          <div><span>原始最高</span><b id="energy-pv-max">-- V</b></div>
           <div><span>最高时刻</span><b id="energy-pv-max-ts">--</b></div>
-          <div><span>最低</span><b id="energy-pv-min">-- V</b></div>
+          <div><span>原始最低</span><b id="energy-pv-min">-- V</b></div>
           <div><span>最低时刻</span><b id="energy-pv-min-ts">--</b></div>
-          <div><span>平均</span><b id="energy-pv-avg">-- V</b></div>
+          <div><span>原始平均</span><b id="energy-pv-avg">-- V</b></div>
         </div>
       </div>
       <div class="card">
@@ -142,6 +150,9 @@
         <div class="kv-list">
           <div><span>采样点数</span><b id="energy-count">--</b></div>
           <div><span>采样间隔</span><b id="energy-sample-info">--</b></div>
+          <div><span>一轮采样</span><b id="energy-burst-info">--</b></div>
+          <div><span>滤波方式</span><b id="energy-filter-info">--</b></div>
+          <div><span>疑似跌落点</span><b id="energy-outliers">--</b></div>
           <div><span>保留天数</span><b id="energy-retention-info">--</b></div>
           <div><span>记录起止</span><b id="energy-span">--</b></div>
         </div>
@@ -154,6 +165,16 @@
         <div class="muted small">
           <span class="energy-dot" style="background:#f5a623"></span> 电池
           <span class="energy-dot" style="background:#3b82f6;margin-left:10px"></span> 光伏
+          <label class="checkline" style="margin-left:12px"
+                 title="勾上后把所有原始采样点画成浅色细线，用来核对滤波到底抹掉了什么">
+            <input type="checkbox" id="energy-show-raw"> 显示原始采样
+          </label>
+          <label class="inline-label" style="margin-left:10px">滤波</label>
+          <select id="energy-filter" style="width:auto">
+            <option value="hampel">Hampel（去离群，推荐）</option>
+            <option value="median">滑动中位数</option>
+            <option value="none">不滤波</option>
+          </select>
           <span style="margin-left:10px">鼠标悬停查看该处数值</span>
         </div>
       </div>
@@ -527,6 +548,8 @@
       <div><label>帧率</label><input id="camera-fps" type="number"></div>
       <div><label>录像目录</label><input id="camera-record-dir"></div>
     </div>
+    <div class="muted small" id="camera-dir-warning" style="color:#fca5a5;display:none"></div>
+    <p class="muted small">录像目录必须<strong>已存在或可创建</strong>、且对运行 relay-web 的用户<strong>可写</strong>。TF 卡挂载点通常只有 root 可写，直接填进去会让录像静默失败、抓拍返回 500；保存时服务端会真的试写一个探针文件，写不进去会当场拒绝并给出修复命令。</p>
     <div class="cal-row">
       <div><label>循环容量上限 (MB)</label><input id="camera-loop-max-mb" type="number"></div>
       <div><label>循环最大文件数</label><input id="camera-loop-max-files" type="number"></div>
@@ -535,6 +558,27 @@
       <div><label>存储容量上限 (MB)</label><input id="camera-storage-max-mb" type="number" min="0" placeholder="0=按磁盘容量"></div>
       <div><label>循环分段（秒）</label><input id="camera-loop-seconds" type="number" min="5"></div>
     </div>
+    <div class="cal-row">
+      <div>
+        <label>录像码率</label>
+        <input id="camera-bitrate" list="cam-bitrate-presets" placeholder="留空=跟随环境变量（当前 1000k）">
+      </div>
+      <div>
+        <label>推流码率</label>
+        <input id="camera-stream-bitrate" list="cam-bitrate-presets" placeholder="留空=跟随环境变量（当前 1500k）">
+      </div>
+    </div>
+    <datalist id="cam-bitrate-presets">
+      <option value="500k"></option>
+      <option value="800k"></option>
+      <option value="1000k"></option>
+      <option value="1200k"></option>
+      <option value="1500k"></option>
+      <option value="2000k"></option>
+      <option value="3000k"></option>
+    </datalist>
+    <div class="muted small" id="cam-bitrate-info">码率：读取中…</div>
+    <p class="muted small">两路码率互不影响：录像降码率只省存储，推流是给人实时看的。改完点下面的「保存摄像头设置」即时生效——录像不会中断很久，当前分段会正常收尾后按新码率重开。</p>
     <div class="row gap mt">
       <label class="checkline"><input type="checkbox" id="camera-loop-autostart"> 开机自动循环录像</label>
       <span class="muted small">关闭后不自动拉起；页面手动「停止循环录像」也会暂停自愈，重启后按此开关恢复</span>
@@ -1071,5 +1115,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/camera-modern.js', v='20260930b') }}"></script>
+<script src="{{ url_for('static', filename='js/camera-modern.js', v='20260930c') }}"></script>
 {% endblock %}

@@ -32,6 +32,7 @@ import threading
 import time
 import uuid
 import wave
+import zipfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import wraps
@@ -602,6 +603,9 @@ def _set_default_settings(db):
         'camera_storage_max_mb': '8192',
         'camera_loop_autostart': '1',
         'camera_rtmp_url': '',
+        # 码率：留空表示「跟随环境变量/内置默认」，页面上填了就以页面为准
+        'camera_bitrate': '',
+        'camera_stream_bitrate': '',
         # 气象 RS485 / Modbus RTU
         'weather_enabled': '1',
         'weather_port': '/dev/ttyS9',
@@ -766,13 +770,20 @@ def init_db():
             battery REAL,
             pv REAL,
             battery_raw INTEGER,
-            pv_raw INTEGER
+            pv_raw INTEGER,
+            battery_min REAL,
+            battery_max REAL,
+            pv_min REAL,
+            pv_max REAL,
+            n_reads INTEGER DEFAULT 0,
+            load INTEGER DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_volt_ts_epoch ON voltage_readings(ts_epoch);
         CREATE INDEX IF NOT EXISTS idx_volt_ts ON voltage_readings(ts);
         '''
     )
     db.execute('PRAGMA journal_mode=WAL')
+    _migrate_voltage_readings(db)
     _set_default_settings(db)
     admin = db.execute('SELECT id FROM users WHERE username = ?', ('Admin',)).fetchone()
     if not admin:
@@ -1151,7 +1162,18 @@ def adc_scale_mv():
         return 0.439453125
 
 
-def voltage_payload():
+def voltage_payload(force=False):
+    """按需读一次各通道电压（页面/播报/工具都用它）。
+    加了 3 秒缓存：**ADC 被读得越勤，读数越低**（实测间隔 0.2s 连读 3 次就掉
+    0.85V，间隔 3s 才掉 0.06V）。而页面轮询 /api/status、整点播报、助手工具都会
+    来读一次，不加缓存等于一直把节点按在地上，读数会长期偏低 —— 这也是此前
+    「瞬时值只有 7~8V、静置一下又是 12.8V」的原因。要最新值传 force=True。
+    """
+    global _VOLT_CACHE
+    _now = time.time()
+    if (not force and _VOLT_CACHE.get('val') is not None
+            and _now - _VOLT_CACHE.get('ts', 0) < _VOLT_TTL):
+        return _VOLT_CACHE['val']
     scale_mv = adc_scale_mv()
     vlsb = scale_mv / 1000.0 if scale_mv else ADC_FULL_SCALE_V / (1 << ADC_BITS)
     out = {}
@@ -1186,6 +1208,7 @@ def voltage_payload():
             'mv_per_lsb': round(vlsb * mult * 1000.0, 4),
             'v_per_lsb': round(vlsb, 9),
         }
+    _VOLT_CACHE.update({'ts': _now, 'val': out})
     return out
 
 
@@ -1207,20 +1230,101 @@ def _db_direct():
     return db
 
 
+# 采样层新增列：老库靠 ALTER TABLE 增量补（不重建表——那是把两周的历史赌在一条 SQL 上）
+VOLTAGE_COLUMNS = (
+    ('battery_min', 'REAL'), ('battery_max', 'REAL'),
+    ('pv_min', 'REAL'), ('pv_max', 'REAL'),
+    ('n_reads', 'INTEGER DEFAULT 0'), ('load', 'INTEGER DEFAULT 0'),
+)
+
+# voltage_payload 的短缓存：ADC 读得越勤读数越低（板端实测），而页面轮询、
+# 整点播报、助手工具都会来读一次 —— 不缓存等于一直把节点按在地上。
+_VOLT_CACHE = {'ts': 0.0, 'val': None}
+_VOLT_TTL = 3.0
+
+
+def _migrate_voltage_readings(db):
+    try:
+        have = {r[1] for r in db.execute('PRAGMA table_info(voltage_readings)')}
+    except Exception as e:
+        print('[ENERGY] 读表结构失败：%s' % e, flush=True)
+        return
+    for name, decl in VOLTAGE_COLUMNS:
+        if name in have:
+            continue
+        try:
+            db.execute('ALTER TABLE voltage_readings ADD COLUMN %s %s' % (name, decl))
+            print('[ENERGY] 迁移：voltage_readings 增加列 %s' % name, flush=True)
+        except Exception as e:
+            print('[ENERGY] 迁移列 %s 失败：%s' % (name, e), flush=True)
+
+
+def _adc_burst(key, gap_ms=None, reads=None):
+    """一轮采样：**间隔着**读几次，返回 (中位数电压, 最小, 最大, 次数, 中位数原始计数)。
+
+    为什么间隔要 3 秒（2026-09-29 板端实测，第一版设计就是这么被推翻的）：
+      * 读得越密，读数越低：间隔 0.2/0.5s 连读 3 次落差 0.85~1.0V，间隔 3s 只剩
+        0.06V；先把节点读趴下、再每 0.5s 读一次，读数会在 7.1~11.2V 游走十几秒。
+      * 我第一版按「每 60ms 读一次、摊开 5 秒取中位数」改，新采样落到 7.8V，
+        而每 60 秒只读一次的值是 12.7~12.8V —— 差 5V 全是**读取本身**造成的
+        （测量改变了被测对象）。所以是「少读、读得开、取中位数」，不是「多读」。
+      * 另有混叠：电池节点上的快纹波让单个瞬时采样只是抓到某个相位
+        （100ms 采样看到 3.4s 锯齿，37ms 采样变 0.30s —— 周期跟着采样率走）。
+    """
+    if reads is None:
+        try:
+            reads = energy_service.clamp_burst_reads(
+                _setting_direct('energy_sample_sec', '60'))
+        except Exception:
+            reads = energy_service.BURST_READS
+    if gap_ms is None:
+        gap_ms = energy_service.BURST_GAP_MS
+    reads = max(1, int(reads))
+    vals, raws = [], []
+    for i in range(reads):
+        raw = read_adc_raw(key)
+        if raw is not None:
+            raws.append(int(raw))
+            v = calc_voltage(key, raw)
+            if v is not None:
+                vals.append(float(v))
+        if i < reads - 1:
+            time.sleep(max(0.05, float(gap_ms) / 1000.0))
+    if not vals:
+        return None, None, None, 0, None
+    vals.sort()
+    return (vals[len(vals) // 2], vals[0], vals[-1], len(vals),
+            sorted(raws)[len(raws) // 2] if raws else None)
+
+
 def _energy_sample_once():
-    """采一次电压入库，返回是否写入。"""
-    pw = voltage_payload()
-    b = pw.get('battery') or {}
-    p = pw.get('pv') or {}
-    bv, pv = b.get('voltage'), p.get('voltage')
-    if bv is None and pv is None:
+    """采一次电压入库（每通道一轮摊开采样），返回是否写入。
+
+    存的是**中位数**（抗单点毛刺），同时存 min/max 作证据（尖峰不抹掉），
+    以及本轮读数与「这一轮里有没有在发射」——静息电压估计要用。
+    """
+    b_med, b_lo, b_hi, n_b, b_raw = _adc_burst('battery')
+    p_med, p_lo, p_hi, n_p, p_raw = _adc_burst('pv')
+    if b_med is None and p_med is None:
         return False        # ADC 读不到就别写空行，免得时间轴被一堆空洞占满
+    try:
+        load = 1 if (bool(PTT_LEVEL) or bool(BUSY_STATE.get('active'))) else 0
+    except Exception:
+        load = 0
     db = _db_direct()
     try:
         db.execute(
-            'INSERT INTO voltage_readings(ts,ts_epoch,battery,pv,battery_raw,pv_raw)'
-            ' VALUES(?,?,?,?,?,?)',
-            (now_iso(), time.time(), bv, pv, b.get('raw'), p.get('raw')))
+            'INSERT INTO voltage_readings(ts,ts_epoch,battery,pv,battery_raw,pv_raw,'
+            'battery_min,battery_max,pv_min,pv_max,n_reads,load)'
+            ' VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+            (now_iso(), time.time(),
+             None if b_med is None else round(b_med, 4),
+             None if p_med is None else round(p_med, 4), b_raw, p_raw,
+             None if b_lo is None else round(b_lo, 4),
+             None if b_hi is None else round(b_hi, 4),
+             None if p_lo is None else round(p_lo, 4),
+             None if p_hi is None else round(p_hi, 4),
+             max(n_b, n_p), load))
         db.commit()
         return True
     finally:
@@ -1263,9 +1367,50 @@ def _energy_day_rows(day):
     """取某天的原始采样（升序）。一天按 60s 采样也就 1440 行，直接全取。"""
     db = get_db()
     return [dict(r) for r in db.execute(
-        'SELECT ts,ts_epoch,battery,pv,battery_raw,pv_raw FROM voltage_readings '
-        'WHERE ts LIKE ? ORDER BY ts_epoch ASC LIMIT 20000',
+        'SELECT ts,ts_epoch,battery,pv,battery_raw,pv_raw,'
+        'battery_min,battery_max,pv_min,pv_max,n_reads,load '
+        'FROM voltage_readings WHERE ts LIKE ? ORDER BY ts_epoch ASC LIMIT 20000',
         (str(day)[:10] + '%',)).fetchall()]
+
+
+# ---- 静息电压（电量估计与播报都用它，不用瞬时值）----
+_RESTED_CACHE = {'ts': 0.0, 'val': None}
+_RESTED_TTL = 20.0
+
+
+def rested_voltage(force=False):
+    """静息电压估计：回看 REST_WINDOW_MIN 分钟、剔除发射中的采样后取中位数。
+
+    播报与助手回答都用它 —— 瞬时值会在发射/大负载期间读出一个偏低的压降值
+    （实测整点播报出现过 12.78 / 11.94 / 11.31 V 这种摆动，而同时段静息电压只有
+    很小的变化）。页面会把「静息」与「瞬时」两个口径分别标出来。
+    """
+    now = time.time()
+    if (not force and _RESTED_CACHE['val'] is not None
+            and now - _RESTED_CACHE['ts'] < _RESTED_TTL):
+        return dict(_RESTED_CACHE['val'])
+    out = {'battery': None, 'pv': None, 'samples': 0,
+           'window_min': energy_service.REST_WINDOW_MIN, 'source': 'none',
+           'age': None}
+    try:
+        db = _db_direct()
+        try:
+            rows = [dict(r) for r in db.execute(
+                'SELECT ts,ts_epoch,battery,pv,load FROM voltage_readings '
+                'WHERE ts_epoch >= ? ORDER BY ts_epoch DESC LIMIT 400',
+                (now - energy_service.REST_WINDOW_MIN * 60.0,)).fetchall()]
+        finally:
+            db.close()
+        est = energy_service.rested_voltage(rows, now=now)
+        out.update(est)
+        fresh = [r for r in rows if r.get('ts_epoch')]
+        if fresh:
+            out['age'] = round(now - max(float(r['ts_epoch']) for r in fresh), 1)
+    except Exception as e:
+        print('[ENERGY] 静息电压估计失败：%s: %s' % (type(e).__name__, e), flush=True)
+    if out['battery'] is not None:
+        _RESTED_CACHE.update({'ts': now, 'val': dict(out)})
+    return out
 
 
 def _energy_days(limit=120):
@@ -1279,14 +1424,19 @@ def _energy_days(limit=120):
 @app.route('/api/energy/day')
 @login_required
 def api_energy_day():
-    """某天的电压时间轴 + 当日统计。"""
+    """某天的电压时间轴 + 当日统计（原始一套 + 滤波一套 + 静息估计）。"""
     day = (request.args.get('day') or '').strip()[:10] or \
         datetime.now().strftime('%Y-%m-%d')
     interval = energy_service.clamp_interval(request.args.get('interval') or 5)
+    filt = energy_service.normalize_filter(request.args.get('filter'))
+    fw = energy_service.clamp_filter_window(
+        request.args.get('window') or energy_service.FILTER_WINDOW)
     rows = _energy_day_rows(day)
-    return api_ok(day=day, interval=interval,
-                  points=energy_service.points_from_rows(rows, interval),
-                  stats=energy_service.day_stats(rows),
+    return api_ok(day=day, interval=interval, filter=filt, filter_window=fw,
+                  points=energy_service.points_from_rows(rows, interval, filt, fw),
+                  stats=energy_service.day_stats(rows, filt, fw,
+                                                 now=time.time()),
+                  rested=rested_voltage(),
                   days=_energy_days(),
                   logging={
                       'enabled': bool_setting('energy_log_enabled', True),
@@ -1294,6 +1444,12 @@ def api_energy_day():
                           _setting_direct('energy_sample_sec', '60')),
                       'retention_days': energy_service.clamp_retention_days(
                           _setting_direct('energy_retention_days', '365')),
+                      'burst_sec': energy_service.burst_seconds(
+                          _setting_direct('energy_sample_sec', '60')),
+                      'burst_reads': energy_service.clamp_burst_reads(
+                          _setting_direct('energy_sample_sec', '60')),
+                      'burst_gap_ms': energy_service.BURST_GAP_MS,
+                      'filter_modes': list(energy_service.FILTER_MODES),
                   })
 
 
@@ -1310,6 +1466,114 @@ def api_energy_export():
                  'attachment; filename=energy_%s.csv' % day})
 
 
+@app.route('/api/health')
+def api_health():
+    """免登录健康探针：只回答「这个进程还活着、能出 JSON 吗」。
+
+    **刻意不读数据库、不读 ADC、不读设置**：
+      * /api/status 要登录、要读库、还要读 ADC（读一次 ADC 会把电池读数压低，
+        见能量统计那段实测），拿它当健康检查既慢又互相干扰；
+      * frp 的 http 健康检查、升级脚本的「起来没」判定、服务器侧掉线告警都用这个，
+        所以它必须便宜到能 10 秒一次。
+    版本号取 /www/VERSION（有就读，没有就空）——未来的自拉升级拿它对版本。
+    """
+    ver = ''
+    try:
+        p = BASE_DIR / 'VERSION'
+        if p.exists():
+            ver = p.read_text(encoding='utf-8').strip()[:40]
+    except Exception:
+        ver = ''
+    return api_ok(service='relay-web', version=ver, time=now_iso(),
+                  uptime=read_uptime())
+
+
+@app.route('/api/diag/bundle')
+@login_required
+@admin_required
+def api_diag_bundle():
+    """一键诊断包：日志尾巴 + 状态 + 脱敏设置 + 最近影子判定，打成一个 zip 下载。
+
+    远端站点排查时最省事的一条路：**走现有面板隧道就能取走**，不需要额外端口、
+    不需要 SSH、也不需要在服务器上放任何东西。内容刻意只挑"文本类"的小东西
+    （录像/录音一律不进包，4G 上那是灾难）。
+    """
+    hours = max(1, min(72, int(request.args.get('hours') or 6)))
+    rows = max(10, min(500, int(request.args.get('rows') or 120)))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr('health.json', json.dumps(
+            {'service': 'relay-web', 'time': now_iso(), 'uptime': read_uptime()},
+            ensure_ascii=False, indent=1))
+        try:
+            z.writestr('status.json', json.dumps(api_status().get_json(),
+                                                 ensure_ascii=False, indent=1))
+        except Exception as e:
+            z.writestr('status.error.txt', '%s: %s' % (type(e).__name__, e))
+        # 设置：密钥一律脱敏（诊断包会经网络传输，不能带明文 Key）
+        try:
+            safe = {}
+            _db = _db_direct()
+            try:
+                for k, v in _db.execute('SELECT key,value FROM settings'):
+                    safe[k] = ('***已设置***' if (str(k).endswith('_api_key') and v)
+                               else v)
+            finally:
+                _db.close()
+            z.writestr('settings.json', json.dumps(safe, ensure_ascii=False,
+                                                   indent=1))
+        except Exception as e:
+            z.writestr('settings.error.txt', '%s: %s' % (type(e).__name__, e))
+        try:
+            r = subprocess.run(['journalctl', '-u', 'relay-web', '--since',
+                                '-%dh' % hours, '--no-pager', '-n', '800'],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               timeout=30)
+            z.writestr('journal-relay-web.txt', r.stdout.decode('utf-8', 'ignore'))
+        except Exception as e:
+            z.writestr('journal.error.txt', '%s: %s' % (type(e).__name__, e))
+        try:
+            r = subprocess.run(['journalctl', '-u', 'frpc', '--since', '-%dh' % hours,
+                                '--no-pager', '-n', '200'],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               timeout=20)
+            z.writestr('journal-frpc.txt', r.stdout.decode('utf-8', 'ignore'))
+        except Exception as e:
+            z.writestr('journal-frpc.error.txt', '%s: %s' % (type(e).__name__, e))
+        # 影子判定 / 语音日志：后期调优的核心素材，文本很小
+        for tbl, name in (('assist_turns', 'assist_turns'), ('voice_logs', 'voice_logs')):
+            try:
+                got = [dict(x) for x in get_db().execute(
+                    'SELECT * FROM %s ORDER BY id DESC LIMIT ?' % tbl,
+                    (rows,)).fetchall()]
+                z.writestr('%s.jsonl' % name,
+                           '\n'.join(json.dumps(x, ensure_ascii=False) for x in got))
+            except Exception as e:
+                z.writestr('%s.error.txt' % name, '%s: %s' % (type(e).__name__, e))
+        try:
+            bits = []
+            for cmd in (['systemctl', '--failed', '--no-pager'],
+                        ['systemctl', 'is-active', 'relay-web', 'frpc', 'ssh',
+                         'rkllm-server', 'nginx'],
+                        ['df', '-h'], ['free', '-m'],
+                        ['ip', '-br', 'addr'], ['uptime']):
+                try:
+                    rr = subprocess.run(cmd, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, timeout=15)
+                    bits.append('$ %s\n%s' % (' '.join(cmd),
+                                              rr.stdout.decode('utf-8', 'ignore')))
+                except Exception as e:
+                    bits.append('$ %s\n(失败 %s)' % (' '.join(cmd), e))
+            z.writestr('system.txt', '\n\n'.join(bits))
+        except Exception as e:
+            z.writestr('system.error.txt', '%s: %s' % (type(e).__name__, e))
+    buf.seek(0)
+    audit('diag_bundle', 'hours=%s rows=%s' % (hours, rows))
+    name = 'elf2_diag_%s.zip' % datetime.now().strftime('%Y%m%d_%H%M%S')
+    return send_file(buf, mimetype='application/zip', as_attachment=True,
+                     download_name=name)
+
+
 @app.route('/api/status')
 @login_required
 def api_status():
@@ -1323,6 +1587,7 @@ def api_status():
         temperatures=read_temperature(),
         uptime_seconds=read_uptime(),
         voltages=voltage_payload(),
+        rested=rested_voltage(),
         llm=dict(llm_route_status(), provider=get_setting('llm_provider', 'auto')),
         ptt=ptt_status(),
         busy=busy_status(),
@@ -1414,6 +1679,7 @@ def api_settings_get():
         'assist_auto_enabled', 'assist_auto_mode', 'assist_auto_max_per_hour',
         'assist_auto_min_gap', 'assist_auto_call_cooldown', 'assist_auto_whitelist',
         'assist_auto_think', 'assist_auto_think_chars', 'assist_auto_dry_answer',
+        'assist_auto_require_address',
         'assist_debug_keep',
         'vlog_enabled', 'vlog_dir', 'vlog_channel', 'vlog_pre_roll', 'vlog_post_roll',
         'vlog_min_seconds', 'vlog_max_seconds', 'vlog_silence_dbfs',
@@ -1568,6 +1834,7 @@ def api_settings_set():
         'assist_auto_think': _bool_caster,
         'assist_auto_think_chars': lambda v: str(int(max(8, min(60, int(float(v)))))),
         'assist_auto_dry_answer': _bool_caster,
+        'assist_auto_require_address': _bool_caster,
         # 中继语音日志
         'vlog_dir': lambda v: str(v).strip()[:120] or '/opt/ai/relay_voice',
         'vlog_channel': lambda v: v if v in ('left', 'right', 'mix') else 'left',
@@ -1843,10 +2110,18 @@ def _prompt_vars():
     }
     try:
         pw = voltage_payload()
+        rest = rested_voltage() or {}
         for k in ('battery', 'pv'):
             item = pw.get(k) or {}
-            v[k] = item.get('voltage')
+            # {battery}/{pv} 用**静息估计**：这两个变量是给播报与助手回答用的，
+            # 读瞬时值会在发射/大负载期间报出一个偏低的压降值。取不到静息估计
+            # （采样还没攒够）时老实退回瞬时值，并把口径一起给出去。
+            rv = rest.get(k)
+            v[k] = rv if rv is not None else item.get('voltage')
+            v[k + '_instant'] = item.get('voltage')
+            v[k + '_rested'] = rv
             v[k + '_raw'] = item.get('raw')
+            v[k + '_source'] = ('rested' if rv is not None else 'instant')
     except Exception:
         pass
     try:
@@ -1971,10 +2246,17 @@ def _agent_ctx():
 
     def get_power():
         pw = voltage_payload()
+        rest = rested_voltage() or {}
         out = {}
         for k in ('battery', 'pv'):
             it = pw.get(k) or {}
-            out[k + '_v'] = it.get('voltage')
+            # 报给模型的是**静息电压**（电量问题的答案不该被发射瞬间的压降带偏）；
+            # 瞬时值一并给出，并标明是哪一个，避免模型把两者混着说。
+            out[k + '_v'] = rest.get(k) if rest.get(k) is not None else it.get('voltage')
+            out[k + '_v_source'] = ('静息估计（近 %d 分钟、剔除发射中的采样）'
+                                    % rest.get('window_min', 30)
+                                    if rest.get(k) is not None else '瞬时值')
+            out[k + '_v_instant'] = it.get('voltage')
             out[k + '_raw'] = it.get('raw')
         return out
 
@@ -5535,13 +5817,15 @@ def _camera_cfg():
         'resolution': get_setting('camera_resolution', '640x480'),
         'fps': int(float(get_setting('camera_fps', '15') or 15)),
         'quality': int(float(get_setting('camera_quality', '5') or 5)),
-        'record_dir': get_setting('camera_record_dir', '/www/camera_recordings'),
+        'record_dir': get_setting('camera_record_dir', CAMERA_DEFAULT_RECORD_DIR),
         'loop_seconds': int(float(get_setting('camera_loop_seconds', '60') or 60)),
         'loop_max_mb': int(float(get_setting('camera_loop_max_mb', '2048') or 2048)),
         'loop_max_files': int(float(get_setting('camera_loop_max_files', '100') or 100)),
         'storage_max_mb': int(float(get_setting('camera_storage_max_mb', '8192') or 8192)),
         'loop_autostart': bool_setting('camera_loop_autostart', True),
         'rtmp_url': get_setting('camera_rtmp_url', ''),
+        'bitrate': get_setting('camera_bitrate', ''),
+        'stream_bitrate': get_setting('camera_stream_bitrate', ''),
     }
 
 
@@ -5560,6 +5844,123 @@ def _camera_record_dir():
     d = Path(_camera_cfg()['record_dir'])
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# 录像/抓拍目录的默认值：一处定义，cfg 与「坏目录时的兜底」都用它
+CAMERA_DEFAULT_RECORD_DIR = '/www/camera_recordings'
+
+
+def _camera_dir_problem(d):
+    """这个录像/抓拍目录能不能用？返回空串=能用，否则是人能看懂的原因。
+
+    为什么必须真写一个探针文件：`os.access()` 在 ACL、只读挂载、root 拥有的挂载点上
+    会骗人。板端实测的现场故障就是「目录存在、stat 一切正常、elf 却写不进去」
+    （TF 卡挂载点），只有真写一下才知道 —— 而当时的失败形式是抓拍 HTTP 500
+    加录像"启动成功但一个文件都没落"，从界面上完全看不出是这个原因。
+    """
+    d = Path(d)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        return '目录不存在且无法创建：%s（%s: %s）' % (d, type(e).__name__, e)
+    probe = d / ('.elf2_write_probe_%d' % os.getpid())
+    try:
+        # 目录本身可能是只读挂载点，mkdir(parents=True) 对它不会报错
+        probe.write_bytes(b'elf2')
+        probe.unlink()
+    except Exception as e:
+        try:
+            if probe.exists():
+                probe.unlink()
+        except Exception:
+            pass
+        return '目录存在但没有写权限：%s（%s: %s）' % (d, type(e).__name__, e)
+    return ''
+
+
+def _camera_dir_hint(d):
+    """给出能直接照抄的修复命令（跑 relay-web 的用户是谁就写谁）。"""
+    try:
+        import pwd
+        who = pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        who = os.environ.get('USER') or 'elf'
+    return ('在板端执行：sudo mkdir -p %s && sudo chown -R %s:%s %s；'
+            '若该路径在 FAT/exFAT 卡上，chown 无效，需要改挂载参数（uid/gid/umask）'
+            '或换到可写目录' % (d, who, who, d))
+
+
+def _camera_record_dir_problem(force_dir=None):
+    """当前（或指定）录像目录的问题描述；同时给修复建议。空串=没问题。"""
+    if force_dir is None:
+        try:
+            force_dir = _camera_cfg()['record_dir']
+        except Exception:
+            force_dir = CAMERA_DEFAULT_RECORD_DIR
+    reason = _camera_dir_problem(force_dir)
+    return '%s。%s' % (reason, _camera_dir_hint(force_dir)) if reason else ''
+
+
+
+# 页面上的码率：'' = 跟随环境变量；其余只认 500k / 1.5M 这类写法
+_CAMERA_BITRATE_RE = re.compile(r'^(\d{1,5})(?:\.(\d{1,3}))?\s*([kKmM])$')
+
+
+def _norm_camera_bitrate(value):
+    """码率归一化成统一的 `NNNNk`（ffmpeg 两种写法都认，但统一了才好比对"是否变了"）。
+
+    留空是有意义的：表示"这一路按环境变量走"，这样板端 unit 里设的
+    RELAY_CAM_RECORD_BITRATE / RELAY_CAM_BITRATE 仍然说了算。
+    """
+    s = str(value if value is not None else '').strip()
+    if not s:
+        return ''
+    m = _CAMERA_BITRATE_RE.match(s)
+    if not m:
+        raise ValueError('码率请写成 500k / 1.5M 这种形式，或留空跟随环境变量')
+    kbps = float('%s.%s' % (m.group(1), m.group(2) or '0'))
+    if m.group(3).lower() == 'm':
+        kbps *= 1000.0
+    kbps = int(round(kbps))
+    if not (100 <= kbps <= 20000):
+        raise ValueError('码率请落在 100k ~ 20M 之间')
+    return '%dk' % kbps
+
+
+def _camera_bitrate_setting(kind):
+    """注册给 camera_service 的回调：页面设置优先，空则由环境变量决定。"""
+    key = 'camera_bitrate' if kind == 'record' else 'camera_stream_bitrate'
+    try:
+        return get_setting(key, '') or ''
+    except Exception:
+        return ''
+
+
+camera_service.set_bitrate_provider(_camera_bitrate_setting)
+
+
+# 采集层参数：改这些必须重开采集进程（分辨率/帧率/设备/OSD 都烘在采集与滤镜里）
+CAMERA_CAPTURE_FIELDS = {'device', 'resolution', 'fps', 'record_dir', 'osd'}
+# 只需要重启录像/推流进程的参数（码率、分段策略、推流地址）
+CAMERA_RECORDER_FIELDS = {'bitrate', 'stream_bitrate', 'rtmp_url', 'loop_seconds',
+                          'loop_max_mb', 'loop_max_files', 'storage_max_mb',
+                          'loop_autostart'}
+
+
+def _camera_restart_plan(changed):
+    """保存设置后该怎么重启。抽成纯函数是为了能离线测。
+
+    'full'     采集层变了 → 整条采集+录像+推流重开（原行为）
+    'recorder' 只有码率/分段/推流地址变了 → 只停录像与推流再拉起，保留采集与预览；
+               走 FfmpegRecorder.stop() 的正常收尾路径，正在写的那段会封好 moov
+    'none'     什么都没变 → 什么都不动（白重启会把正在录的那一段截断）
+    """
+    changed = set(changed or ())
+    if changed & CAMERA_CAPTURE_FIELDS:
+        return 'full'
+    if changed & CAMERA_RECORDER_FIELDS:
+        return 'recorder'
+    return 'none'
 
 
 # ---------------------------------------------------------------------------
@@ -5604,6 +6005,12 @@ def _cam_loop_ensure(reason='autostart'):
             if not ok:
                 return False, msg
         out, seconds, d = _cam_loop_output(cfg)
+        # 目录不可写时 ffmpeg 会"启动成功但一个文件都不落"（日志里只看到"已启动"），
+        # 所以这里先真写个探针文件把话说清楚，让自愈线程的日志与页面都能看出根因。
+        problem = _camera_dir_problem(d)
+        if problem:
+            print('[CAM] 录像目录不可用，循环录像未启动：%s' % problem, flush=True)
+            return False, '录像目录不可用：%s。%s' % (problem, _camera_dir_hint(d))
         if not _cam_loop_running():
             ok, msg = svc.start_recording(cfg, out, camera_service.osd_filter(_camera_osd_cfg()), 'loop')
             if not ok:
@@ -5783,6 +6190,12 @@ def _camera_recording_record(path, loop_seconds=60):
     kind = _camera_kind(path.name)
     parsed = _camera_parse_name(path.name)
     duration_ms = _camera_mp4_duration_ms(path)
+    # 没有 moov = 这个 MP4 还没写完。两种情况要分开告诉前端，否则用户点了播放
+    # 只会拿到 MEDIA_ERR_SRC_NOT_SUPPORTED(4)，看起来像"编码不支持"：
+    #   recording=True  文件还在长（mtime 刚刚更新过）→ 标注「录制中」
+    #   playable=False  没有 moov，就是放不了（录制中断留下的半截文件也走这条）
+    playable = duration_ms is not None
+    recording = (not playable) and (time.time() - st.st_mtime) <= 15.0
     start_ms = parsed['start_ms'] if parsed else None
     if duration_ms is None:
         # MP4 尚未写 moov（正在录制中）或不是标准 MP4，用分段时长/mtime 估算
@@ -5814,6 +6227,8 @@ def _camera_recording_record(path, loop_seconds=60):
         'end_hm': end_dt.strftime('%H:%M:%S'),
         'date': start_dt.strftime('%Y-%m-%d'),
         'duration': max(0, round(duration_ms / 1000.0, 3)),
+        'playable': playable,
+        'recording': recording,
         'url': f'/api/camera/recordings/{path.name}',
     }
 
@@ -5963,12 +6378,15 @@ def api_camera_status():
         service=camera_service.camera_service.status(),
         settings=_camera_cfg(),
         osd=_camera_osd_cfg(),
+        bitrate=camera_service.bitrate_info(),
         recordings_dir=str(_camera_record_dir()),
         recordings=recs[:200],
         storage=_camera_storage_stats(recs),
         loop_running=_cam_loop_running(),
         loop_autostart=bool_setting('camera_loop_autostart', True),
         loop_manual_stop=bool(CAM_LOOP_MANUAL_STOP),
+        # 目录不可写时页面要能直接看到原因（原先只能靠抓拍 500 或"录像没文件"猜）
+        record_dir_problem=_camera_record_dir_problem(),
     )
 
 
@@ -6026,7 +6444,8 @@ def internal_camera_stream():
 @app.route('/api/camera/settings', methods=['GET'])
 @login_required
 def api_camera_settings_get():
-    return api_ok(settings=_camera_cfg(), osd=_camera_osd_cfg())
+    return api_ok(settings=_camera_cfg(), osd=_camera_osd_cfg(),
+                  bitrate=camera_service.bitrate_info())
 
 
 @app.route('/api/camera/settings', methods=['POST'])
@@ -6034,6 +6453,15 @@ def api_camera_settings_get():
 @admin_required
 def api_camera_settings_set():
     data = request.get_json(silent=True) or {}
+    # 录像目录先验证再落库：否则会留下「设置保存成功、录像一个文件都不落」的坏状态
+    # （板端实测：TF 卡挂载点对 elf 不可写 → 抓拍 500、循环录像静默失败）。
+    # 顺便归一化（去掉结尾斜杠），避免 /a 与 /a/ 被当成两个不同设置互相覆盖。
+    if 'record_dir' in data:
+        cand = str(data.get('record_dir') or '').strip() or CAMERA_DEFAULT_RECORD_DIR
+        problem = _camera_record_dir_problem(cand)
+        if problem:
+            return api_err('录像目录不可用：%s' % problem, 400)
+        data['record_dir'] = str(Path(cand))
     mapping = {
         'device': 'camera_device',
         'resolution': 'camera_resolution',
@@ -6046,38 +6474,96 @@ def api_camera_settings_set():
         'storage_max_mb': 'camera_storage_max_mb',
         'rtmp_url': 'camera_rtmp_url',
     }
-    for k, sk in mapping.items():
-        if k in data:
-            set_setting(sk, data[k])
-    if 'loop_autostart' in data:
-        set_setting('camera_loop_autostart',
-                    '1' if data['loop_autostart'] in (True, '1', 'true', 'on', 1) else '0')
-    osd = data.get('osd') or {}
-    for k, sk in {
+    osd_map = {
         'enabled': 'camera_osd_enabled',
         'text': 'camera_osd_text',
         'show_time': 'camera_osd_show_time',
         'position': 'camera_osd_position',
         'fontsize': 'camera_osd_fontsize',
         'color': 'camera_osd_color',
-    }.items():
-        if k in osd:
-            set_setting(sk, '1' if osd[k] is True else ('0' if osd[k] is False else osd[k]))
+    }
+
+    def _store_str(k, v):
+        """写库前的归一化（与下面真正写入时保持一致，否则"变了没有"会误判）。"""
+        if k in ('fps', 'quality', 'loop_seconds', 'loop_max_mb', 'loop_max_files',
+                 'storage_max_mb'):
+            try:
+                return str(int(float(v)))
+            except Exception:
+                return str(v)
+        return str(v if v is not None else '')
+
+    def _osd_str(v):
+        return '1' if v is True else ('0' if v is False else str(v))
+
+    # ---- 先算「到底变了什么」，再写库：没变就别重启 ----
+    changed = set()
+    for k, sk in mapping.items():
+        if k in data and str(get_setting(sk, '') or '') != _store_str(k, data[k]):
+            changed.add(k)
+    for k in ('bitrate', 'stream_bitrate'):
+        if k in data:
+            try:
+                newv = _norm_camera_bitrate(data[k])
+            except ValueError as exc:
+                return api_err(str(exc), 400)
+            if str(get_setting('camera_%s' % k, '') or '') != newv:
+                changed.add(k)
+    osd_in = data.get('osd') or {}
+    for k, sk in osd_map.items():
+        if k in osd_in and str(get_setting(sk, '') or '') != _osd_str(osd_in[k]):
+            changed.add('osd')
+
+    # ---- 落库 ----
+    for k, sk in mapping.items():
+        if k in data:
+            set_setting(sk, data[k])
+    if 'loop_autostart' in data:
+        set_setting('camera_loop_autostart',
+                    '1' if data['loop_autostart'] in (True, '1', 'true', 'on', 1) else '0')
+    for k in ('bitrate', 'stream_bitrate'):
+        if k in data:
+            set_setting('camera_%s' % k, _norm_camera_bitrate(data[k]))
+    for k, sk in osd_map.items():
+        if k in osd_in:
+            set_setting(sk, _osd_str(osd_in[k]))
+
     svc = camera_service.camera_service
-    # 摄像头采集参数变化时重启采集
-    if svc.status()['running']:
+    plan = _camera_restart_plan(changed)
+    if plan == 'full' and svc.status()['running']:
         svc.stop_recording()
         svc.stop_rtmp()
         svc.stop_loop_cleaner()
         svc.stop()
         camera_service.camera_service.start(_camera_cfg())
+    elif plan == 'recorder' and svc.status()['running']:
+        # 只重启录像/推流：采集与实时预览不动，且走正常收尾路径（旧分段不会变成没 moov 的半截）
+        was_rtmp = bool(svc.status().get('rtmp'))
+        svc.stop_recording()
+        if was_rtmp:
+            svc.stop_rtmp()
+        if bool_setting('camera_loop_autostart', True):
+            try:
+                _cam_loop_ensure('settings-bitrate')
+            except Exception:
+                pass
+        if was_rtmp:
+            url = get_setting('camera_rtmp_url', '')
+            if url:
+                try:
+                    svc.start_rtmp(_camera_cfg(), url,
+                                   camera_service.osd_filter(_camera_osd_cfg()))
+                except Exception:
+                    pass
     # 改完参数后立刻恢复循环录像（原来要等 30s 自愈线程，会丢一段录像）
-    if bool_setting('camera_loop_autostart', True):
+    if plan == 'full' and bool_setting('camera_loop_autostart', True):
         try:
             _cam_loop_ensure('settings-saved')
         except Exception:
             pass
-    return api_ok(settings=_camera_cfg(), osd=_camera_osd_cfg())
+    return api_ok(settings=_camera_cfg(), osd=_camera_osd_cfg(),
+                  bitrate=camera_service.bitrate_info(), changed=sorted(changed),
+                  restart=plan)
 
 
 @app.route('/api/camera/snapshot', methods=['POST'])
@@ -6091,16 +6577,34 @@ def api_camera_snapshot():
     frame = svc.get_frame(timeout=5)
     if not frame:
         return api_err('获取摄像头帧失败', 500)
+    # 目录写不进去时不能让整个请求 500（原先就是未捕获的 PermissionError）：
+    # 先换到默认目录保住「抓拍」这个功能，并把原因回给页面。
     d = _camera_record_dir()
+    problem = _camera_dir_problem(d)
+    fallback = ''
+    if problem:
+        alt = Path(CAMERA_DEFAULT_RECORD_DIR)
+        if not _camera_dir_problem(alt):
+            d, fallback = alt, '%s（本次已改存到 %s）' % (problem, alt)
+        else:
+            return api_err('抓拍失败：%s' % _camera_record_dir_problem(), 500)
     name = f'snapshot_{time.strftime("%Y%m%d_%H%M%S")}.jpg'
     path = d / name
-    path.write_bytes(frame)
-    return api_ok(filename=name, url=f'/api/camera/recordings/{name}', size=len(frame))
+    try:
+        path.write_bytes(frame)
+    except Exception as e:
+        return api_err('抓拍写入失败：%s（%s: %s）'
+                       % (_camera_record_dir_problem(), type(e).__name__, e), 500)
+    return api_ok(filename=name, url=f'/api/camera/recordings/{name}',
+                  size=len(frame), dir=str(d), note=fallback)
 
 
 @app.route('/api/camera/record/manual/start', methods=['POST'])
 @login_required
 def api_camera_manual_start():
+    problem = _camera_record_dir_problem()
+    if problem:
+        return api_err('录像目录不可用，无法开始录像：%s' % problem, 500)
     d = _camera_record_dir()
     name = f'manual_{time.strftime("%Y%m%d_%H%M%S")}.mp4'
     path = d / name
@@ -6127,6 +6631,9 @@ def api_camera_manual_stop():
 def api_camera_loop_start():
     global CAM_LOOP_MANUAL_STOP
     CAM_LOOP_MANUAL_STOP = False
+    problem = _camera_record_dir_problem()
+    if problem:
+        return api_err('录像目录不可用，无法开始循环录像：%s' % problem, 500)
     cfg = _camera_cfg()
     out, seconds, d = _cam_loop_output(cfg)
     ok, msg = camera_service.camera_service.start_recording(
@@ -6643,7 +7150,14 @@ def api_weather():
 # 中继语音助手：BUSY 语音唤醒 → ASR → LLM → TTS → 受控发射
 # ---------------------------------------------------------------------------
 def _assist_settings_direct():
-    """无 app context 读取全部 assist_* 设置（供助手后台线程使用）。
+    """无 app context 读取助手要用的设置（供助手后台线程使用）。
+
+    为什么不能只查 `assist_%`：助手判「是不是在叫我们」要用**本台呼号**，而本台呼号
+    存在 `vlog_callsign_whitelist`（语音日志那一摊的设置）里。只按 assist_% 过滤时，
+    这个键根本进不了助手的设置快照 → auto_told_callsigns() 恒为空 →
+    既让「被点名」这个提示位失准，也让 2026-09-29 新加的「显式点名」发射前置
+    把真正的点名（含 ICAO 拼读）全判成"没点名"（板端验收当场抓到：BI7KHI 被 noaddr 拦）。
+    跨域键在这里显式列出，别再用通配符兜。
 
     连接必须在 finally 里关（原先 close() 在 try 体内，异常路径会漏连接/fd）。
     """
@@ -6651,7 +7165,9 @@ def _assist_settings_direct():
     db = None
     try:
         db = sqlite3.connect(str(DB_PATH), timeout=3)
-        for k, v in db.execute("SELECT key,value FROM settings WHERE key LIKE 'assist_%'"):
+        for k, v in db.execute(
+                "SELECT key,value FROM settings "
+                "WHERE key LIKE 'assist_%' OR key IN ('vlog_callsign_whitelist')"):
             out[k] = v
     except Exception:
         pass
