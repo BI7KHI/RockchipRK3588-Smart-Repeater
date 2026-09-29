@@ -1679,6 +1679,7 @@ def api_settings_get():
         'assist_auto_enabled', 'assist_auto_mode', 'assist_auto_max_per_hour',
         'assist_auto_min_gap', 'assist_auto_call_cooldown', 'assist_auto_whitelist',
         'assist_auto_think', 'assist_auto_think_chars', 'assist_auto_dry_answer',
+        'assist_auto_require_address',
         'assist_debug_keep',
         'vlog_enabled', 'vlog_dir', 'vlog_channel', 'vlog_pre_roll', 'vlog_post_roll',
         'vlog_min_seconds', 'vlog_max_seconds', 'vlog_silence_dbfs',
@@ -1833,6 +1834,7 @@ def api_settings_set():
         'assist_auto_think': _bool_caster,
         'assist_auto_think_chars': lambda v: str(int(max(8, min(60, int(float(v)))))),
         'assist_auto_dry_answer': _bool_caster,
+        'assist_auto_require_address': _bool_caster,
         # 中继语音日志
         'vlog_dir': lambda v: str(v).strip()[:120] or '/opt/ai/relay_voice',
         'vlog_channel': lambda v: v if v in ('left', 'right', 'mix') else 'left',

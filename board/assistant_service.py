@@ -132,6 +132,10 @@ DEFAULTS = {
     # 影子期把「本来会说的话」也生成出来（只合成试听，绝不发射）——只看判定
     # 无法验收答得对不对，所以默认打开；嫌费时可以关。
     'assist_auto_dry_answer': '1',
+    # 「显式点名」内容前置：听文里必须出现本台名（含实测变形）或本台呼号，才允许
+    # 判答放行。默认开 —— 影子期 26 条拟发射里约一半是旁人互相通联，模型分不清
+    # "在问旁边的朋友"和"在问本台"，而发射出去收不回来。
+    'assist_auto_require_address': '1',
 }
 
 SCHEMA = """
@@ -218,6 +222,16 @@ _HOMOPHONE = {
     '香': '香想相乡箱翔响享湘向像',
     '想': '香想相乡箱翔响享湘向像',
 }
+
+# 「本台名」的容错表：在唤醒词同音表的基础上，补上真实空口里**观测到**的那些变形。
+# 与 _HOMOPHONE 分开维护是刻意的 —— 唤醒表一动，唤醒的误触发率就跟着变（唤醒成功
+# 就会发射），而这张表只用于「有没有点名本台」的前置判断，两者风险量级不同。
+# 数据来源：2026-09-28~29 影子期真实听文（中季台/中器台/中戏台/空气台/器台/中气台…）。
+_ADDR_EXTRA = {'继': '季器戏气汽齐其', '记': '季器戏气汽齐其', '计': '季器戏气汽齐其',
+               '中': '空冲充', '钟': '空冲充'}
+_ADDR_HOMOPHONE = dict(_HOMOPHONE)
+for _k, _v in _ADDR_EXTRA.items():
+    _ADDR_HOMOPHONE[_k] = _HOMOPHONE.get(_k, _k) + _v
 
 # 匹配前丢弃的标点/空白：ASR 可能给出任意断句，不能因此漏唤醒
 _SKIP_CHARS = set(' \t\n\r，。！？、；：,.!?;:""\'\'“”‘’《》()（）[]【】{}<>·—－-…')
@@ -365,6 +379,7 @@ AUTO_DECISION_SYS = (
 AUTO_BLOCK_LABEL = {
     'silent': '判定为默',
     'reason': '答的理由码不可接受',
+    'noaddr': '听文里没有点名本台',
     'whitelist': '呼号不在白名单',
     'cooldown': '同呼号冷却中',
     'rate': '本小时已达上限',
@@ -494,16 +509,22 @@ def parse_decision(raw, max_think=30):
 def auto_gate(decision, reason, mode='shadow', callsign='', whitelist='',
               min_gap=90, max_per_hour=6, cooldown=600,
               hits=(), call_ts=0.0, last_tx=0.0, now=0.0,
-              quiet=False, test_mode=False, busy=False):
+              quiet=False, test_mode=False, busy=False, addressed=True):
     """闸门：返回 (allowed, code, 说明)。**纯函数**，红线全在这里，模型无权绕过。
 
     顺序是刻意的：先判「要不要答」，再判内容/频率红线，**影子锁最后** ——
     这样影子期还能看出「除了影子这一条，其它闸门会不会放行」（would_reply）。
+    `addressed` 由调用方用 auto_addressed() 算好传进来（保持本函数是纯函数）。
     """
     if decision != 'answer':
         return (False, 'silent', AUTO_BLOCK_LABEL['silent'])
     if reason not in AUTO_ANSWER_REASONS:
         return (False, 'reason', AUTO_BLOCK_LABEL['reason'])
+    if not addressed:
+        # 内容前置：听文里没出现本台名/本台呼号 → 不认为在跟我们说话。
+        # 影子期 26 条拟发射里约一半是旁人互相通联（"还有谁会上台呀"、"Breaking breaking"），
+        # 模型分不清"在问旁边的朋友"还是"在问本台"，而发射出去就收不回来。
+        return (False, 'noaddr', AUTO_BLOCK_LABEL['noaddr'])
     wl = [x.strip().upper() for x in re.split(r'[,;、\s]+', whitelist or '') if x.strip()]
     cs = (callsign or '').strip().upper()
     if wl and cs not in wl:
@@ -600,6 +621,49 @@ def auto_called(text, wake_words=(), told=(), fuzzy=True):
         if len(c) >= 4 and c in up:
             return True
     return False
+
+
+def _addr_regex(word):
+    """按「本台名容错表」给一个词生成正则（与 _wake_regex 同构，但同音表更宽）。"""
+    parts = []
+    for ch in str(word):
+        if ch in _ADDR_HOMOPHONE:
+            parts.append('[' + re.escape(_ADDR_HOMOPHONE[ch]) + ']')
+        else:
+            parts.append(re.escape(ch))
+    try:
+        return re.compile(''.join(parts))
+    except Exception:
+        return None
+
+
+def auto_addressed(text, wake_words=(), own=()):
+    """这段听文里是否**明确点名本台**（本台名，含实测变形；或本台呼号）。
+
+    为什么单独立一条：自主层的判答规则写的是「直接提问 / 闲聊 / 求助」，模型分不清
+    「在问旁边的朋友」和「在问本台」。影子期 26 条拟发射里约一半属于前者
+    （"除了我跟你还有谁会上台呀"、"Breaking, breaking"、"你念我的呼号他能识别"），
+    而发射出去就收不回来 —— 所以给发射加一道与模型无关的内容前置。
+    与 auto_called 的区别：这里只认**本台名/本台呼号**，把"自己人呼号"也算作证据
+    （别人报本台呼号时，我们在不在被叫之列由呼号白名单那道闸门再决定）。
+    返回 (bool, 证据说明)。
+    """
+    t = str(text or '')
+    if not t.strip():
+        return False, '空文本'
+    for w in (wake_words or ()):
+        if not w:
+            continue
+        for cand in _wake_variants(w, True):
+            rx = _addr_regex(cand)
+            if rx is not None and rx.search(t):
+                return True, '本台名「%s」' % cand
+    up = _norm_text(t).upper()
+    for c in (own or ()):
+        c = _norm_text(c).upper()
+        if len(c) >= 4 and c in up:
+            return True, '本台呼号 %s' % c
+    return False, '没听到本台名或本台呼号'
 
 
 def auto_callsigns(text, whitelist=''):
@@ -777,6 +841,10 @@ class AssistantService:
             'auto_gap_blocked': 0,
             'auto_whitelist_blocked': 0,
             'auto_echo_skipped': 0,
+            # 事后审计用：决策调用失败（fail-closed 判默）与「没点名本台」各数各的。
+            # 前者此前只留在 assist_turns.reason='error' 里，页面看不见（问题 6）。
+            'auto_error': 0,
+            'auto_noaddr': 0,
         }
         # 自主回答的频率状态：发射时刻环 + 呼号冷却表 + 自己刚说过的话
         self.auto_hits = deque(maxlen=200)
@@ -1417,6 +1485,12 @@ class AssistantService:
         out['reason'] = dec['reason']
         out['confidence'] = dec['confidence']
         out['think'] = dec['think'] if think_on else ''
+        # 「显式点名」前置：与模型无关的内容闸门（可用设置关掉，默认开）
+        require_addr = _flag(st.get('assist_auto_require_address'), True)
+        addr_ok, addr_why = auto_addressed(text, self.wake_words(st),
+                                           self.auto_told_callsigns(st))
+        out['addressed'], out['addr_why'] = addr_ok, addr_why
+        out['require_address'] = require_addr
         allowed, code, note = auto_gate(
             dec['decision'], dec['reason'], mode=out['mode'],
             callsign=ctx['callsign'], whitelist=ctx['wl'],
@@ -1429,7 +1503,7 @@ class AssistantService:
             quiet=in_quiet_hours((st.get('assist_quiet_hours') or '').strip())
             if (st.get('assist_quiet_hours') or '').strip() else False,
             test_mode=_flag(st.get('assist_test_mode'), False),
-            busy=busy)
+            busy=busy, addressed=(addr_ok or not require_addr))
         out['allowed'], out['gate'], out['gate_note'] = allowed, code, note
         out['gate_label'] = AUTO_BLOCK_LABEL.get(code, code)
         # 影子期：除了「影子」那一道锁，其余闸门全放行 = 本来会发射
@@ -1474,9 +1548,13 @@ class AssistantService:
             self.counters['auto_silent'] = int(self.counters.get('auto_silent', 0)) + 1
         for name, key in (('whitelist', 'auto_whitelist_blocked'),
                           ('cooldown', 'auto_cooldown'), ('rate', 'auto_rate_limited'),
-                          ('gap', 'auto_gap_blocked'), ('shadow', 'auto_shadow_blocked')):
+                          ('gap', 'auto_gap_blocked'), ('shadow', 'auto_shadow_blocked'),
+                          ('noaddr', 'auto_noaddr'), ('error', 'auto_error')):
             if code == name:
                 self.counters[key] = int(self.counters.get(key, 0)) + 1
+        if res.get('error') and code != 'error':
+            # 模型没输出但被判默之外的路径兜住时也要计数（否则 error 会漏账）
+            self.counters['auto_error'] = int(self.counters.get('auto_error', 0)) + 1
         would = bool(res.get('would_reply'))
         label = AUTO_BLOCK_LABEL.get(code, code)
         rec['auto'] = {
@@ -1484,16 +1562,22 @@ class AssistantService:
             'model_reason': res['reason'], 'confidence': res['confidence'],
             'think': res['think'], 'callsign': res['callsign'],
             'would_reply': would, 'ms': res['ms'], 'error': res['error'],
-            'parse_ok': res['parse_ok']}
+            'parse_ok': res['parse_ok'], 'addressed': res.get('addressed'),
+            'addr_why': res.get('addr_why', ''), 'provider': res.get('provider', ''),
+            'model': res.get('model', '')}
         rec['action'] = 'shadow' if would else 'silent'
         rec['note'] = '自主：%s（%s）' % (
             '应答' if res['decision'] == 'answer' else '保持静默', label)
         # 影子行一定 dry=1 —— 它**没有**发射动作，查询时不能按 sent 统计
         rec['id'] = self._save_turn(
             'auto', text, '', rec['action'], error=str(res.get('error') or ''),
-            asr_ms=asr_ms, rx_bytes=(item.get('data') if would else None),
+            asr_ms=asr_ms, llm_ms=int(res.get('ms') or 0),
+            rx_bytes=(item.get('data') if would else None),
             dbfs=item.get('dbfs') or 0.0, decision=res['decision'], reason=code,
             confidence=res['confidence'], think=res['think'],
+            # 归因：这一条判定到底是外部 API 还是本地 1.5B 拍的。
+            # 此前这两列一直空着，事后无法把外部模型与本地模型的表现分开看（问题 4）。
+            provider=str(res.get('provider') or ''), model=str(res.get('model') or ''),
             callsigns=','.join(res['callsigns']), would_reply=1 if would else 0, dry=1)
         keep(rec['action'])
         self._push_recent(rec)
@@ -1622,7 +1706,8 @@ class AssistantService:
                 'auto_decided', 'auto_skipped', 'auto_answered', 'auto_silent',
                 'auto_parse_fail', 'auto_shadow_blocked', 'auto_rate_limited',
                 'auto_cooldown', 'auto_gap_blocked', 'auto_whitelist_blocked',
-                'auto_echo_skipped')},
+                'auto_echo_skipped', 'auto_error', 'auto_noaddr')},
+            'require_address': _flag(st.get('assist_auto_require_address'), True),
         }
 
     def _decode(self, data):

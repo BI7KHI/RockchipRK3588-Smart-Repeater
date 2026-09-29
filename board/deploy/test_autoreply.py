@@ -181,8 +181,48 @@ check('auto_mode 回落到 shadow', A.auto_mode({}) == 'shadow'
       and A.auto_mode({'assist_auto_mode': '乱写'}) == 'shadow')
 check('结论码都有中文标签',
       all(k in A.AUTO_BLOCK_LABEL for k in
-          ('silent', 'reason', 'whitelist', 'cooldown', 'rate', 'gap',
+          ('silent', 'reason', 'noaddr', 'whitelist', 'cooldown', 'rate', 'gap',
            'quiet', 'test_mode', 'busy', 'shadow')))
+
+# ---------------------------------------------------------------------------
+print('\n=== 3b. 「显式点名」内容前置（影子期数据的直接产物） ===')
+# 数据来源：2026-09-29 影子证据审计。26 条「拟发射」里约一半是旁人互相通联或 ASR 残片，
+# 一旦开放阶段二就会插话。这些用例直接用当时的真实听文当夹逼。
+W3 = ['智能中继', '中继台', '香香']
+ADDRESSED = [
+    ('中季台现在气温是多少？', 'AI 把「中继」听成「中季」'),
+    ('器台中器台现在的电压是多少？', '听成「器台」'),
+    ('东西台中戏台现在的电压是多少？', '听成「中戏台」'),
+    ('空气台现在气温是多少？', '听成「空气台」'),
+    ('充气充气台当前的电池电压是多少？', '听成「充气台」'),
+    ('中继台现在电池电压多少', '标准写法'),
+    ('智能中继现在风速多少', '另一个唤醒词'),
+]
+NOT_ADDRESSED = [
+    ('刚你一直在那压那个长信号在那压。', '旁人互相通联'),
+    ('p delta。 Breaking, breaking.', '信道上的打断语，不是叫我们'),
+    ('话说我老大老大，除这个台礼，除了我跟你，还有谁会上台呀？', '在问旁边的朋友'),
+    ('标准你是要指多标准的。', '旁人对话片段'),
+    ('我现在再看一下他那个冒烟测试。', '调试对话'),
+    ('呃，可以操收可以操收，是CKOD吗？', '在找别的台'),
+]
+for txt, why in ADDRESSED:
+    ok, ev = A.auto_addressed(txt, W3)
+    check('点名本台（%s）→ 放行：%s' % (why, txt[:18]), ok is True, ev)
+for txt, why in NOT_ADDRESSED:
+    ok, ev = A.auto_addressed(txt, W3)
+    check('没有点名（%s）→ 拦住：%s' % (why, txt[:16]), ok is False, ev)
+check('本台呼号也算点名', A.auto_addressed('BI7KHI 帮我看看电压', W3, ['BI7KHI'])[0] is True)
+check('别人的呼号不算点名',
+      A.auto_addressed('BV7IBD 帮我看看电压', W3, ['BI7KHI'])[0] is False)
+check('noaddr 排在 whitelist 之前（内容前置先判）',
+      A.auto_gate(decision='answer', reason='question', mode='full', now=NOW,
+                  addressed=False, whitelist='XX9ZZZ', callsign='BI7ABC')[1] == 'noaddr')
+check('点名齐全时不受影响（仍有影子锁）',
+      A.auto_gate(decision='answer', reason='called', mode='shadow', now=NOW,
+                  addressed=True)[1] == 'shadow')
+check('显式点名前置默认是开的', A.DEFAULTS.get('assist_auto_require_address') == '1',
+      A.DEFAULTS.get('assist_auto_require_address'))
 
 # ---------------------------------------------------------------------------
 print('\n=== 4. 预筛与回声 ===')
@@ -246,7 +286,10 @@ def _ask_raw(messages, temperature=0.1, max_tokens=48, timeout=60):
 
 
 SET = {'assist_auto_whitelist': '', 'assist_auto_dry_answer': '0',
-       'assist_test_mode': '0', 'assist_wake_words': '智能中继,中继台'}
+       'assist_test_mode': '0', 'assist_wake_words': '智能中继,中继台',
+       # 板端确实配了本台呼号（vlog_callsign_whitelist=BI7KHI）；不放进夹具，
+       # 「点名本台」这条内容前置就把所有带 BI7KHI 的用例都拦了，测的就不是原来的意思了
+       'vlog_callsign_whitelist': 'BI7KHI'}
 
 
 def new_svc():
@@ -261,7 +304,7 @@ svc = new_svc()
 ITEM = {'data': b'\x00\x00' * 8000, 'dbfs': -30.0, 'seconds': 3.0, 'busy': True}
 rec = {}
 kept = []
-ok_handled = svc._auto_try('现在电池电压多少', svc.settings(), ITEM, rec,
+ok_handled = svc._auto_try('中继台现在电池电压多少', svc.settings(), ITEM, rec,
                             lambda a, w='': kept.append(a), 120, time.time())
 check('自主层接管了这一段', ok_handled is True)
 check('影子记录动作=shadow', rec.get('action') == 'shadow', repr(rec.get('action')))
@@ -309,7 +352,7 @@ RAW['text'] = '想：问电压\n判：答\n由：直接提问\n信：7'
 svc.invalidate()
 svc.busy_getter = lambda: True
 rec4 = {}
-svc._auto_try('电池电压多少', svc.settings(), ITEM, rec4, lambda a, w='': None,
+svc._auto_try('中继台电池电压多少', svc.settings(), ITEM, rec4, lambda a, w='': None,
               100, time.time())
 check('信道忙 → 判定被拦下', rec4.get('action') == 'silent', repr(rec4.get('action')))
 check('信道忙 → gate=busy 且不计 would_reply',
@@ -321,7 +364,7 @@ svc.invalidate()
 
 # 注意：段标志 busy=True 不该拦住判定（否则「听见了就永远不许答」）
 rec4b = {}
-svc._auto_try('电池电压多少', svc.settings(), ITEM, rec4b, lambda a, w='': None,
+svc._auto_try('中继台电池电压多少', svc.settings(), ITEM, rec4b, lambda a, w='': None,
               100, time.time())
 check('收到时的载波标志不影响判定（只看此刻）',
       rec4b.get('action') == 'shadow', repr(rec4b.get('action')))
@@ -330,7 +373,7 @@ check('收到时的载波标志不影响判定（只看此刻）',
 svc.invalidate()
 svc.auto_hits.extend([time.time() - i for i in range(6)])
 rec5 = {}
-svc._auto_try('电池电压多少', svc.settings(), ITEM, rec5, lambda a, w='': None,
+svc._auto_try('中继台电池电压多少', svc.settings(), ITEM, rec5, lambda a, w='': None,
               100, time.time())
 check('本小时满额 → rate', rec5['auto']['reason'] == 'rate', repr(rec5['auto']))
 check('rate 计数 +1', svc.counters['auto_rate_limited'] >= 1)
@@ -341,7 +384,7 @@ svc.invalidate()
 SET['assist_auto_whitelist'] = 'BI7KHI'
 svc.invalidate()
 rec6 = {}
-svc._auto_try('电池电压多少', svc.settings(), ITEM, rec6, lambda a, w='': None,
+svc._auto_try('中继台电池电压多少', svc.settings(), ITEM, rec6, lambda a, w='': None,
               100, time.time())
 check('白名单不匹配 → whitelist', rec6['auto']['reason'] == 'whitelist',
       repr(rec6['auto']))
@@ -417,7 +460,7 @@ check('自测能验「忙则不答」（不用接无线电）',
       svc.test_decide('BI7KHI 帮我看看电压', busy=True)['gate'] == 'busy')
 check('自测默认不入库',
       len(svc.store.query("SELECT id FROM assist_turns WHERE kind='auto-test'")) == 0)
-t2 = svc.test_decide('帮我看看电压', busy=False, store=True)
+t2 = svc.test_decide('中继台帮我看看电压', busy=False, store=True)
 check('store=True 才留档',
       len(svc.store.query("SELECT id FROM assist_turns WHERE kind='auto-test'")) == 1)
 check('自测空文本报错', svc.test_decide('')['ok'] is False)
@@ -430,26 +473,26 @@ check('状态含结论码字典', 'shadow' in st['reason_labels'])
 # 注入判定：闸门链必须能**不依赖模型**复现（红线与模型的判断无关）
 svc.invalidate()
 n_before = RAW['n']
-ji = svc.test_decide('随便一句话', busy=False,
+ji = svc.test_decide('中继台现在电压多少', busy=False,
                      judge={'decision': 'answer', 'reason': 'question'})
 check('注入判定生效且未调用模型',
       ji.get('forced') is True and ji.get('decision') == 'answer' and RAW['n'] == n_before,
       'forced=%s raw_n=%s' % (ji.get('forced'), RAW['n']))
 check('注入判答 + 不忙 → 影子（本应发射）',
       ji.get('gate') == 'shadow' and ji.get('would_reply') is True)
-ji2 = svc.test_decide('随便一句话', busy=True,
+ji2 = svc.test_decide('中继台现在电压多少', busy=True,
                       judge={'decision': 'answer', 'reason': 'question'})
 check('注入判答 + 信道忙 → busy（红线压过模型判断）',
       ji2.get('gate') == 'busy' and ji2.get('would_reply') is False, ji2.get('gate'))
 check('注入「答」但理由不可接受 → 拒绝注入（改走真模型）',
-      svc.test_decide('随便一句话', busy=False,
+      svc.test_decide('中继台电压多少', busy=False,
                       judge={'decision': 'answer', 'reason': 'unclear'}).get('forced')
       is False)
 check('注入非法判定词 → 拒绝注入',
-      svc.test_decide('随便一句话', busy=False,
+      svc.test_decide('中继台电压多少', busy=False,
                       judge={'decision': '随便'}).get('forced') is False)
 check('注入判默 → silent', svc.test_decide(
-    '随便一句话', busy=False,
+    '中继台电压多少', busy=False,
     judge={'decision': 'silent', 'reason': 'unrelated', 'think': '注入'}).get('gate')
     == 'silent')
 check('_forced_judge 对非字典返回 None',
