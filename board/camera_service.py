@@ -103,12 +103,32 @@ def pick_encoder(kind='record'):
     return chosen
 
 
+def _is_mp4_output(output_args):
+    """输出是否为 mp4（含 -f mp4、-f segment，或 .mp4 文件名/模板）。"""
+    args = [str(a) for a in output_args]
+    if '-f' in args:
+        i = args.index('-f')
+        muxer = args[i + 1] if i + 1 < len(args) else ''
+        if muxer in ('flv', 'matroska', 'mpegts'):
+            return False
+        if muxer == 'mp4':
+            return True
+    return any(a.lower().endswith('.mp4') for a in args)
+
+
 class FfmpegRecorder:
     """从摄像头服务的 JPEG 帧队列读取，交给 ffmpeg 转码/封装/推流。"""
 
-    def __init__(self, camera, output_args, osd_filter='', label='rec'):
+    def __init__(self, camera, output_args, osd_filter='', label='rec', kind='stream'):
+        """kind 决定编码器：'record' 允许 H.265，'stream' 只用 H.264。
+
+        默认取保守的 'stream'——忘记传参时宁可用 H.264，
+        也不要把 H.265 推给解不了的远端。录像调用点显式传 'record'。
+        """
         self.camera = camera
         self.label = label
+        self.kind = kind
+        self.encoder, enc_args = pick_encoder(kind)
         self.queue = queue.Queue(maxsize=80)
         self.active = True
         self.error = ''
@@ -118,9 +138,14 @@ class FfmpegRecorder:
         ]
         if osd_filter:
             cmd += ['-vf', osd_filter]
-        cmd += pick_h264_encoder()[1] + [
+        cmd += list(enc_args) + [
             '-pix_fmt', 'yuv420p',
-        ] + output_args
+        ]
+        # ffmpeg 写 HEVC 进 mp4 默认用 hev1 标签，Apple/QuickTime 与部分浏览器
+        # 只认 hvc1；显式打 hvc1 以兼顾浏览器回放与下载后本地播放。
+        if 'hevc' in self.encoder and _is_mp4_output(output_args):
+            cmd += ['-tag:v', 'hvc1']
+        cmd += list(output_args)
         self.proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE, bufsize=0)
