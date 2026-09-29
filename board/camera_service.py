@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 _SW_H264 = ('libx264', ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '30'])
-_H264_ENCODER_CACHE = {}
+_ENCODER_CACHE = {}
 
 # 硬件编码器（rkmpp / v4l2m2m）不支持 -crf，只能走码率控制。
 # 标定到与原先 libx264 -crf 30 相当的体积：实测 720p15 约 1.2~1.7 Mbit/s
@@ -75,27 +75,31 @@ def _encoder_candidates(allow_hevc):
 
 
 
-def pick_h264_encoder():
-    """挑一个可用的 H.264 编码器，返回 (名字, ffmpeg 参数)。只探测一次。
+def pick_encoder(kind='record'):
+    """按用途挑一个可用编码器，返回 (名字, ffmpeg 参数)。每种用途只探测一次。
 
-    RK3588 有硬件 H.264 编码器；用软件 libx264 会**持续吃掉约 0.8 个核**
+    kind='record'：录像，优先 H.265 硬件（H.265 → H.264 硬件 → 软件 H.264）。
+    kind='stream'：推流，只用 H.264（H.264 硬件 → 软件 H.264），保证远端兼容。
+
+    RK3588 有硬件 H.264/H.265 编码器；用软件 libx264 会**持续吃掉约 0.8 个核**
     （实测 1280x720@15fps 常驻编码）。但各版本 BSP 的 rkmpp 参数不一致，
     所以这里先**试编一帧**再决定：探测到但实际不能用的话，
-    绝不拿用户的录像去冒险，直接退回 libx264。
+    绝不拿用户的录像/推流去冒险，直接退回 libx264。
 
     环境变量：
       RELAY_CAM_HWENC=0     强制软件编码
-      RELAY_CAM_ENCODER=xx  直接指定编码器，跳过探测与试编
+      RELAY_CAM_ENCODER=xx  直接指定编码器（仅对录像生效），跳过探测与试编
     """
-    if 'enc' in _H264_ENCODER_CACHE:
-        return _H264_ENCODER_CACHE['enc']
+    if kind in _ENCODER_CACHE:
+        return _ENCODER_CACHE[kind]
     chosen = _SW_H264
-    for name, args in _encoder_candidates(True):
+    for name, args in _encoder_candidates(kind == 'record'):
         if name == _SW_H264[0] or _encoder_works(args):
             chosen = (name, args)
             break
-    _H264_ENCODER_CACHE['enc'] = chosen
-    print('[CAM] H.264 编码器：%s' % chosen[0], flush=True)
+    _ENCODER_CACHE[kind] = chosen
+    print('[CAM] %s编码器：%s' % ('录像' if kind == 'record' else '推流', chosen[0]),
+          flush=True)
     return chosen
 
 
