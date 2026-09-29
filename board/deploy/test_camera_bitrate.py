@@ -45,6 +45,10 @@ camera_service.subprocess.run = lambda *a, **kw: FakeProc(LISTING)
 
 SAVED = {k: os.environ.get(k) for k in
          ('RELAY_CAM_BITRATE', 'RELAY_CAM_RECORD_BITRATE', 'RELAY_CAM_STREAM_BITRATE')}
+# 保存/还原码率回调：本套件会把它改成假的再清掉，而 app 导入时注册的那个回调
+# 是**进程级**的 —— 直接置 None 会把后面所有套件（如 test_camera_settings）看到的
+# 回调一起清掉。同一进程跑全套件时踩过：那套件因此报"来源不是 setting"。
+_SAVED_PROVIDER = camera_service._BITRATE_PROVIDER
 
 
 def setenv(**kw):
@@ -154,7 +158,7 @@ try:
     check('回调异常时退回环境变量 1000k',
           args3[args3.index('-b:v') + 1] == '1000k', args3)
 finally:
-    camera_service.set_bitrate_provider(None)
+    camera_service.set_bitrate_provider(_SAVED_PROVIDER)
     setenv(**SAVED)
 
 print('\n%d 通过 / %d 失败' % (OK[0], len(FAIL)))

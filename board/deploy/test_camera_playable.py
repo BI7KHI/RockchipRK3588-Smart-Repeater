@@ -36,6 +36,7 @@ def check(name, cond, extra=''):
 
 
 TMP = Path(tempfile.mkdtemp(prefix='cam_playable_'))
+_OLD_REC_DIR = app._camera_record_dir
 app._camera_record_dir = lambda: TMP          # 别碰 /www
 NOW = time.time()
 
@@ -92,6 +93,7 @@ try:
           all(('index' in x and 'is_latest' in x) for x in listed), listed)
 finally:
     app._camera_mp4_duration_ms = real_duration
+    app._camera_record_dir = _OLD_REC_DIR      # 还原，别影响同一进程里的后续套件
 
 print('\n%d 通过 / %d 失败' % (OK[0], len(FAIL)))
 for x in FAIL:

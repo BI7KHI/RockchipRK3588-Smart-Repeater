@@ -7056,7 +7056,14 @@ def api_weather():
 # 中继语音助手：BUSY 语音唤醒 → ASR → LLM → TTS → 受控发射
 # ---------------------------------------------------------------------------
 def _assist_settings_direct():
-    """无 app context 读取全部 assist_* 设置（供助手后台线程使用）。
+    """无 app context 读取助手要用的设置（供助手后台线程使用）。
+
+    为什么不能只查 `assist_%`：助手判「是不是在叫我们」要用**本台呼号**，而本台呼号
+    存在 `vlog_callsign_whitelist`（语音日志那一摊的设置）里。只按 assist_% 过滤时，
+    这个键根本进不了助手的设置快照 → auto_told_callsigns() 恒为空 →
+    既让「被点名」这个提示位失准，也让 2026-09-29 新加的「显式点名」发射前置
+    把真正的点名（含 ICAO 拼读）全判成"没点名"（板端验收当场抓到：BI7KHI 被 noaddr 拦）。
+    跨域键在这里显式列出，别再用通配符兜。
 
     连接必须在 finally 里关（原先 close() 在 try 体内，异常路径会漏连接/fd）。
     """
@@ -7064,7 +7071,9 @@ def _assist_settings_direct():
     db = None
     try:
         db = sqlite3.connect(str(DB_PATH), timeout=3)
-        for k, v in db.execute("SELECT key,value FROM settings WHERE key LIKE 'assist_%'"):
+        for k, v in db.execute(
+                "SELECT key,value FROM settings "
+                "WHERE key LIKE 'assist_%' OR key IN ('vlog_callsign_whitelist')"):
             out[k] = v
     except Exception:
         pass
