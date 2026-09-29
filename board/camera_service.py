@@ -411,7 +411,7 @@ class CameraService:
             if self.rtmp:
                 return False, 'RTMP 推流已运行'
             self.rtmp = FfmpegRecorder(
-                self, ['-f', 'flv', url], osd_filter, 'rtmp')
+                self, ['-f', 'flv', url], osd_filter, 'rtmp', kind='stream')
         return True, 'rtmp started'
 
     def stop_rtmp(self):
