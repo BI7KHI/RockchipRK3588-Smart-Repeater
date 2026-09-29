@@ -17,7 +17,7 @@ _H264_ENCODER_CACHE = {}
 # 硬件编码器（rkmpp / v4l2m2m）不支持 -crf，只能走码率控制。
 # 标定到与原先 libx264 -crf 30 相当的体积：实测 720p15 约 1.2~1.7 Mbit/s
 # （9~13 MB/分钟）。注意 -b:v 4M 会让每段涨到 ~30MB，存储直接翻三倍。
-_HW_BITRATE = (os.environ.get('RELAY_CAM_BITRATE') or '1500k').strip()
+_HW_BITRATE = (os.environ.get('RELAY_CAM_BITRATE') or '1000k').strip()
 
 
 def _encoder_works(args):
