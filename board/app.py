@@ -766,13 +766,20 @@ def init_db():
             battery REAL,
             pv REAL,
             battery_raw INTEGER,
-            pv_raw INTEGER
+            pv_raw INTEGER,
+            battery_min REAL,
+            battery_max REAL,
+            pv_min REAL,
+            pv_max REAL,
+            n_reads INTEGER DEFAULT 0,
+            load INTEGER DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_volt_ts_epoch ON voltage_readings(ts_epoch);
         CREATE INDEX IF NOT EXISTS idx_volt_ts ON voltage_readings(ts);
         '''
     )
     db.execute('PRAGMA journal_mode=WAL')
+    _migrate_voltage_readings(db)
     _set_default_settings(db)
     admin = db.execute('SELECT id FROM users WHERE username = ?', ('Admin',)).fetchone()
     if not admin:
@@ -1151,7 +1158,18 @@ def adc_scale_mv():
         return 0.439453125
 
 
-def voltage_payload():
+def voltage_payload(force=False):
+    """按需读一次各通道电压（页面/播报/工具都用它）。
+    加了 3 秒缓存：**ADC 被读得越勤，读数越低**（实测间隔 0.2s 连读 3 次就掉
+    0.85V，间隔 3s 才掉 0.06V）。而页面轮询 /api/status、整点播报、助手工具都会
+    来读一次，不加缓存等于一直把节点按在地上，读数会长期偏低 —— 这也是此前
+    「瞬时值只有 7~8V、静置一下又是 12.8V」的原因。要最新值传 force=True。
+    """
+    global _VOLT_CACHE
+    _now = time.time()
+    if (not force and _VOLT_CACHE.get('val') is not None
+            and _now - _VOLT_CACHE.get('ts', 0) < _VOLT_TTL):
+        return _VOLT_CACHE['val']
     scale_mv = adc_scale_mv()
     vlsb = scale_mv / 1000.0 if scale_mv else ADC_FULL_SCALE_V / (1 << ADC_BITS)
     out = {}
@@ -1186,6 +1204,7 @@ def voltage_payload():
             'mv_per_lsb': round(vlsb * mult * 1000.0, 4),
             'v_per_lsb': round(vlsb, 9),
         }
+    _VOLT_CACHE.update({'ts': _now, 'val': out})
     return out
 
 
@@ -1207,20 +1226,101 @@ def _db_direct():
     return db
 
 
+# 采样层新增列：老库靠 ALTER TABLE 增量补（不重建表——那是把两周的历史赌在一条 SQL 上）
+VOLTAGE_COLUMNS = (
+    ('battery_min', 'REAL'), ('battery_max', 'REAL'),
+    ('pv_min', 'REAL'), ('pv_max', 'REAL'),
+    ('n_reads', 'INTEGER DEFAULT 0'), ('load', 'INTEGER DEFAULT 0'),
+)
+
+# voltage_payload 的短缓存：ADC 读得越勤读数越低（板端实测），而页面轮询、
+# 整点播报、助手工具都会来读一次 —— 不缓存等于一直把节点按在地上。
+_VOLT_CACHE = {'ts': 0.0, 'val': None}
+_VOLT_TTL = 3.0
+
+
+def _migrate_voltage_readings(db):
+    try:
+        have = {r[1] for r in db.execute('PRAGMA table_info(voltage_readings)')}
+    except Exception as e:
+        print('[ENERGY] 读表结构失败：%s' % e, flush=True)
+        return
+    for name, decl in VOLTAGE_COLUMNS:
+        if name in have:
+            continue
+        try:
+            db.execute('ALTER TABLE voltage_readings ADD COLUMN %s %s' % (name, decl))
+            print('[ENERGY] 迁移：voltage_readings 增加列 %s' % name, flush=True)
+        except Exception as e:
+            print('[ENERGY] 迁移列 %s 失败：%s' % (name, e), flush=True)
+
+
+def _adc_burst(key, gap_ms=None, reads=None):
+    """一轮采样：**间隔着**读几次，返回 (中位数电压, 最小, 最大, 次数, 中位数原始计数)。
+
+    为什么间隔要 3 秒（2026-09-29 板端实测，第一版设计就是这么被推翻的）：
+      * 读得越密，读数越低：间隔 0.2/0.5s 连读 3 次落差 0.85~1.0V，间隔 3s 只剩
+        0.06V；先把节点读趴下、再每 0.5s 读一次，读数会在 7.1~11.2V 游走十几秒。
+      * 我第一版按「每 60ms 读一次、摊开 5 秒取中位数」改，新采样落到 7.8V，
+        而每 60 秒只读一次的值是 12.7~12.8V —— 差 5V 全是**读取本身**造成的
+        （测量改变了被测对象）。所以是「少读、读得开、取中位数」，不是「多读」。
+      * 另有混叠：电池节点上的快纹波让单个瞬时采样只是抓到某个相位
+        （100ms 采样看到 3.4s 锯齿，37ms 采样变 0.30s —— 周期跟着采样率走）。
+    """
+    if reads is None:
+        try:
+            reads = energy_service.clamp_burst_reads(
+                _setting_direct('energy_sample_sec', '60'))
+        except Exception:
+            reads = energy_service.BURST_READS
+    if gap_ms is None:
+        gap_ms = energy_service.BURST_GAP_MS
+    reads = max(1, int(reads))
+    vals, raws = [], []
+    for i in range(reads):
+        raw = read_adc_raw(key)
+        if raw is not None:
+            raws.append(int(raw))
+            v = calc_voltage(key, raw)
+            if v is not None:
+                vals.append(float(v))
+        if i < reads - 1:
+            time.sleep(max(0.05, float(gap_ms) / 1000.0))
+    if not vals:
+        return None, None, None, 0, None
+    vals.sort()
+    return (vals[len(vals) // 2], vals[0], vals[-1], len(vals),
+            sorted(raws)[len(raws) // 2] if raws else None)
+
+
 def _energy_sample_once():
-    """采一次电压入库，返回是否写入。"""
-    pw = voltage_payload()
-    b = pw.get('battery') or {}
-    p = pw.get('pv') or {}
-    bv, pv = b.get('voltage'), p.get('voltage')
-    if bv is None and pv is None:
+    """采一次电压入库（每通道一轮摊开采样），返回是否写入。
+
+    存的是**中位数**（抗单点毛刺），同时存 min/max 作证据（尖峰不抹掉），
+    以及本轮读数与「这一轮里有没有在发射」——静息电压估计要用。
+    """
+    b_med, b_lo, b_hi, n_b, b_raw = _adc_burst('battery')
+    p_med, p_lo, p_hi, n_p, p_raw = _adc_burst('pv')
+    if b_med is None and p_med is None:
         return False        # ADC 读不到就别写空行，免得时间轴被一堆空洞占满
+    try:
+        load = 1 if (bool(PTT_LEVEL) or bool(BUSY_STATE.get('active'))) else 0
+    except Exception:
+        load = 0
     db = _db_direct()
     try:
         db.execute(
-            'INSERT INTO voltage_readings(ts,ts_epoch,battery,pv,battery_raw,pv_raw)'
-            ' VALUES(?,?,?,?,?,?)',
-            (now_iso(), time.time(), bv, pv, b.get('raw'), p.get('raw')))
+            'INSERT INTO voltage_readings(ts,ts_epoch,battery,pv,battery_raw,pv_raw,'
+            'battery_min,battery_max,pv_min,pv_max,n_reads,load)'
+            ' VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+            (now_iso(), time.time(),
+             None if b_med is None else round(b_med, 4),
+             None if p_med is None else round(p_med, 4), b_raw, p_raw,
+             None if b_lo is None else round(b_lo, 4),
+             None if b_hi is None else round(b_hi, 4),
+             None if p_lo is None else round(p_lo, 4),
+             None if p_hi is None else round(p_hi, 4),
+             max(n_b, n_p), load))
         db.commit()
         return True
     finally:
@@ -1263,9 +1363,50 @@ def _energy_day_rows(day):
     """取某天的原始采样（升序）。一天按 60s 采样也就 1440 行，直接全取。"""
     db = get_db()
     return [dict(r) for r in db.execute(
-        'SELECT ts,ts_epoch,battery,pv,battery_raw,pv_raw FROM voltage_readings '
-        'WHERE ts LIKE ? ORDER BY ts_epoch ASC LIMIT 20000',
+        'SELECT ts,ts_epoch,battery,pv,battery_raw,pv_raw,'
+        'battery_min,battery_max,pv_min,pv_max,n_reads,load '
+        'FROM voltage_readings WHERE ts LIKE ? ORDER BY ts_epoch ASC LIMIT 20000',
         (str(day)[:10] + '%',)).fetchall()]
+
+
+# ---- 静息电压（电量估计与播报都用它，不用瞬时值）----
+_RESTED_CACHE = {'ts': 0.0, 'val': None}
+_RESTED_TTL = 20.0
+
+
+def rested_voltage(force=False):
+    """静息电压估计：回看 REST_WINDOW_MIN 分钟、剔除发射中的采样后取中位数。
+
+    播报与助手回答都用它 —— 瞬时值会在发射/大负载期间读出一个偏低的压降值
+    （实测整点播报出现过 12.78 / 11.94 / 11.31 V 这种摆动，而同时段静息电压只有
+    很小的变化）。页面会把「静息」与「瞬时」两个口径分别标出来。
+    """
+    now = time.time()
+    if (not force and _RESTED_CACHE['val'] is not None
+            and now - _RESTED_CACHE['ts'] < _RESTED_TTL):
+        return dict(_RESTED_CACHE['val'])
+    out = {'battery': None, 'pv': None, 'samples': 0,
+           'window_min': energy_service.REST_WINDOW_MIN, 'source': 'none',
+           'age': None}
+    try:
+        db = _db_direct()
+        try:
+            rows = [dict(r) for r in db.execute(
+                'SELECT ts,ts_epoch,battery,pv,load FROM voltage_readings '
+                'WHERE ts_epoch >= ? ORDER BY ts_epoch DESC LIMIT 400',
+                (now - energy_service.REST_WINDOW_MIN * 60.0,)).fetchall()]
+        finally:
+            db.close()
+        est = energy_service.rested_voltage(rows, now=now)
+        out.update(est)
+        fresh = [r for r in rows if r.get('ts_epoch')]
+        if fresh:
+            out['age'] = round(now - max(float(r['ts_epoch']) for r in fresh), 1)
+    except Exception as e:
+        print('[ENERGY] 静息电压估计失败：%s: %s' % (type(e).__name__, e), flush=True)
+    if out['battery'] is not None:
+        _RESTED_CACHE.update({'ts': now, 'val': dict(out)})
+    return out
 
 
 def _energy_days(limit=120):
@@ -1279,14 +1420,19 @@ def _energy_days(limit=120):
 @app.route('/api/energy/day')
 @login_required
 def api_energy_day():
-    """某天的电压时间轴 + 当日统计。"""
+    """某天的电压时间轴 + 当日统计（原始一套 + 滤波一套 + 静息估计）。"""
     day = (request.args.get('day') or '').strip()[:10] or \
         datetime.now().strftime('%Y-%m-%d')
     interval = energy_service.clamp_interval(request.args.get('interval') or 5)
+    filt = energy_service.normalize_filter(request.args.get('filter'))
+    fw = energy_service.clamp_filter_window(
+        request.args.get('window') or energy_service.FILTER_WINDOW)
     rows = _energy_day_rows(day)
-    return api_ok(day=day, interval=interval,
-                  points=energy_service.points_from_rows(rows, interval),
-                  stats=energy_service.day_stats(rows),
+    return api_ok(day=day, interval=interval, filter=filt, filter_window=fw,
+                  points=energy_service.points_from_rows(rows, interval, filt, fw),
+                  stats=energy_service.day_stats(rows, filt, fw,
+                                                 now=time.time()),
+                  rested=rested_voltage(),
                   days=_energy_days(),
                   logging={
                       'enabled': bool_setting('energy_log_enabled', True),
@@ -1294,6 +1440,12 @@ def api_energy_day():
                           _setting_direct('energy_sample_sec', '60')),
                       'retention_days': energy_service.clamp_retention_days(
                           _setting_direct('energy_retention_days', '365')),
+                      'burst_sec': energy_service.burst_seconds(
+                          _setting_direct('energy_sample_sec', '60')),
+                      'burst_reads': energy_service.clamp_burst_reads(
+                          _setting_direct('energy_sample_sec', '60')),
+                      'burst_gap_ms': energy_service.BURST_GAP_MS,
+                      'filter_modes': list(energy_service.FILTER_MODES),
                   })
 
 
@@ -1323,6 +1475,7 @@ def api_status():
         temperatures=read_temperature(),
         uptime_seconds=read_uptime(),
         voltages=voltage_payload(),
+        rested=rested_voltage(),
         llm=dict(llm_route_status(), provider=get_setting('llm_provider', 'auto')),
         ptt=ptt_status(),
         busy=busy_status(),
@@ -1843,10 +1996,18 @@ def _prompt_vars():
     }
     try:
         pw = voltage_payload()
+        rest = rested_voltage() or {}
         for k in ('battery', 'pv'):
             item = pw.get(k) or {}
-            v[k] = item.get('voltage')
+            # {battery}/{pv} 用**静息估计**：这两个变量是给播报与助手回答用的，
+            # 读瞬时值会在发射/大负载期间报出一个偏低的压降值。取不到静息估计
+            # （采样还没攒够）时老实退回瞬时值，并把口径一起给出去。
+            rv = rest.get(k)
+            v[k] = rv if rv is not None else item.get('voltage')
+            v[k + '_instant'] = item.get('voltage')
+            v[k + '_rested'] = rv
             v[k + '_raw'] = item.get('raw')
+            v[k + '_source'] = ('rested' if rv is not None else 'instant')
     except Exception:
         pass
     try:
@@ -1971,10 +2132,17 @@ def _agent_ctx():
 
     def get_power():
         pw = voltage_payload()
+        rest = rested_voltage() or {}
         out = {}
         for k in ('battery', 'pv'):
             it = pw.get(k) or {}
-            out[k + '_v'] = it.get('voltage')
+            # 报给模型的是**静息电压**（电量问题的答案不该被发射瞬间的压降带偏）；
+            # 瞬时值一并给出，并标明是哪一个，避免模型把两者混着说。
+            out[k + '_v'] = rest.get(k) if rest.get(k) is not None else it.get('voltage')
+            out[k + '_v_source'] = ('静息估计（近 %d 分钟、剔除发射中的采样）'
+                                    % rest.get('window_min', 30)
+                                    if rest.get(k) is not None else '瞬时值')
+            out[k + '_v_instant'] = it.get('voltage')
             out[k + '_raw'] = it.get('raw')
         return out
 

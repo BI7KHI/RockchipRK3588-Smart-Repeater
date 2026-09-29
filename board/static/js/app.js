@@ -1759,6 +1759,8 @@
   const energyState = {
     day: '', interval: 5, points: [], stats: null, loaded: false,
     hover: -1, box: null, scale: null,
+    // 默认画**滤波后**的曲线（原始纹波会把趋势糊掉），原始点按需叠加
+    filter: 'hampel', showRaw: false, rested: null, logging: null,
   };
 
   function energyToday() {
@@ -1798,9 +1800,14 @@
     energyState.interval = interval;
     try {
       const d = await apiFetch('/api/energy/day?day=' + encodeURIComponent(day)
-                               + '&interval=' + interval);
+                               + '&interval=' + interval
+                               + '&filter=' + encodeURIComponent(energyState.filter));
       energyState.points = d.points || [];
       energyState.stats = d.stats || {};
+      energyState.rested = d.rested || null;
+      energyState.logging = d.logging || null;
+      const fsEl = $('#energy-filter');
+      if (fsEl && d.filter) { fsEl.value = d.filter; energyState.filter = d.filter; }
       energyState.loaded = true;
       energyState.hover = -1;
       renderEnergyCards(d);
@@ -1814,13 +1821,26 @@
     const st = d.stats || {};
     const b = st.battery || {};
     const p = st.pv || {};
+    const bf = st.battery_f || {};
+    const pf = st.pv_f || {};
+    const rest = st.rested || d.rested || {};
     const set = (id, txt) => { const el = $('#' + id); if (el) el.textContent = txt; };
+    // 两套数并列：滤波后（看趋势/电量）与原始（留尖峰作证据）。
+    // 原始 min/max 是当初刻意保留的取舍，这里不删。
+    set('energy-bat-rested', rest.battery === null || rest.battery === undefined
+        ? '--' : energyFmtV(rest.battery));
+    set('energy-bat-min-f', energyFmtV(bf.min));
+    set('energy-bat-avg-f', energyFmtV(bf.avg));
+    set('energy-bat-drop-f', energyFmtV(st.battery_drop_f));
     set('energy-bat-max', energyFmtV(b.max));
     set('energy-bat-max-ts', energyHm(b.max_ts));
     set('energy-bat-min', energyFmtV(b.min));
     set('energy-bat-min-ts', energyHm(b.min_ts));
-    set('energy-bat-avg', energyFmtV(b.avg));
     set('energy-bat-drop', energyFmtV(st.battery_drop));
+    set('energy-pv-rested', rest.pv === null || rest.pv === undefined
+        ? '--' : energyFmtV(rest.pv));
+    set('energy-pv-min-f', energyFmtV(pf.min));
+    set('energy-pv-avg-f', energyFmtV(pf.avg));
     set('energy-pv-max', energyFmtV(p.max));
     set('energy-pv-max-ts', energyHm(p.max_ts));
     set('energy-pv-min', energyFmtV(p.min));
@@ -1829,21 +1849,35 @@
     set('energy-count', String(st.points || 0) + ' 点');
     const lg = d.logging || {};
     set('energy-sample-info', (lg.sample_sec === undefined ? '--' : lg.sample_sec) + ' 秒');
+    set('energy-burst-info', lg.burst_sec === undefined
+        ? '--' : ('摊开 ' + lg.burst_sec + ' 秒 × 每 ' + (lg.burst_gap_ms || 60)
+                  + 'ms 一读，取中位数'));
+    const fname = { hampel: 'Hampel（去离群）', median: '滑动中位数', none: '不滤波' };
+    set('energy-filter-info', (fname[st.filter] || st.filter || '--') +
+        (st.filter && st.filter !== 'none' ? '，窗口 ' + st.filter_window + ' 点' : ''));
+    set('energy-outliers', (st.outliers === undefined ? '--' : st.outliers) + ' 点');
     set('energy-retention-info',
         (lg.retention_days === undefined ? '--' : lg.retention_days) + ' 天');
     set('energy-span', st.first_ts
         ? (energyHm(st.first_ts) + ' ~ ' + energyHm(st.last_ts)) : '--');
     const note = $('#energy-note');
-    if (note && lg.enabled === false) {
-      note.textContent = '电压采样当前已关闭（设置 → 硬件校准与射频），时间轴不会有新数据。';
+    if (note) {
+      if (lg.enabled === false) {
+        note.textContent = '电压采样当前已关闭（设置 → 硬件校准与射频），时间轴不会有新数据。';
+      } else {
+        note.textContent = '电压原先不落库，历史无法回溯；时间轴从启用采样后开始积累。'
+          + '「静息估计」＝近 ' + (rest.window_min || 30) + ' 分钟剔除发射中采样后的中位数'
+          + '（' + (rest.samples || 0) + ' 个样本），播报与助手回答用的就是它；'
+          + '原始列保留尖峰，用来发现异常。';
+      }
     }
   }
 
   // 缺桶**不连线**：某点为 null 就断开，让图上的空档老实表达「这段时间没采到」，
   // 而不是拉一条直线假装连续。
-  function drawEnergySeries(ctx, pts, key, color, xOf, yOf) {
+  function drawEnergySeries(ctx, pts, key, color, xOf, yOf, lw) {
     ctx.strokeStyle = color;
-    ctx.lineWidth = 1.8;
+    ctx.lineWidth = lw || 1.8;
     ctx.beginPath();
     let pen = false;
     pts.forEach(p => {
@@ -1903,9 +1937,17 @@
       return;
     }
     const vals = [];
+    const useF = energyState.filter !== 'none';
     pts.forEach(p => {
-      if (p.battery !== null && p.battery !== undefined) vals.push(+p.battery);
-      if (p.pv !== null && p.pv !== undefined) vals.push(+p.pv);
+      const bk = useF ? 'battery_f' : 'battery';
+      const pk = useF ? 'pv_f' : 'pv';
+      if (p[bk] !== null && p[bk] !== undefined) vals.push(+p[bk]);
+      if (p[pk] !== null && p[pk] !== undefined) vals.push(+p[pk]);
+      // 勾了「显示原始采样」就把原始点也纳入量程，否则原始线会被裁到框外
+      if (energyState.showRaw) {
+        if (p.battery !== null && p.battery !== undefined) vals.push(+p.battery);
+        if (p.pv !== null && p.pv !== undefined) vals.push(+p.pv);
+      }
     });
     let lo = vals.length ? Math.min.apply(null, vals) : 0;
     let hi = vals.length ? Math.max.apply(null, vals) : 1;
@@ -1921,8 +1963,18 @@
     for (let i = 0; i <= 4; i++) {
       ctx.fillText((hi - (hi - lo) * i / 4).toFixed(2), 6, pad.t + ch * i / 4 + 4);
     }
-    drawEnergySeries(ctx, pts, 'battery', '#f5a623', xOf, yOf);
-    drawEnergySeries(ctx, pts, 'pv', '#3b82f6', xOf, yOf);
+    // 原始采样（细、半透明）垫在下面，滤波曲线（粗）画在上面：
+    // 一眼能看出滤波到底抹掉了什么，而不是「悄悄改了数」。
+    if (energyState.showRaw) {
+      ctx.globalAlpha = 0.45;
+      drawEnergySeries(ctx, pts, 'battery', '#f5a623', xOf, yOf, 1.0);
+      drawEnergySeries(ctx, pts, 'pv', '#3b82f6', xOf, yOf, 1.0);
+      ctx.globalAlpha = 1;
+    }
+    const bkey = useF ? 'battery_f' : 'battery';
+    const pkey = useF ? 'pv_f' : 'pv';
+    drawEnergySeries(ctx, pts, bkey, '#f5a623', xOf, yOf, 1.8);
+    drawEnergySeries(ctx, pts, pkey, '#3b82f6', xOf, yOf, 1.8);
     const hi2 = energyState.hover;
     if (hi2 >= 0 && hi2 < pts.length) {
       const p = pts[hi2];
@@ -1931,7 +1983,7 @@
       ctx.globalAlpha = 0.6;
       ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, pad.t + ch); ctx.stroke();
       ctx.globalAlpha = 1;
-      [['battery', '#f5a623'], ['pv', '#3b82f6']].forEach(pair => {
+      [[bkey, '#f5a623'], [pkey, '#3b82f6']].forEach(pair => {
         const v = p[pair[0]];
         if (v === null || v === undefined) return;
         ctx.fillStyle = pair[1];
@@ -1966,12 +2018,23 @@
     const p = energyState.points[i];
     if (!tip || !b || !p) return;
     const bits = ['<b>' + (p.time || '') + '</b>'];
-    bits.push('<span style="color:#f5a623">电池</span> <b>' + energyFmtV(p.battery) + '</b>');
-    bits.push('<span style="color:#3b82f6">光伏</span> <b>' + energyFmtV(p.pv) + '</b>');
+    const useF = energyState.filter !== 'none';
+    if (useF && p.battery_f !== null && p.battery_f !== undefined) {
+      bits.push('<span style="color:#f5a623">电池（滤波）</span> <b>'
+                + energyFmtV(p.battery_f) + '</b>');
+      bits.push('<span style="opacity:.7">原始桶均值 ' + energyFmtV(p.battery) + '</span>');
+    } else {
+      bits.push('<span style="color:#f5a623">电池</span> <b>' + energyFmtV(p.battery) + '</b>');
+    }
+    bits.push('<span style="color:#3b82f6">光伏</span> <b>'
+              + energyFmtV(useF ? p.pv_f : p.pv) + '</b>');
     if (p.battery_min !== null && p.battery_max !== null
         && p.battery_max !== p.battery_min) {
       bits.push('<span style="opacity:.7">本桶 ' + Number(p.battery_min).toFixed(2)
                 + '~' + Number(p.battery_max).toFixed(2) + ' V</span>');
+    }
+    if (p.outliers) {
+      bits.push('<span style="opacity:.7">本桶剔除 ' + p.outliers + ' 个疑似跌落点</span>');
     }
     bits.push('<span style="opacity:.7">' + (p.n || 0) + ' 个采样</span>');
     tip.innerHTML = bits.join('<br>');
@@ -1997,6 +2060,16 @@
     }
     const iv = $('#energy-interval');
     if (iv) iv.addEventListener('change', () => loadEnergy());
+    const fs = $('#energy-filter');
+    if (fs) fs.addEventListener('change', () => {
+      energyState.filter = fs.value || 'hampel';
+      loadEnergy();
+    });
+    const sr = $('#energy-show-raw');
+    if (sr) sr.addEventListener('change', () => {
+      energyState.showRaw = !!sr.checked;
+      drawEnergyChart();
+    });
     const ex = $('#btn-energy-export');
     if (ex) {
       ex.addEventListener('click', () => {

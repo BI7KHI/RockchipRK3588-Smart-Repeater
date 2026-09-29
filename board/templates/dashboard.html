@@ -119,22 +119,30 @@
       <div class="card">
         <div class="card-title">电池电压（当日）</div>
         <div class="kv-list">
-          <div><span>最高</span><b id="energy-bat-max">-- V</b></div>
+          <div><span>静息估计</span><b id="energy-bat-rested" title="近 30 分钟剔除「发射中」采样后的中位数；播报与助手回答用的就是它">-- V</b></div>
+          <div><span>滤波后最低</span><b id="energy-bat-min-f">-- V</b></div>
+          <div><span>滤波后平均</span><b id="energy-bat-avg-f">-- V</b></div>
+          <div><span>滤波后峰谷差</span><b id="energy-bat-drop-f" title="去掉疑似单点毛刺后的峰谷差，代表真实趋势">-- V</b></div>
+          <div class="muted small" style="margin:6px 0 2px">原始采样（保留尖峰作证据）</div>
+          <div><span>原始最高</span><b id="energy-bat-max">-- V</b></div>
           <div><span>最高时刻</span><b id="energy-bat-max-ts">--</b></div>
-          <div><span>最低</span><b id="energy-bat-min">-- V</b></div>
+          <div><span>原始最低</span><b id="energy-bat-min">-- V</b></div>
           <div><span>最低时刻</span><b id="energy-bat-min-ts">--</b></div>
-          <div><span>平均</span><b id="energy-bat-avg">-- V</b></div>
-          <div><span>峰谷差</span><b id="energy-bat-drop" title="当日最高与最低之差，反映负载/光照波动">-- V</b></div>
+          <div><span>原始峰谷差</span><b id="energy-bat-drop" title="含单点毛刺的极差，用来发现异常而不是看趋势">-- V</b></div>
         </div>
       </div>
       <div class="card">
         <div class="card-title">光伏电压（当日）</div>
         <div class="kv-list">
-          <div><span>最高</span><b id="energy-pv-max">-- V</b></div>
+          <div><span>静息估计</span><b id="energy-pv-rested">-- V</b></div>
+          <div><span>滤波后最低</span><b id="energy-pv-min-f">-- V</b></div>
+          <div><span>滤波后平均</span><b id="energy-pv-avg-f">-- V</b></div>
+          <div class="muted small" style="margin:6px 0 2px">原始采样</div>
+          <div><span>原始最高</span><b id="energy-pv-max">-- V</b></div>
           <div><span>最高时刻</span><b id="energy-pv-max-ts">--</b></div>
-          <div><span>最低</span><b id="energy-pv-min">-- V</b></div>
+          <div><span>原始最低</span><b id="energy-pv-min">-- V</b></div>
           <div><span>最低时刻</span><b id="energy-pv-min-ts">--</b></div>
-          <div><span>平均</span><b id="energy-pv-avg">-- V</b></div>
+          <div><span>原始平均</span><b id="energy-pv-avg">-- V</b></div>
         </div>
       </div>
       <div class="card">
@@ -142,6 +150,9 @@
         <div class="kv-list">
           <div><span>采样点数</span><b id="energy-count">--</b></div>
           <div><span>采样间隔</span><b id="energy-sample-info">--</b></div>
+          <div><span>一轮采样</span><b id="energy-burst-info">--</b></div>
+          <div><span>滤波方式</span><b id="energy-filter-info">--</b></div>
+          <div><span>疑似跌落点</span><b id="energy-outliers">--</b></div>
           <div><span>保留天数</span><b id="energy-retention-info">--</b></div>
           <div><span>记录起止</span><b id="energy-span">--</b></div>
         </div>
@@ -154,6 +165,16 @@
         <div class="muted small">
           <span class="energy-dot" style="background:#f5a623"></span> 电池
           <span class="energy-dot" style="background:#3b82f6;margin-left:10px"></span> 光伏
+          <label class="checkline" style="margin-left:12px"
+                 title="勾上后把所有原始采样点画成浅色细线，用来核对滤波到底抹掉了什么">
+            <input type="checkbox" id="energy-show-raw"> 显示原始采样
+          </label>
+          <label class="inline-label" style="margin-left:10px">滤波</label>
+          <select id="energy-filter" style="width:auto">
+            <option value="hampel">Hampel（去离群，推荐）</option>
+            <option value="median">滑动中位数</option>
+            <option value="none">不滤波</option>
+          </select>
           <span style="margin-left:10px">鼠标悬停查看该处数值</span>
         </div>
       </div>
