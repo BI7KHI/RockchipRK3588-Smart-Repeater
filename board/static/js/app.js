@@ -1226,7 +1226,7 @@
     return n + ' B';
   }
 
-  function fillCameraForm(s, osd) {
+  function fillCameraForm(s, osd, bitrate) {
     cameraSettings = s || {};
     cameraOsd = osd || {};
     if ($('#camera-device')) $('#camera-device').value = s.device || '';
@@ -1238,6 +1238,11 @@
     if ($('#camera-loop-max-files')) $('#camera-loop-max-files').value = s.loop_max_files ?? 100;
     if ($('#camera-storage-max-mb')) $('#camera-storage-max-mb').value = s.storage_max_mb ?? 8192;
     if ($('#camera-rtmp-url')) $('#camera-rtmp-url').value = s.rtmp_url || '';
+    // 码率：输入框里是「页面设置」的值（可能为空 = 跟随环境变量），
+    // 但当前真正生效的值单独显示 —— 否则用户看到空框会以为码率没设。
+    if ($('#camera-bitrate')) $('#camera-bitrate').value = s.bitrate || '';
+    if ($('#camera-stream-bitrate')) $('#camera-stream-bitrate').value = s.stream_bitrate || '';
+    updateCameraBitrateInfo(bitrate);
     if ($('#camera-loop-autostart')) $('#camera-loop-autostart').checked = !!s.loop_autostart;
     if ($('#camera-osd-enabled')) $('#camera-osd-enabled').checked = !!osd.enabled;
     if ($('#camera-osd-text')) $('#camera-osd-text').value = osd.text || '';
@@ -1245,6 +1250,19 @@
     if ($('#camera-osd-position')) $('#camera-osd-position').value = osd.position || 'top-left';
     if ($('#camera-osd-fontsize')) $('#camera-osd-fontsize').value = osd.fontsize ?? 18;
     updateCameraOsd();
+  }
+
+  function updateCameraBitrateInfo(bitrate) {
+    const el = $('#cam-bitrate-info');
+    if (!el) return;
+    if (!bitrate) { el.textContent = '码率：暂无数据'; return; }
+    const srcText = (b) => (b.source === 'setting' ? '页面设置'
+      : (b.source === 'env' ? ('环境变量 ' + (b.env_key || 'RELAY_CAM_BITRATE'))
+        : '内置默认'));
+    const rec = bitrate.record || {};
+    const st = bitrate.stream || {};
+    el.textContent = `当前生效：录像 ${rec.value || '--'}（${srcText(rec)}） · `
+      + `推流 ${st.value || '--'}（${srcText(st)}）`;
   }
 
   function updateCameraOsd() {
@@ -1262,7 +1280,7 @@
     try {
       const data = await apiFetch('/api/camera/status');
       cameraServiceState = data.service || {};
-      fillCameraForm(data.settings || {}, data.osd || {});
+      fillCameraForm(data.settings || {}, data.osd || {}, data.bitrate || null);
       const devs = data.devices || [];
       if ($('#camera-devices')) {
         $('#camera-devices').textContent = devs.length ? (devs.slice(0, 8).join(', ') + (devs.length > 8 ? ` 等 ${devs.length} 个` : '')) : '未发现';
@@ -1430,6 +1448,9 @@
       storage_max_mb: parseInt($('#camera-storage-max-mb')?.value || '8192', 10),
       loop_autostart: !!$('#camera-loop-autostart')?.checked,
       rtmp_url: $('#camera-rtmp-url')?.value || '',
+      // 空串 = 跟随环境变量；后端会把 1.5M 这类写法归一化成 1500k
+      bitrate: $('#camera-bitrate')?.value?.trim() || '',
+      stream_bitrate: $('#camera-stream-bitrate')?.value?.trim() || '',
       osd: {
         enabled: !!$('#camera-osd-enabled')?.checked,
         text: $('#camera-osd-text')?.value || '',
@@ -1439,8 +1460,18 @@
       },
     };
     try {
-      await apiFetch('/api/camera/settings', { method: 'POST', body: JSON.stringify(body) });
-      showToast('摄像头设置已保存', 'success');
+      const res = await apiFetch('/api/camera/settings', { method: 'POST', body: JSON.stringify(body) });
+      const changed = (res && res.changed) || [];
+      const bit = changed.filter((k) => k === 'bitrate' || k === 'stream_bitrate');
+      if (bit.length) {
+        const which = bit.map((k) => (k === 'bitrate' ? '录像' : '推流')).join(' / ');
+        showToast(`${which}码率已保存，录像/推流正在按新码率重开`, 'success');
+      } else if (changed.length) {
+        showToast('摄像头设置已保存', 'success');
+      } else {
+        showToast('设置没有变化', 'success');
+      }
+      if (res && res.bitrate) updateCameraBitrateInfo(res.bitrate);
       loadCameraStatus();
       window.dispatchEvent(new CustomEvent('elf2:camera-settings-saved'));
     } catch (e) { showToast(e.message, 'error'); }

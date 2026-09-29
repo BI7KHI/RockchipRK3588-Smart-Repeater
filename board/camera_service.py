@@ -18,18 +18,88 @@ _ENCODER_CACHE = {}
 # 标定到与原先 libx264 -crf 30 相当的体积：实测 720p15 约 1.2~1.7 Mbit/s
 # （9~13 MB/分钟）。注意 -b:v 4M 会让每段涨到 ~30MB，存储直接翻三倍。
 _HW_BITRATE = (os.environ.get('RELAY_CAM_BITRATE') or '1000k').strip()
+_BITRATE_PROVIDER = None
+
+
+def set_bitrate_provider(fn):
+    """由 app 注册一个回调：给 kind（'record'/'stream'）返回页面里设的码率。
+
+    返回空串表示「页面没设」，这时回落到环境变量 / 内置默认。用回调而不是
+    `import app`，是为了避免 app ↔ camera_service 的循环依赖。
+    """
+    global _BITRATE_PROVIDER
+    _BITRATE_PROVIDER = fn
+
+
+def env_bitrate(kind='record'):
+    """环境变量层的码率：RELAY_CAM_<用途>_BITRATE > RELAY_CAM_BITRATE > 内置 1000k。"""
+    base = (os.environ.get('RELAY_CAM_BITRATE') or '1000k').strip()
+    key = 'RELAY_CAM_RECORD_BITRATE' if kind == 'record' else 'RELAY_CAM_STREAM_BITRATE'
+    return (os.environ.get(key) or base).strip()
+
+
+def setting_bitrate(kind='record'):
+    if _BITRATE_PROVIDER is None:
+        return ''
+    try:
+        return (_BITRATE_PROVIDER(kind) or '').strip()
+    except Exception:
+        return ''
 
 
 def _bitrate_for(allow_hevc):
-    """录像 / 推流各自取码率，缺省都回落到 RELAY_CAM_BITRATE。
+    """录像 / 推流各自取码率，优先级：页面设置 > 环境变量 > 内置默认。
 
     为什么要分开：录像切 H.265 后可以降到 1000k 省三分之一存储（实测同源对比：
     HEVC@1000k 体积是 H.264@1500k 的 66.7%，PSNR 还高 1.09dB）；但推流是给人实时看
-    的 H.264，不该被"录像省空间"顺手降质，所以给推流留一个独立的覆盖变量。
+    的 H.264，不该被"录像省空间"顺手降质。页面上的两个输入框直接决定这两个值。
     """
-    base = (os.environ.get('RELAY_CAM_BITRATE') or '1000k').strip()
-    key = 'RELAY_CAM_RECORD_BITRATE' if allow_hevc else 'RELAY_CAM_STREAM_BITRATE'
-    return (os.environ.get(key) or base).strip()
+    kind = 'record' if allow_hevc else 'stream'
+    return setting_bitrate(kind) or env_bitrate(kind)
+
+
+def bitrate_info():
+    """给页面看的码率现状：每路当前生效值 + 它来自哪儿（setting/env/default）。"""
+    base = (os.environ.get('RELAY_CAM_BITRATE') or '').strip()
+    out = {}
+    for kind in ('record', 'stream'):
+        key = ('RELAY_CAM_RECORD_BITRATE' if kind == 'record'
+               else 'RELAY_CAM_STREAM_BITRATE')
+        spec = (os.environ.get(key) or '').strip()
+        setting = setting_bitrate(kind)
+        if setting:
+            source = 'setting'
+        elif spec or base:
+            source = 'env'
+        else:
+            source = 'default'
+        out[kind] = {
+            'value': _bitrate_for(kind == 'record'),
+            'source': source,
+            'setting': setting,
+            'env': env_bitrate(kind),
+            'env_key': key if spec else ('RELAY_CAM_BITRATE' if base else ''),
+        }
+    return out
+
+
+def _refresh_bitrate(args, kind):
+    """把缓存的编码器参数里的 -b:v 换成**当前**码率。
+
+    为什么必须每次换：`pick_encoder` 每种用途只探测一次并把参数缓存下来，
+    `-b:v` 就冻在缓存里了 —— 用户在页面上改了码率、录像进程也重启了，
+    拿到的却还是旧码率。软件回退用的是 -crf，本来就没有 -b:v，这里不硬塞。
+    """
+    out, i, seen = [], 0, False
+    while i < len(args):
+        if args[i] == '-b:v':
+            out += ['-b:v', _bitrate_for(kind == 'record')]
+            seen = True
+            i += 2
+            continue
+        out.append(args[i])
+        i += 1
+    return out
 
 
 def _encoder_works(args):
@@ -59,6 +129,8 @@ def _encoder_candidates(allow_hevc):
       RELAY_CAM_BITRATE=xx  硬件编码码率的共同缺省值（录像/推流都认）
       RELAY_CAM_RECORD_BITRATE / RELAY_CAM_STREAM_BITRATE
                             分别覆盖录像 / 推流的码率，只动一边不牵连另一边
+    页面上「高级设置 → 录像码率 / 推流码率」填了值就优先于上面这些环境变量
+    （见 _bitrate_for 的优先级）；留空则完全按环境变量走。
     """
     forced = (os.environ.get('RELAY_CAM_ENCODER') or '').strip()
     if forced and allow_hevc:
@@ -105,9 +177,13 @@ def pick_encoder(kind='record'):
     环境变量：
       RELAY_CAM_HWENC=0     强制软件编码
       RELAY_CAM_ENCODER=xx  直接指定编码器（仅对录像生效），跳过探测与试编
+
+    注意：缓存的是**选哪个编码器**，`-b:v` 每次都用 `_refresh_bitrate` 换成当前值，
+    所以页面上改码率后只要录像进程重启就立刻生效，不必重启整个服务。
     """
     if kind in _ENCODER_CACHE:
-        return _ENCODER_CACHE[kind]
+        name, args = _ENCODER_CACHE[kind]
+        return name, _refresh_bitrate(args, kind)
     chosen = _SW_H264
     for name, args in _encoder_candidates(kind == 'record'):
         if name == _SW_H264[0] or _encoder_works(args):
@@ -116,7 +192,7 @@ def pick_encoder(kind='record'):
     _ENCODER_CACHE[kind] = chosen
     print('[CAM] %s编码器：%s' % ('录像' if kind == 'record' else '推流', chosen[0]),
           flush=True)
-    return chosen
+    return chosen[0], _refresh_bitrate(chosen[1], kind)
 
 
 def _is_mp4_output(output_args):

@@ -603,6 +603,9 @@ def _set_default_settings(db):
         'camera_storage_max_mb': '8192',
         'camera_loop_autostart': '1',
         'camera_rtmp_url': '',
+        # 码率：留空表示「跟随环境变量/内置默认」，页面上填了就以页面为准
+        'camera_bitrate': '',
+        'camera_stream_bitrate': '',
         # 气象 RS485 / Modbus RTU
         'weather_enabled': '1',
         'weather_port': '/dev/ttyS9',
@@ -5819,6 +5822,8 @@ def _camera_cfg():
         'storage_max_mb': int(float(get_setting('camera_storage_max_mb', '8192') or 8192)),
         'loop_autostart': bool_setting('camera_loop_autostart', True),
         'rtmp_url': get_setting('camera_rtmp_url', ''),
+        'bitrate': get_setting('camera_bitrate', ''),
+        'stream_bitrate': get_setting('camera_stream_bitrate', ''),
     }
 
 
@@ -5837,6 +5842,67 @@ def _camera_record_dir():
     d = Path(_camera_cfg()['record_dir'])
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# 页面上的码率：'' = 跟随环境变量；其余只认 500k / 1.5M 这类写法
+_CAMERA_BITRATE_RE = re.compile(r'^(\d{1,5})(?:\.(\d{1,3}))?\s*([kKmM])$')
+
+
+def _norm_camera_bitrate(value):
+    """码率归一化成统一的 `NNNNk`（ffmpeg 两种写法都认，但统一了才好比对"是否变了"）。
+
+    留空是有意义的：表示"这一路按环境变量走"，这样板端 unit 里设的
+    RELAY_CAM_RECORD_BITRATE / RELAY_CAM_BITRATE 仍然说了算。
+    """
+    s = str(value if value is not None else '').strip()
+    if not s:
+        return ''
+    m = _CAMERA_BITRATE_RE.match(s)
+    if not m:
+        raise ValueError('码率请写成 500k / 1.5M 这种形式，或留空跟随环境变量')
+    kbps = float('%s.%s' % (m.group(1), m.group(2) or '0'))
+    if m.group(3).lower() == 'm':
+        kbps *= 1000.0
+    kbps = int(round(kbps))
+    if not (100 <= kbps <= 20000):
+        raise ValueError('码率请落在 100k ~ 20M 之间')
+    return '%dk' % kbps
+
+
+def _camera_bitrate_setting(kind):
+    """注册给 camera_service 的回调：页面设置优先，空则由环境变量决定。"""
+    key = 'camera_bitrate' if kind == 'record' else 'camera_stream_bitrate'
+    try:
+        return get_setting(key, '') or ''
+    except Exception:
+        return ''
+
+
+camera_service.set_bitrate_provider(_camera_bitrate_setting)
+
+
+# 采集层参数：改这些必须重开采集进程（分辨率/帧率/设备/OSD 都烘在采集与滤镜里）
+CAMERA_CAPTURE_FIELDS = {'device', 'resolution', 'fps', 'record_dir', 'osd'}
+# 只需要重启录像/推流进程的参数（码率、分段策略、推流地址）
+CAMERA_RECORDER_FIELDS = {'bitrate', 'stream_bitrate', 'rtmp_url', 'loop_seconds',
+                          'loop_max_mb', 'loop_max_files', 'storage_max_mb',
+                          'loop_autostart'}
+
+
+def _camera_restart_plan(changed):
+    """保存设置后该怎么重启。抽成纯函数是为了能离线测。
+
+    'full'     采集层变了 → 整条采集+录像+推流重开（原行为）
+    'recorder' 只有码率/分段/推流地址变了 → 只停录像与推流再拉起，保留采集与预览；
+               走 FfmpegRecorder.stop() 的正常收尾路径，正在写的那段会封好 moov
+    'none'     什么都没变 → 什么都不动（白重启会把正在录的那一段截断）
+    """
+    changed = set(changed or ())
+    if changed & CAMERA_CAPTURE_FIELDS:
+        return 'full'
+    if changed & CAMERA_RECORDER_FIELDS:
+        return 'recorder'
+    return 'none'
 
 
 # ---------------------------------------------------------------------------
@@ -6248,6 +6314,7 @@ def api_camera_status():
         service=camera_service.camera_service.status(),
         settings=_camera_cfg(),
         osd=_camera_osd_cfg(),
+        bitrate=camera_service.bitrate_info(),
         recordings_dir=str(_camera_record_dir()),
         recordings=recs[:200],
         storage=_camera_storage_stats(recs),
@@ -6311,7 +6378,8 @@ def internal_camera_stream():
 @app.route('/api/camera/settings', methods=['GET'])
 @login_required
 def api_camera_settings_get():
-    return api_ok(settings=_camera_cfg(), osd=_camera_osd_cfg())
+    return api_ok(settings=_camera_cfg(), osd=_camera_osd_cfg(),
+                  bitrate=camera_service.bitrate_info())
 
 
 @app.route('/api/camera/settings', methods=['POST'])
@@ -6331,38 +6399,96 @@ def api_camera_settings_set():
         'storage_max_mb': 'camera_storage_max_mb',
         'rtmp_url': 'camera_rtmp_url',
     }
-    for k, sk in mapping.items():
-        if k in data:
-            set_setting(sk, data[k])
-    if 'loop_autostart' in data:
-        set_setting('camera_loop_autostart',
-                    '1' if data['loop_autostart'] in (True, '1', 'true', 'on', 1) else '0')
-    osd = data.get('osd') or {}
-    for k, sk in {
+    osd_map = {
         'enabled': 'camera_osd_enabled',
         'text': 'camera_osd_text',
         'show_time': 'camera_osd_show_time',
         'position': 'camera_osd_position',
         'fontsize': 'camera_osd_fontsize',
         'color': 'camera_osd_color',
-    }.items():
-        if k in osd:
-            set_setting(sk, '1' if osd[k] is True else ('0' if osd[k] is False else osd[k]))
+    }
+
+    def _store_str(k, v):
+        """写库前的归一化（与下面真正写入时保持一致，否则"变了没有"会误判）。"""
+        if k in ('fps', 'quality', 'loop_seconds', 'loop_max_mb', 'loop_max_files',
+                 'storage_max_mb'):
+            try:
+                return str(int(float(v)))
+            except Exception:
+                return str(v)
+        return str(v if v is not None else '')
+
+    def _osd_str(v):
+        return '1' if v is True else ('0' if v is False else str(v))
+
+    # ---- 先算「到底变了什么」，再写库：没变就别重启 ----
+    changed = set()
+    for k, sk in mapping.items():
+        if k in data and str(get_setting(sk, '') or '') != _store_str(k, data[k]):
+            changed.add(k)
+    for k in ('bitrate', 'stream_bitrate'):
+        if k in data:
+            try:
+                newv = _norm_camera_bitrate(data[k])
+            except ValueError as exc:
+                return api_err(str(exc), 400)
+            if str(get_setting('camera_%s' % k, '') or '') != newv:
+                changed.add(k)
+    osd_in = data.get('osd') or {}
+    for k, sk in osd_map.items():
+        if k in osd_in and str(get_setting(sk, '') or '') != _osd_str(osd_in[k]):
+            changed.add('osd')
+
+    # ---- 落库 ----
+    for k, sk in mapping.items():
+        if k in data:
+            set_setting(sk, data[k])
+    if 'loop_autostart' in data:
+        set_setting('camera_loop_autostart',
+                    '1' if data['loop_autostart'] in (True, '1', 'true', 'on', 1) else '0')
+    for k in ('bitrate', 'stream_bitrate'):
+        if k in data:
+            set_setting('camera_%s' % k, _norm_camera_bitrate(data[k]))
+    for k, sk in osd_map.items():
+        if k in osd_in:
+            set_setting(sk, _osd_str(osd_in[k]))
+
     svc = camera_service.camera_service
-    # 摄像头采集参数变化时重启采集
-    if svc.status()['running']:
+    plan = _camera_restart_plan(changed)
+    if plan == 'full' and svc.status()['running']:
         svc.stop_recording()
         svc.stop_rtmp()
         svc.stop_loop_cleaner()
         svc.stop()
         camera_service.camera_service.start(_camera_cfg())
+    elif plan == 'recorder' and svc.status()['running']:
+        # 只重启录像/推流：采集与实时预览不动，且走正常收尾路径（旧分段不会变成没 moov 的半截）
+        was_rtmp = bool(svc.status().get('rtmp'))
+        svc.stop_recording()
+        if was_rtmp:
+            svc.stop_rtmp()
+        if bool_setting('camera_loop_autostart', True):
+            try:
+                _cam_loop_ensure('settings-bitrate')
+            except Exception:
+                pass
+        if was_rtmp:
+            url = get_setting('camera_rtmp_url', '')
+            if url:
+                try:
+                    svc.start_rtmp(_camera_cfg(), url,
+                                   camera_service.osd_filter(_camera_osd_cfg()))
+                except Exception:
+                    pass
     # 改完参数后立刻恢复循环录像（原来要等 30s 自愈线程，会丢一段录像）
-    if bool_setting('camera_loop_autostart', True):
+    if plan == 'full' and bool_setting('camera_loop_autostart', True):
         try:
             _cam_loop_ensure('settings-saved')
         except Exception:
             pass
-    return api_ok(settings=_camera_cfg(), osd=_camera_osd_cfg())
+    return api_ok(settings=_camera_cfg(), osd=_camera_osd_cfg(),
+                  bitrate=camera_service.bitrate_info(), changed=sorted(changed),
+                  restart=plan)
 
 
 @app.route('/api/camera/snapshot', methods=['POST'])

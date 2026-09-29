@@ -105,7 +105,56 @@ try:
     check('录像候选里 H.265 排在 H.264 前面',
           [n for n, _ in rec][:2] == ['hevc_rkmpp', 'h264_v4l2m2m'] or
           rec[0][0].startswith('hevc'), [n for n, _ in rec])
+
+    print('\n=== 6. 页面设置优先于环境变量（回调注册） ===')
+    camera_service._ENCODER_CACHE.clear()
+    page = {'record': '800k', 'stream': '2500k'}
+    camera_service.set_bitrate_provider(lambda kind: page.get(kind, ''))
+    setenv(RELAY_CAM_BITRATE='1500k', RELAY_CAM_RECORD_BITRATE='1000k',
+           RELAY_CAM_STREAM_BITRATE=None)
+    rec = camera_service._encoder_candidates(True)
+    st = camera_service._encoder_candidates(False)
+    check('页面设了录像码率 → 覆盖环境变量（800k）',
+          bitrate_of(rec, 'hevc_rkmpp') == '800k', rec)
+    check('对照组：推流按页面设置 2500k（不是环境变量的 1500k）',
+          bitrate_of(st, 'h264_rkmpp') == '2500k', st)
+
+    print('\n=== 7. 页面留空 → 回落到环境变量 ===')
+    page['record'] = ''
+    page['stream'] = ''
+    rec = camera_service._encoder_candidates(True)
+    st = camera_service._encoder_candidates(False)
+    check('录像回落 RELAY_CAM_RECORD_BITRATE=1000k',
+          bitrate_of(rec, 'hevc_rkmpp') == '1000k', rec)
+    check('推流回落公共 RELAY_CAM_BITRATE=1500k',
+          bitrate_of(st, 'h264_rkmpp') == '1500k', st)
+
+    print('\n=== 8. 编码器缓存里冻的是"选哪个"，码率必须每次刷新 ===')
+    # 这是本特性的关键坑：pick_encoder 每种用途只探测一次并缓存参数，
+    # 若把 -b:v 一起冻住，用户改了码率、录像也重启了，跑的还是旧码率。
+    camera_service._ENCODER_CACHE.clear()
+    page['record'] = '1000k'
+    name1, args1 = camera_service.pick_encoder('record')
+    page['record'] = '600k'
+    name2, args2 = camera_service.pick_encoder('record')
+    check('两次拿到同一个编码器（缓存确实命中）', name1 == name2, (name1, name2))
+    check('第一次用 1000k', args1[args1.index('-b:v') + 1] == '1000k', args1)
+    check('缓存命中时也换成新的 600k',
+          args2[args2.index('-b:v') + 1] == '600k', args2)
+    check('码率信息接口报的是页面设置', 
+          camera_service.bitrate_info()['record']['source'] == 'setting',
+          camera_service.bitrate_info())
+
+    print('\n=== 9. 回调抛异常也不能把录像带崩（退回环境变量） ===')
+    def _boom(kind):
+        raise RuntimeError('模拟设置读取出错')
+    camera_service.set_bitrate_provider(_boom)
+    name3, args3 = camera_service.pick_encoder('record')
+    check('回调异常时仍能拿到编码器', bool(name3), name3)
+    check('回调异常时退回环境变量 1000k',
+          args3[args3.index('-b:v') + 1] == '1000k', args3)
 finally:
+    camera_service.set_bitrate_provider(None)
     setenv(**SAVED)
 
 print('\n%d 通过 / %d 失败' % (OK[0], len(FAIL)))

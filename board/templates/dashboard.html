@@ -556,6 +556,27 @@
       <div><label>存储容量上限 (MB)</label><input id="camera-storage-max-mb" type="number" min="0" placeholder="0=按磁盘容量"></div>
       <div><label>循环分段（秒）</label><input id="camera-loop-seconds" type="number" min="5"></div>
     </div>
+    <div class="cal-row">
+      <div>
+        <label>录像码率</label>
+        <input id="camera-bitrate" list="cam-bitrate-presets" placeholder="留空=跟随环境变量（当前 1000k）">
+      </div>
+      <div>
+        <label>推流码率</label>
+        <input id="camera-stream-bitrate" list="cam-bitrate-presets" placeholder="留空=跟随环境变量（当前 1500k）">
+      </div>
+    </div>
+    <datalist id="cam-bitrate-presets">
+      <option value="500k"></option>
+      <option value="800k"></option>
+      <option value="1000k"></option>
+      <option value="1200k"></option>
+      <option value="1500k"></option>
+      <option value="2000k"></option>
+      <option value="3000k"></option>
+    </datalist>
+    <div class="muted small" id="cam-bitrate-info">码率：读取中…</div>
+    <p class="muted small">两路码率互不影响：录像降码率只省存储，推流是给人实时看的。改完点下面的「保存摄像头设置」即时生效——录像不会中断很久，当前分段会正常收尾后按新码率重开。</p>
     <div class="row gap mt">
       <label class="checkline"><input type="checkbox" id="camera-loop-autostart"> 开机自动循环录像</label>
       <span class="muted small">关闭后不自动拉起；页面手动「停止循环录像」也会暂停自愈，重启后按此开关恢复</span>
