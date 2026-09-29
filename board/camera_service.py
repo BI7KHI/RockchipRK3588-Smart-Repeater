@@ -12,12 +12,12 @@ from pathlib import Path
 
 
 _SW_H264 = ('libx264', ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '30'])
-_H264_ENCODER_CACHE = {}
+_ENCODER_CACHE = {}
 
 # 硬件编码器（rkmpp / v4l2m2m）不支持 -crf，只能走码率控制。
 # 标定到与原先 libx264 -crf 30 相当的体积：实测 720p15 约 1.2~1.7 Mbit/s
 # （9~13 MB/分钟）。注意 -b:v 4M 会让每段涨到 ~30MB，存储直接翻三倍。
-_HW_BITRATE = (os.environ.get('RELAY_CAM_BITRATE') or '1500k').strip()
+_HW_BITRATE = (os.environ.get('RELAY_CAM_BITRATE') or '1000k').strip()
 
 
 def _encoder_works(args):
@@ -33,10 +33,20 @@ def _encoder_works(args):
         return False
 
 
-def _h264_candidates():
-    """按优先级给出候选编码器。"""
+def _encoder_candidates(allow_hevc):
+    """按用途给出候选编码器，顺序即优先级。
+
+    allow_hevc=True（录像）：H.265 硬件 → H.264 硬件 → 软件 H.264。
+      录像文件只落本地，H.265 同码率画质更好/同画质更省存储。
+    allow_hevc=False（推流）：H.264 硬件 → 软件 H.264，**绝不碰 H.265**。
+      远端 RTMP 服务器/播放端不一定解得了 H.265，推流必须留在 H.264。
+
+    环境变量（不新增，沿用既有语义）：
+      RELAY_CAM_HWENC=0     强制软件编码（录像与推流都降级到 libx264）
+      RELAY_CAM_ENCODER=xx  仅对录像生效，直接指定编码器，跳过探测与试编
+    """
     forced = (os.environ.get('RELAY_CAM_ENCODER') or '').strip()
-    if forced:
+    if forced and allow_hevc:
         return [(forced, ['-c:v', forced])]
     if (os.environ.get('RELAY_CAM_HWENC') or '').strip() == '0':
         return [_SW_H264]
@@ -48,44 +58,77 @@ def _h264_candidates():
     except Exception:
         listing = ''
     cands = []
+    # 录像优先 H.265 硬件编码器
+    if allow_hevc:
+        if 'hevc_rkmpp' in listing:
+            cands.append(('hevc_rkmpp', ['-c:v', 'hevc_rkmpp', '-b:v', _HW_BITRATE]))
+        if 'hevc_v4l2m2m' in listing:
+            cands.append(('hevc_v4l2m2m', ['-c:v', 'hevc_v4l2m2m', '-b:v', _HW_BITRATE]))
+    # 其次 H.264 硬件编码器
     if 'h264_rkmpp' in listing:
         cands.append(('h264_rkmpp', ['-c:v', 'h264_rkmpp', '-b:v', _HW_BITRATE]))
     if 'h264_v4l2m2m' in listing:
         cands.append(('h264_v4l2m2m', ['-c:v', 'h264_v4l2m2m', '-b:v', _HW_BITRATE]))
+    # 软件回退（始终为 H.264）
     cands.append(_SW_H264)
     return cands
 
 
-def pick_h264_encoder():
-    """挑一个可用的 H.264 编码器，返回 (名字, ffmpeg 参数)。只探测一次。
 
-    RK3588 有硬件 H.264 编码器；用软件 libx264 会**持续吃掉约 0.8 个核**
+def pick_encoder(kind='record'):
+    """按用途挑一个可用编码器，返回 (名字, ffmpeg 参数)。每种用途只探测一次。
+
+    kind='record'：录像，优先 H.265 硬件（H.265 → H.264 硬件 → 软件 H.264）。
+    kind='stream'：推流，只用 H.264（H.264 硬件 → 软件 H.264），保证远端兼容。
+
+    RK3588 有硬件 H.264/H.265 编码器；用软件 libx264 会**持续吃掉约 0.8 个核**
     （实测 1280x720@15fps 常驻编码）。但各版本 BSP 的 rkmpp 参数不一致，
     所以这里先**试编一帧**再决定：探测到但实际不能用的话，
-    绝不拿用户的录像去冒险，直接退回 libx264。
+    绝不拿用户的录像/推流去冒险，直接退回 libx264。
 
     环境变量：
       RELAY_CAM_HWENC=0     强制软件编码
-      RELAY_CAM_ENCODER=xx  直接指定编码器，跳过探测与试编
+      RELAY_CAM_ENCODER=xx  直接指定编码器（仅对录像生效），跳过探测与试编
     """
-    if 'enc' in _H264_ENCODER_CACHE:
-        return _H264_ENCODER_CACHE['enc']
+    if kind in _ENCODER_CACHE:
+        return _ENCODER_CACHE[kind]
     chosen = _SW_H264
-    for name, args in _h264_candidates():
+    for name, args in _encoder_candidates(kind == 'record'):
         if name == _SW_H264[0] or _encoder_works(args):
             chosen = (name, args)
             break
-    _H264_ENCODER_CACHE['enc'] = chosen
-    print('[CAM] H.264 编码器：%s' % chosen[0], flush=True)
+    _ENCODER_CACHE[kind] = chosen
+    print('[CAM] %s编码器：%s' % ('录像' if kind == 'record' else '推流', chosen[0]),
+          flush=True)
     return chosen
+
+
+def _is_mp4_output(output_args):
+    """输出是否为 mp4（含 -f mp4、-f segment，或 .mp4 文件名/模板）。"""
+    args = [str(a) for a in output_args]
+    if '-f' in args:
+        i = args.index('-f')
+        muxer = args[i + 1] if i + 1 < len(args) else ''
+        if muxer in ('flv', 'matroska', 'mpegts'):
+            return False
+        if muxer == 'mp4':
+            return True
+    return any(a.lower().endswith('.mp4') for a in args)
 
 
 class FfmpegRecorder:
     """从摄像头服务的 JPEG 帧队列读取，交给 ffmpeg 转码/封装/推流。"""
 
-    def __init__(self, camera, output_args, osd_filter='', label='rec'):
+    def __init__(self, camera, output_args, osd_filter='', label='rec', kind='stream'):
+        """kind 决定编码器：'record' 允许 H.265，'stream' 只用 H.264。
+
+        默认取保守的 'stream'——忘记传参时宁可用 H.264，
+        也不要把 H.265 推给解不了的远端。录像调用点显式传 'record'。
+        """
         self.camera = camera
         self.label = label
+        self.kind = kind
+        self.encoder, enc_args = pick_encoder(kind)
         self.queue = queue.Queue(maxsize=80)
         self.active = True
         self.error = ''
@@ -95,9 +138,14 @@ class FfmpegRecorder:
         ]
         if osd_filter:
             cmd += ['-vf', osd_filter]
-        cmd += pick_h264_encoder()[1] + [
+        cmd += list(enc_args) + [
             '-pix_fmt', 'yuv420p',
-        ] + output_args
+        ]
+        # ffmpeg 写 HEVC 进 mp4 默认用 hev1 标签，Apple/QuickTime 与部分浏览器
+        # 只认 hvc1；显式打 hvc1 以兼顾浏览器回放与下载后本地播放。
+        if 'hevc' in self.encoder and _is_mp4_output(output_args):
+            cmd += ['-tag:v', 'hvc1']
+        cmd += list(output_args)
         self.proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE, bufsize=0)
@@ -341,7 +389,7 @@ class CameraService:
         with self.lock:
             if self.recorder:
                 return False, '已有录像任务运行中'
-            rec = FfmpegRecorder(self, output_args, osd_filter, label)
+            rec = FfmpegRecorder(self, output_args, osd_filter, label, kind='record')
             self.recorder = rec
         return True, 'recording'
 
@@ -363,7 +411,7 @@ class CameraService:
             if self.rtmp:
                 return False, 'RTMP 推流已运行'
             self.rtmp = FfmpegRecorder(
-                self, ['-f', 'flv', url], osd_filter, 'rtmp')
+                self, ['-f', 'flv', url], osd_filter, 'rtmp', kind='stream')
         return True, 'rtmp started'
 
     def stop_rtmp(self):
