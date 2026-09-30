@@ -1690,7 +1690,8 @@ def api_settings_get():
         'vlog_callsign_whitelist', 'vlog_callsign_max_dist', 'vlog_tx_asr',
         'aprs_enabled', 'aprs_mycall', 'aprs_ssid', 'aprs_dest', 'aprs_path',
         'aprs_lat', 'aprs_lon', 'aprs_alt_m', 'aprs_pos_source', 'aprs_gps_port',
-        'aprs_gps_baud', 'aprs_symbol_table', 'aprs_symbol_code', 'aprs_comment',
+        'aprs_gps_baud', 'aprs_gnss_max_hacc_m', 'aprs_symbol_table', 'aprs_symbol_code',
+        'aprs_comment',
         'aprs_pos_ambiguity', 'aprs_channel',
         'aprs_beacon_enabled', 'aprs_beacon_interval',
         'aprs_weather_enabled', 'aprs_weather_interval',
@@ -1872,7 +1873,10 @@ def api_settings_set():
         'aprs_lon': lambda v: str(round(max(-180.0, min(180.0, float(v))), 6)),
         'aprs_alt_m': lambda v: ('' if str(v).strip() == ''
             else str(round(max(-500.0, min(9000.0, float(v))), 1))),
-        'aprs_pos_source': lambda v: v if v in ('manual', 'nmea') else 'manual',
+        'aprs_pos_source': lambda v: v if v in ('manual', 'gnss', 'nmea', 'ubx') else 'manual',
+        # GNSS 水平精度门限（米）：0=不限。超门限的位置不用于信标——发出去的坐标
+        # 就是别人眼里的"你在哪"，宁可不发也别发差的。
+        'aprs_gnss_max_hacc_m': lambda v: str(max(0, min(10000, int(float(v or 0))))),
         'aprs_gps_port': lambda v: str(v).strip()[:60],
         'aprs_gps_baud': lambda v: str(max(1200, min(921600, int(float(v))))),
         'aprs_symbol_table': lambda v: v if v in ('/', '\\') else '/',
@@ -3588,7 +3592,12 @@ def api_aprs_pos():
             ('aprs_mycall', lambda v: (''.join(c for c in str(v).upper()
                                                if c.isalnum()))[:6]),
             ('aprs_ssid', lambda v: str(max(0, min(15, int(float(v)))))),
-            ('aprs_comment', lambda v: str(v).strip()[:60])):
+            ('aprs_comment', lambda v: str(v).strip()[:60]),
+            ('aprs_pos_source', lambda v: (v if v in ('manual', 'gnss', 'nmea', 'ubx')
+                                           else 'manual')),
+            ('aprs_gps_port', lambda v: str(v).strip()[:60]),
+            ('aprs_gps_baud', lambda v: str(max(1200, min(921600, int(float(v)))))),
+            ('aprs_gnss_max_hacc_m', lambda v: str(max(0, min(10000, int(float(v or 0))))))):
         if k in data:
             try:
                 set_setting(k, cast(data[k]))
@@ -3598,7 +3607,24 @@ def api_aprs_pos():
     if saved:
         aprs_service_instance.invalidate()
         audit('aprs_pos', json.dumps(saved, ensure_ascii=False))
-    return api_ok(saved=saved, position=aprs_service_instance.position.get())
+    # 保存这条请求**不读串口**（cached_only）：要新鲜读数由页面另行调 /api/aprs/gnss，
+    # 免得一次设置保存被 2.5 秒的串口读阻塞（这条路上实测被上游重置过一次连接）。
+    return api_ok(saved=saved, position=aprs_service_instance.position.get(cached_only=True),
+                  position_stat=aprs_service_instance.position.status())
+
+
+@app.route('/api/aprs/gnss')
+@login_required
+def api_aprs_gnss():
+    """立刻读一次 GNSS（页面「读取一次」/排查用）。
+
+    与状态轮询分开是刻意的：`stats_payload()` 会被频繁调用，真读串口要 2.5 秒，
+    所以那条路带 5 秒缓存；要一份"就是现在"的读数就走这里（force=True）。
+    """
+    import gnss_service
+    p = aprs_service_instance.position.get(force=True)
+    return api_ok(position=p, position_stat=aprs_service_instance.position.status(),
+                  gnss=gnss_service.READER.status())
 
 
 @app.route('/api/aprs/export')
