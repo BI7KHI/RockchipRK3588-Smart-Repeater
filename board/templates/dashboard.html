@@ -222,7 +222,8 @@
         <input type="file" id="wav-file" accept="audio/wav,.wav" style="flex:1">
         <button class="btn ghost" id="btn-upload-wav">上传 WAV 测试</button>
       </div>
-      <p class="muted small">录音完成后自动发送到开发板 3.5mm AUX 输出。通过局域网 HTTP 访问时可用“上传 WAV 测试”验证 AUX 输出。</p>
+      <label class="checkline" title="勾选（默认）：先拉 PTT 再出声，音频经 3.5mm AUX 由电台发射；取消：只送 AUX 不 key 电台，用于不发射的台面试听/校准"><input type="checkbox" id="record-tx-ptt" checked> 发射（拉 PTT）</label>
+      <p class="muted small">这三个动作默认<b>先拉 PTT 再出声</b>（前导 0.3s 等电台起键，避免首字被吃掉），音频送开发板 3.5mm AUX 后由电台发射；取消上面的勾选则只本地放音、不 key 电台。</p>
       <div class="meter"><span id="record-meter" style="width:0%"></span></div>
     </div>
   </div>

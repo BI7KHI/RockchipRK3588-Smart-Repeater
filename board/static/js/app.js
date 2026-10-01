@@ -1060,8 +1060,10 @@
       const blob = encodeWav(samples, recordSampleRate);
       const fd = new FormData();
       fd.append('audio', blob, 'web_intercom.wav');
+      if (!recordTxEnabled()) fd.append('dry', '1');
       const data = await apiFetch('/api/intercom/upload', { method: 'POST', body: fd });
-      showToast(`录音已上传：${data.duration_ms} ms，${(data.size / 1024).toFixed(1)} KB`, 'success');
+      showToast(`${recordTxToast(data, '录音')}（${data.duration_ms} ms，${(data.size / 1024).toFixed(1)} KB）`,
+                recordTxOk(data) ? 'success' : 'error');
       $('#record-status').textContent = '录音已上传';
     } catch (e) {
       showToast('录音上传失败：' + e.message, 'error');
@@ -1205,10 +1207,30 @@
     if (info) info.textContent = `本次推送 ${(pushBytes / 1024).toFixed(0)} KB；松开按钮或 5 秒无数据，板端会自动释放 PTT。`;
   }
 
+  // 对讲控制的三个播放动作（测试音 / 录音上传 / 上传 WAV）默认**发射**：
+  // 勾选「发射（拉 PTT）」时板端先拉 PTT 再出声；取消勾选则以 dry=1 只送 AUX 本地放音。
+  function recordTxEnabled() {
+    const el = $('#record-tx-ptt');
+    return el ? !!el.checked : true;
+  }
+
+  function recordTxToast(data, what) {
+    const ptt = (data && data.ptt) || {};
+    if (data && data.tx === false) return what + '已送到 AUX（未发射）';
+    if (ptt.high) return what + '已发射：PTT 已拉高（GPIO ' + ptt.gpio + '）';
+    return what + '已送 AUX，但 PTT 未拉高' + (ptt.error ? ('：' + ptt.error) : '');
+  }
+
+  function recordTxOk(data) {
+    return !!(data && ((data.ptt && data.ptt.high) || data.tx === false));
+  }
+
   async function playTestTone() {
     try {
-      const data = await apiFetch('/api/intercom/test-tone', { method: 'POST', body: '{}' });
-      showToast('测试音已发送到 ' + data.device, 'success');
+      const data = await apiFetch('/api/intercom/test-tone', {
+        method: 'POST', body: JSON.stringify({ dry: !recordTxEnabled() }),
+      });
+      showToast(recordTxToast(data, '测试音'), recordTxOk(data) ? 'success' : 'error');
     } catch (e) { showToast(e.message, 'error'); }
   }
 
@@ -2696,9 +2718,11 @@
       if (!file) return showToast('请先选择一个 WAV 文件', 'error');
       const fd = new FormData();
       fd.append('audio', file, file.name || 'upload.wav');
+      if (!recordTxEnabled()) fd.append('dry', '1');
       try {
         const data = await apiFetch('/api/intercom/upload', { method: 'POST', body: fd });
-        showToast(`WAV 已上传并发送到 AUX：${data.duration_ms} ms`, 'success');
+        showToast(`${recordTxToast(data, 'WAV')}（${data.duration_ms} ms）`,
+                  recordTxOk(data) ? 'success' : 'error');
       } catch (e) { showToast(e.message, 'error'); }
     });
     $('#users-table')?.addEventListener('click', async (e) => {

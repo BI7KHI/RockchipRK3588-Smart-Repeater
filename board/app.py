@@ -4212,12 +4212,20 @@ def _play_file_locked(path):
             return None
 
 
-def play_audio_async(path, ptt=False):
+def play_audio_async(path, ptt=False, lead=0.0):
+    """异步播放一段音频；ptt=True 时先把 PTT 拉高、播完再松。
+
+    lead：拉高 PTT 之后、出声之前的等待秒数，留给「电台起键 + 功放稳定」。
+    默认 0 保持既有调用者行为不变；网页对讲的发射路径传 INTERCOM_PTT_LEAD，
+    否则首字会被吃在这段延迟里（同一个问题 aprs_service 用前导静音解决）。
+    """
     if ptt:
         _ptt_retain()
 
     def _run():
         try:
+            if ptt and lead > 0:
+                time.sleep(lead)
             proc = _play_file_locked(path)
             if proc:
                 try:
@@ -4907,6 +4915,51 @@ def _mic_stream_generator(q):
         _mic_stream_unregister(q)
 
 
+# ---------------------------------------------------------------------------
+# 网页对讲「录音后上传」的三条播放路径：默认**发射**（拉 PTT）
+#
+# 为什么要有这段：3.5mm AUX 输出接的是电台 MIC 口 —— 不拉 PTT 时电台根本不 key，
+# 音频只是灌进 MIC 口，从电台上完全无法验证。原先 upload / play / test-tone 三条
+# 都只调 `play_audio_async(path)`，而该函数 ptt 默认 False，于是整条发射链没接上，
+# 现场现象就是「上传后播放测试音，电台毫无反应」。
+#
+# 保留 dry 开关：只把音频送到 AUX、不 key 电台，用于台面校准/试听（默认不启用）。
+# PTT 前导：先拉 PTT、等 INTERCOM_PTT_LEAD 再出声，否则首字会被「电台起键 + 功放稳定」
+# 这段时间吃掉（同一个问题 aprs_service 用 0.30s 前导静音解决，这里用等待等效）。
+# ---------------------------------------------------------------------------
+INTERCOM_PTT_LEAD = float(os.environ.get('RELAY_INTERCOM_PTT_LEAD', '0.3') or 0.3)
+_DRY_TRUE = ('1', 'true', 'yes', 'on')
+
+
+def _intercom_want_tx(extra=None):
+    """True = 发射（拉 PTT）；显式 dry=1/true/yes/on 时返回 False（只走本地音频通路）。"""
+    for src in (extra, request.args):
+        try:
+            if src and str(src.get('dry', '')).strip().lower() in _DRY_TRUE:
+                return False
+        except Exception:
+            pass
+    return True
+
+
+def _intercom_play(path, tx=True):
+    """按 tx 决定发射还是本地试听，返回 (实际是否发射, PTT 快照)。
+
+    `_ptt_retain()` 在播放线程启动前就已同步执行，所以这里取到的 ptt_status()
+    已经能反映"PTT 到底拉起来没有"，调用方可以据此如实回报（而不是只说"已发送"）。
+    """
+    if tx:
+        try:
+            play_audio_async(path, ptt=True, lead=INTERCOM_PTT_LEAD)
+        except Exception as e:
+            print('[INTERCOM] 发射播放启动失败，退回本地播放：%s: %s' % (type(e).__name__, e), flush=True)
+            play_audio_async(path)
+            tx = False
+    else:
+        play_audio_async(path)
+    return tx, ptt_status()
+
+
 def make_test_tone(path, seconds=1.2, freq=880.0, rate=16000):
     n = int(seconds * rate)
     with wave.open(str(path), 'wb') as w:
@@ -4957,9 +5010,11 @@ def api_intercom_upload():
             (now_iso(), session.get('username'), filename, duration_ms, size, 'web-intercom'))
     audit('intercom_upload', f'{filename} {size} bytes {duration_ms} ms')
     auto_play = bool_setting('record_auto_play', True)
+    tx, ptt = False, ptt_status()
     if auto_play:
-        play_audio_async(path)
-    return api_ok(filename=filename, size=size, duration_ms=duration_ms, auto_play=auto_play)
+        tx, ptt = _intercom_play(path, tx=_intercom_want_tx(request.form))
+    return api_ok(filename=filename, size=size, duration_ms=duration_ms, auto_play=auto_play,
+                  tx=tx, ptt=ptt)
 
 
 @app.route('/api/intercom/recordings')
@@ -4980,8 +5035,8 @@ def api_intercom_play(rid):
     path = RECORDINGS_DIR / secure_filename(row['filename'])
     if not path.exists():
         return api_err('录音文件已丢失', 404)
-    play_audio_async(path)
-    return api_ok(playing=row['filename'])
+    tx, ptt = _intercom_play(path, tx=_intercom_want_tx(request.get_json(silent=True) or {}))
+    return api_ok(playing=row['filename'], tx=tx, ptt=ptt)
 
 
 @app.route('/api/intercom/test-tone', methods=['POST'])
@@ -4989,8 +5044,9 @@ def api_intercom_play(rid):
 def api_intercom_test_tone():
     path = RECORDINGS_DIR / '_test_tone.wav'
     make_test_tone(path)
-    play_audio_async(path)
-    return api_ok(playing='_test_tone.wav', device=AUDIO_DEVICE)
+    tx, ptt = _intercom_play(path, tx=_intercom_want_tx(request.get_json(silent=True) or {}))
+    return api_ok(playing='_test_tone.wav', device=AUDIO_DEVICE, tx=tx, ptt=ptt,
+                  lead_ms=int(INTERCOM_PTT_LEAD * 1000))
 
 
 @app.route('/api/intercom/status')
